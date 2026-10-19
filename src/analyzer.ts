@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import ts from "typescript";
 import { parseLcov, type LcovFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
+import { analyzeFileGitFreshness } from "./git-freshness.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -209,18 +210,40 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     const lineStates: Record<number, EvidenceState> = {};
     const regions: FileSymbolRegion[] = [];
 
+    const associatedTestFiles = new Map<string, string[]>();
     for (const span of effectiveSpans) {
+      const ev = lookupFunctionAstEvidence(astResult, relPath, span.name);
+      if (ev && ev.testFiles.length > 0) {
+        associatedTestFiles.set(span.name, ev.testFiles);
+      }
+    }
+
+    const gitFreshness = await analyzeFileGitFreshness({
+      rootDir,
+      relPath,
+      currentSourceText: sourceText,
+      functionNames: effectiveSpans.map((s) => s.name),
+      associatedTestFiles,
+    });
+    const fileChurn90d = gitFreshness.churn90d;
+
+    for (const span of effectiveSpans) {
+      const fnRecord = record.functions.find((f) => f.name === span.name);
+      const lineDelta = fnRecord ? span.startLine - fnRecord.line : 0;
+      const lcovStartLine = span.startLine - lineDelta;
+      const lcovEndLine = span.endLine - lineDelta;
+
       const spanLines: Array<[number, number]> = [];
       for (const [ln, hits] of record.lines.entries()) {
-        if (ln >= span.startLine && ln <= span.endLine) {
-          spanLines.push([ln, hits]);
+        if (ln >= lcovStartLine && ln <= lcovEndLine) {
+          spanLines.push([ln + lineDelta, hits]);
         }
       }
 
       if (spanLines.length === 0) continue;
 
       const spanBranches = record.branches.filter(
-        (b) => b.line >= span.startLine && b.line <= span.endLine,
+        (b) => b.line >= lcovStartLine && b.line <= lcovEndLine,
       );
       const spanBranchHit = spanBranches.filter((b) => b.taken > 0).length;
       const spanBranchPct = roundPct(spanBranchHit, spanBranches.length);
@@ -228,7 +251,6 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         spanBranches.length > 0 && spanBranchHit < spanBranches.length;
 
       const hitsCount = spanLines.filter(([, h]) => h > 0).length;
-      const fnRecord = record.functions.find((f) => f.name === span.name);
       const lcovFnHits = fnRecord ? fnRecord.hits : hitsCount > 0 ? 1 : 0;
 
       const astEvidence = lookupFunctionAstEvidence(astResult, relPath, span.name);
@@ -251,11 +273,17 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         totalPseudoTestedMethods++;
       }
 
+      const fnFreshness = gitFreshness.functions.get(span.name);
+
       let regionState: EvidenceState;
       if (hitsCount === 0) {
         regionState = "fog";
+      } else if (fnFreshness?.isFogReturned) {
+        regionState = "fog-returned";
       } else if (pseudoTested || hasIncompleteBranches) {
         regionState = "weak-evidence";
+      } else if (fnFreshness?.isSelfProofFog) {
+        regionState = "self-proof-fog";
       } else {
         regionState = "verified";
       }
@@ -264,7 +292,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         const lineState: EvidenceState = hits > 0 ? regionState : "fog";
         lineStates[ln] = lineState;
         fileLocByState[lineState]++;
-        if (hits > 0 && assertionsOnOutcome > 0) {
+        if (hits > 0 && assertionsOnOutcome > 0 && regionState !== "fog-returned") {
           totalCheckedLines++;
         }
       }
@@ -273,7 +301,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         regionState === "verified" ? 0 : spanLines.length;
       const regionRisk = computeRiskScore({
         unverifiedLoc: regionState === "verified" ? 0 : Math.max(1, unverifiedInSpan),
-        churn90d: 1,
+        churn90d: fileChurn90d,
         cyclomaticComplexity: span.cyclomaticComplexity,
         state: regionState,
       });
@@ -295,6 +323,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         assertionsOnOutcome,
         pseudoTested,
         branchCoveragePct: spanBranchPct,
+        lastCodeChangeAt: fnFreshness?.lastCodeChangeAt,
+        lastTestChangeAt: fnFreshness?.lastTestChangeAt,
         survivingMutants: [],
         findingId,
       });
@@ -302,9 +332,15 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       if (regionState !== "verified" && findingId) {
         let reason: string;
         let suggestedAction: string;
-        if (regionState === "fog") {
+        if (regionState === "fog-returned") {
+          reason = `Executable logic in ${span.name} changed after its associated test evidence (Fog Returned).`;
+          suggestedAction = `Update or add tests for the modified runtime logic in ${span.name} (${relPath}:${span.startLine}-${span.endLine}) and re-verify.`;
+        } else if (regionState === "fog") {
           reason = `No test evidence executing ${span.name} (${spanLines.length} lines in fog).`;
           suggestedAction = `Add unit tests covering ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) with outcome assertions.`;
+        } else if (regionState === "self-proof-fog") {
+          reason = `${span.name} and its sole test were authored in the same commit without independent mutation verification (Self-proof Fog).`;
+          suggestedAction = `Run targeted mutation verification on ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) to confirm tests catch behavioral regressions.`;
         } else if (pseudoTested) {
           reason = `${span.name} is executed by ${executedByTests} test(s) but has 0 outcome assertions (pseudo-tested method).`;
           suggestedAction = `Add explicit outcome assertions on the return value or side effects of ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}).`;
@@ -330,6 +366,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             executedByTests,
             assertionsOnOutcome,
             pseudoTested,
+            ...(fnFreshness?.lastCodeChangeAt ? { lastCodeChangeAt: fnFreshness.lastCodeChangeAt } : {}),
+            ...(fnFreshness?.lastTestChangeAt ? { lastTestChangeAt: fnFreshness.lastTestChangeAt } : {}),
             survivingMutants: [],
           },
           suggestedAction,
@@ -345,8 +383,9 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     }
 
     // Account for any instrumented lines outside function spans
-    for (const [ln, hits] of record.lines.entries()) {
-      if (lineStates[ln] === undefined) {
+    const coveredBySpans = new Set(Object.keys(lineStates).map(Number));
+    if (coveredBySpans.size === 0) {
+      for (const [ln, hits] of record.lines.entries()) {
         const st: EvidenceState = hits > 0 ? "verified" : "fog";
         lineStates[ln] = st;
         fileLocByState[st]++;
@@ -367,7 +406,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     const totalComplexity = regions.reduce((acc, r) => acc + r.cyclomaticComplexity, 0) || 1;
     const fileRisk = computeRiskScore({
       unverifiedLoc,
-      churn90d: 1,
+      churn90d: fileChurn90d,
       cyclomaticComplexity: totalComplexity,
       state: dominantState,
     });
@@ -380,7 +419,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       dominantState,
       trustScore: computeTrustScore(fileLocByState),
       riskScore: fileRisk,
-      churn90d: 1,
+      churn90d: fileChurn90d,
       cyclomaticComplexity: totalComplexity,
       locByState: fileLocByState,
       lines: sourceLines,

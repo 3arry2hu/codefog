@@ -33,6 +33,8 @@ export interface Finding {
     executedByTests: number;
     assertionsOnOutcome: number;
     pseudoTested: boolean;
+    lastCodeChangeAt?: string;
+    lastTestChangeAt?: string;
     survivingMutants: SurvivingMutant[];
   };
   suggestedAction: string;
@@ -63,6 +65,8 @@ export interface FileSymbolRegion {
   assertionsOnOutcome: number;
   pseudoTested: boolean;
   branchCoveragePct: number;
+  lastCodeChangeAt?: string;
+  lastTestChangeAt?: string;
   survivingMutants: SurvivingMutant[];
   findingId?: string;
 }

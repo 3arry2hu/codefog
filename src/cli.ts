@@ -60,6 +60,8 @@ export async function runCli(
       const arg = argv[i]!;
       if (arg === "--json") {
         jsonMode = true;
+      } else if (arg === "--root") {
+        rootDir = path.resolve(argv[++i] ?? ".");
       } else if (arg === "--lcov") {
         lcovPath = argv[++i];
       } else if (arg === "--stryker") {
@@ -92,7 +94,15 @@ export async function runCli(
 
     if (failOn === "none") return 0;
     if (failOn === "returned" && report.summary.locByState["fog-returned"] > 0) {
-      return 1;
+      return 2;
+    }
+    if (
+      failOn === "regression" &&
+      (report.summary.locByState["fog-returned"] > 0 ||
+        Boolean(report.diff?.coverageUpEvidenceDown) ||
+        (report.diff?.weakenedFiles.length ?? 0) > 0)
+    ) {
+      return 2;
     }
     if (
       failOn === "any-fog" &&
@@ -102,7 +112,7 @@ export async function runCli(
         report.summary.locByState["self-proof-fog"] >
         0
     ) {
-      return 1;
+      return 2;
     }
     return 0;
   } catch (err) {
