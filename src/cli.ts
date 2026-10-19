@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { analyzeRepository } from "./analyzer.js";
+import { verifyTargetWithMutants } from "./verify.js";
 import type { CodefogReport } from "./types.js";
 
 export interface CliIo {
@@ -48,6 +49,64 @@ export async function runCli(
   },
 ): Promise<number> {
   try {
+    if (argv[0] === "verify") {
+      let rootDir = process.cwd();
+      let targetFile = "";
+      let mutants = false;
+      let startLine: number | undefined;
+      let endLine: number | undefined;
+      let testCmd: string | undefined;
+      let allowSourceChange = false;
+      let jsonMode = false;
+
+      for (let i = 1; i < argv.length; i++) {
+        const arg = argv[i]!;
+        if (arg === "--mutants") {
+          mutants = true;
+        } else if (arg === "--allow-source-change") {
+          allowSourceChange = true;
+        } else if (arg === "--json") {
+          jsonMode = true;
+        } else if (arg === "--root") {
+          rootDir = path.resolve(argv[++i] ?? ".");
+        } else if (arg === "--lines") {
+          const range = argv[++i] ?? "";
+          const [s, e] = range.split("-").map((n) => parseInt(n, 10));
+          if (!Number.isNaN(s)) startLine = s;
+          if (!Number.isNaN(e)) endLine = e;
+          else if (startLine !== undefined) endLine = startLine;
+        } else if (arg === "--test-cmd") {
+          testCmd = argv[++i];
+        } else if (!arg.startsWith("-") && !targetFile) {
+          targetFile = arg;
+        }
+      }
+
+      if (!targetFile) {
+        io.stderr("Error: codefog verify requires a <target> file path.\n");
+        return 1;
+      }
+
+      const verifyRes = await verifyTargetWithMutants({
+        rootDir,
+        targetFile,
+        mutants,
+        startLine,
+        endLine,
+        testCmd,
+        allowSourceChange,
+      });
+
+      if (jsonMode) {
+        io.stdout(JSON.stringify(verifyRes, null, 2) + "\n");
+      } else if (verifyRes.passed) {
+        io.stdout(verifyRes.summary + "\n");
+      } else {
+        io.stderr(verifyRes.summary + "\n");
+      }
+      return verifyRes.exitCode;
+    }
+
     let rootDir = process.cwd();
     let lcovPath: string | undefined;
     let strykerPath: string | undefined;

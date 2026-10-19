@@ -6,6 +6,7 @@ import ts from "typescript";
 import { parseLcov, type LcovFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
+import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -159,6 +160,9 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
 
   const lcovRecords = parseLcov(lcovContent, rootDir);
   const astResult = await analyzeTestAstEvidence(rootDir);
+  const strykerReport: ParsedStrykerReport | undefined = options.strykerPath
+    ? await loadStrykerReport(rootDir, options.strykerPath)
+    : undefined;
   const gitMeta = await readGitMeta(rootDir);
 
   let totalLinesFound = 0;
@@ -274,15 +278,24 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       }
 
       const fnFreshness = gitFreshness.functions.get(span.name);
+      const fileMutationSummary = strykerReport?.byFile.get(relPath);
+      const spanMutants = getSpanMutationSummary(
+        fileMutationSummary,
+        span.startLine,
+        span.endLine,
+      );
+      const hasSurvivingMutants = spanMutants.survivingMutants.length > 0;
+      const allMutantsKilledInSpan =
+        spanMutants.totalInSpan > 0 && spanMutants.survivingMutants.length === 0;
 
       let regionState: EvidenceState;
       if (hitsCount === 0) {
         regionState = "fog";
       } else if (fnFreshness?.isFogReturned) {
         regionState = "fog-returned";
-      } else if (pseudoTested || hasIncompleteBranches) {
+      } else if (pseudoTested || hasIncompleteBranches || hasSurvivingMutants) {
         regionState = "weak-evidence";
-      } else if (fnFreshness?.isSelfProofFog) {
+      } else if (fnFreshness?.isSelfProofFog && !allMutantsKilledInSpan) {
         regionState = "self-proof-fog";
       } else {
         regionState = "verified";
@@ -325,7 +338,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         branchCoveragePct: spanBranchPct,
         lastCodeChangeAt: fnFreshness?.lastCodeChangeAt,
         lastTestChangeAt: fnFreshness?.lastTestChangeAt,
-        survivingMutants: [],
+        survivingMutants: spanMutants.survivingMutants,
         findingId,
       });
 
@@ -344,6 +357,10 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         } else if (pseudoTested) {
           reason = `${span.name} is executed by ${executedByTests} test(s) but has 0 outcome assertions (pseudo-tested method).`;
           suggestedAction = `Add explicit outcome assertions on the return value or side effects of ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}).`;
+        } else if (hasSurvivingMutants) {
+          const firstMut = spanMutants.survivingMutants[0]!;
+          reason = `${spanMutants.survivingMutants.length} mutant(s) survived in ${span.name} (e.g. line ${firstMut.line}: '${firstMut.original}' -> '${firstMut.mutated}').`;
+          suggestedAction = `Add boundary and behavioral assertions in tests for ${span.name} (${relPath}:${span.startLine}-${span.endLine}) to kill surviving mutant(s).`;
         } else {
           reason = `${span.name} has incomplete branch coverage (${spanBranchPct}% branches taken).`;
           suggestedAction = `Add branch tests for ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) to cover all conditional paths with outcome assertions.`;
@@ -368,7 +385,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             pseudoTested,
             ...(fnFreshness?.lastCodeChangeAt ? { lastCodeChangeAt: fnFreshness.lastCodeChangeAt } : {}),
             ...(fnFreshness?.lastTestChangeAt ? { lastTestChangeAt: fnFreshness.lastTestChangeAt } : {}),
-            survivingMutants: [],
+            survivingMutants: spanMutants.survivingMutants,
           },
           suggestedAction,
           acceptanceCheck: {
@@ -500,7 +517,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         lineCoveragePct: roundPct(totalLinesHit, totalLinesFound),
         branchCoveragePct: roundPct(totalBranchesHit, totalBranchesFound),
         checkedCoveragePct: roundPct(totalCheckedLines, totalLinesFound),
-        mutationScorePct: 0,
+        mutationScorePct: strykerReport?.mutationScorePct ?? 0,
         pseudoTestedMethods: totalPseudoTestedMethods,
       },
       locByState: repoLocByState,
