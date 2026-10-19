@@ -176,8 +176,8 @@ describe("Ticket 6: Incremental --diff and PR Before/After Comparison Report (--
       },
     );
 
-    // Because evidence regressed (Coverage up, evidence down), --fail-on regression returns exit code 2
-    expect(exitCode).toBe(2);
+    // Because evidence regressed (Coverage up, evidence down), --fail-on regression returns exit code 1
+    expect(exitCode).toBe(1);
 
     const report = JSON.parse(stdoutChunks.join(""));
     expect(report.diff).toBeDefined();

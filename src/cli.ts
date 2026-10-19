@@ -1,6 +1,7 @@
 import * as path from "node:path";
+import { execFile } from "node:child_process";
 import { analyzeRepository } from "./analyzer.js";
-import { writePrCommentArtifacts } from "./diff-pr.js";
+import { computeDiffComparison, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { verifyTargetWithMutants } from "./verify.js";
 import type { CodefogReport } from "./types.js";
@@ -8,6 +9,22 @@ import type { CodefogReport } from "./types.js";
 export interface CliIo {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
+}
+
+function openInDefaultBrowser(filePath: string): void {
+  const opener =
+    process.platform === "darwin"
+      ? "open"
+      : process.platform === "win32"
+        ? "cmd"
+        : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", filePath] : [filePath];
+  try {
+    const child = execFile(opener, args);
+    child.unref();
+  } catch {
+    // Best-effort browser open in headless/CI environments
+  }
 }
 
 export function formatLevel1Summary(report: CodefogReport): string {
@@ -59,7 +76,6 @@ export async function runCli(
       let endLine: number | undefined;
       let testCmd: string | undefined;
       let allowSourceChange = false;
-      let jsonMode = false;
 
       for (let i = 1; i < argv.length; i++) {
         const arg = argv[i]!;
@@ -67,8 +83,6 @@ export async function runCli(
           mutants = true;
         } else if (arg === "--allow-source-change") {
           allowSourceChange = true;
-        } else if (arg === "--json") {
-          jsonMode = true;
         } else if (arg === "--root") {
           rootDir = path.resolve(argv[++i] ?? ".");
         } else if (arg === "--lines") {
@@ -99,9 +113,7 @@ export async function runCli(
         allowSourceChange,
       });
 
-      if (jsonMode) {
-        io.stdout(JSON.stringify(verifyRes, null, 2) + "\n");
-      } else if (verifyRes.passed) {
+      if (verifyRes.passed) {
         io.stdout(verifyRes.summary + "\n");
       } else {
         io.stderr(verifyRes.summary + "\n");
@@ -116,6 +128,7 @@ export async function runCli(
     let htmlPath: string | undefined;
     let prCommentDir: string | undefined;
     let jsonMode = false;
+    let openBrowser = false;
     let failOn = "returned";
 
     const positional: string[] = [];
@@ -134,9 +147,14 @@ export async function runCli(
       } else if (arg === "--html") {
         htmlPath = argv[++i];
       } else if (arg === "--pr-comment") {
-        prCommentDir = argv[++i] ?? ".codefog";
+        const nextArg = argv[i + 1];
+        if (nextArg && !nextArg.startsWith("-")) {
+          prCommentDir = argv[++i];
+        } else {
+          prCommentDir = ".codefog";
+        }
       } else if (arg === "--open") {
-        // Optional flag to open HTML report in browser
+        openBrowser = true;
       } else if (arg === "--fail-on") {
         failOn = argv[++i] ?? "returned";
       } else if (!arg.startsWith("-")) {
@@ -155,23 +173,32 @@ export async function runCli(
       diffBase,
     });
 
+    if (diffBase) {
+      const diff = await computeDiffComparison(rootDir, diffBase, report);
+      if (diff) {
+        report.diff = diff;
+      }
+    }
+
     if (prCommentDir) {
       await writePrCommentArtifacts(rootDir, prCommentDir, report);
     }
 
     if (jsonMode) {
-      if (htmlPath) {
-        await writeHtmlFogMap(rootDir, report, htmlPath);
+      if (htmlPath || openBrowser) {
+        const writtenHtml = await writeHtmlFogMap(rootDir, report, htmlPath);
+        if (openBrowser) openInDefaultBrowser(writtenHtml);
       }
       io.stdout(JSON.stringify(report, null, 2) + "\n");
     } else {
-      await writeHtmlFogMap(rootDir, report, htmlPath);
+      const writtenHtml = await writeHtmlFogMap(rootDir, report, htmlPath);
+      if (openBrowser) openInDefaultBrowser(writtenHtml);
       io.stdout(formatLevel1Summary(report));
     }
 
     if (failOn === "none") return 0;
     if (failOn === "returned" && report.summary.locByState["fog-returned"] > 0) {
-      return 2;
+      return 1;
     }
     if (
       failOn === "regression" &&
@@ -179,7 +206,7 @@ export async function runCli(
         Boolean(report.diff?.coverageUpEvidenceDown) ||
         (report.diff?.weakenedFiles.length ?? 0) > 0)
     ) {
-      return 2;
+      return 1;
     }
     if (
       failOn === "any-fog" &&
@@ -189,7 +216,7 @@ export async function runCli(
         report.summary.locByState["self-proof-fog"] >
         0
     ) {
-      return 2;
+      return 1;
     }
     return 0;
   } catch (err) {

@@ -177,14 +177,47 @@ async function getCommitHistory(rootDir: string, paths: string[]): Promise<Commi
     });
 }
 
+async function getBlameShasForRange(
+  rootDir: string,
+  relPath: string,
+  startLine: number,
+  endLine: number,
+): Promise<Set<string>> {
+  const out = await runGit(rootDir, [
+    "blame",
+    "--porcelain",
+    "-L",
+    `${startLine},${endLine}`,
+    "--",
+    relPath,
+  ]);
+  const shas = new Set<string>();
+  if (!out) return shas;
+  for (const line of out.split(/\r?\n/)) {
+    const match = /^([0-9a-f]{40})\s+\d+\s+\d+/.exec(line);
+    if (match && match[1] && !/^0+$/.test(match[1])) {
+      shas.add(match[1]);
+    }
+  }
+  return shas;
+}
+
 export async function analyzeFileGitFreshness(params: {
   rootDir: string;
   relPath: string;
   currentSourceText: string;
-  functionNames: string[];
+  functionSpans: Array<{ name: string; startLine: number; endLine: number }>;
   associatedTestFiles: Map<string, string[]>;
+  reportGeneratedAtMs?: number;
 }): Promise<FileGitFreshness> {
-  const { rootDir, relPath, currentSourceText, functionNames, associatedTestFiles } = params;
+  const {
+    rootDir,
+    relPath,
+    currentSourceText,
+    functionSpans,
+    associatedTestFiles,
+    reportGeneratedAtMs,
+  } = params;
   const insideGit = await runGit(rootDir, ["rev-parse", "--is-inside-work-tree"]);
   if (insideGit !== "true") {
     return {
@@ -234,7 +267,8 @@ export async function analyzeFileGitFreshness(params: {
 
   const functions = new Map<string, FunctionFreshnessInfo>();
 
-  for (const fnName of functionNames) {
+  for (const span of functionSpans) {
+    const fnName = span.name;
     const testFiles = associatedTestFiles.get(fnName) ?? [];
     const testHistory = await getCommitHistory(rootDir, testFiles);
     const latestTest = testHistory[0];
@@ -243,19 +277,37 @@ export async function analyzeFileGitFreshness(params: {
     let isSelfProofFog = false;
 
     if (latestTest) {
-      // Check Self-proof Fog:
-      // The test file's latest commit is the exact same commit that initially created the source file
-      if (latestTest.sha === oldestSrc.sha && testHistory.length === 1) {
+      // Check Self-proof Fog via git blame + commit history:
+      // All blamed lines of the function (or initial file commit) share the exact same commit as the sole test commit
+      const blameShas = await getBlameShasForRange(
+        rootDir,
+        relPath,
+        span.startLine,
+        span.endLine,
+      );
+      const allBlamedInSameTestCommit =
+        blameShas.size > 0 &&
+        Array.from(blameShas).every((sha) => sha === latestTest.sha);
+
+      if (
+        testHistory.length === 1 &&
+        (latestTest.sha === oldestSrc.sha || allBlamedInSameTestCommit)
+      ) {
         isSelfProofFog = true;
       }
 
       // Check Fog Returned:
-      // Did the source file have commits after latestTest.sha that changed this function's runtime AST?
+      // Did the source file have commits after latestTest.sha (or after LCOV report mtime) that changed this function's runtime AST?
       const testCommitIdxInSrc = srcHistory.findIndex((c) => c.sha === latestTest.sha);
+      const latestSrcMs = new Date(latestSrc.isoDate).getTime();
+      const latestTestMs = new Date(latestTest.isoDate).getTime();
+      const newerThanReport =
+        reportGeneratedAtMs !== undefined && latestSrcMs > reportGeneratedAtMs + 1000;
+
       const srcModifiedAfterTest =
-        latestSrc.sha !== latestTest.sha &&
-        (testCommitIdxInSrc > 0 ||
-          new Date(latestSrc.isoDate).getTime() >= new Date(latestTest.isoDate).getTime());
+        (latestSrc.sha !== latestTest.sha &&
+          (testCommitIdxInSrc > 0 || latestSrcMs >= latestTestMs)) ||
+        newerThanReport;
 
       if (srcModifiedAfterTest) {
         const baselineFp = await getFingerprintsAtCommit(latestTest.sha);

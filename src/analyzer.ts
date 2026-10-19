@@ -7,7 +7,6 @@ import { parseLcov, type LcovFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
 import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
-import { computeDiffComparison } from "./diff-pr.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -153,8 +152,14 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     : path.join(rootDir, "coverage", "lcov.info");
 
   let lcovContent = "";
+  let lcovMtimeMs: number | undefined;
   try {
-    lcovContent = await fs.readFile(lcovPath, "utf8");
+    const [content, stat] = await Promise.all([
+      fs.readFile(lcovPath, "utf8"),
+      fs.stat(lcovPath),
+    ]);
+    lcovContent = content;
+    lcovMtimeMs = stat.mtimeMs;
   } catch {
     throw new Error(`Could not read LCOV coverage file at ${lcovPath}`);
   }
@@ -227,8 +232,13 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       rootDir,
       relPath,
       currentSourceText: sourceText,
-      functionNames: effectiveSpans.map((s) => s.name),
+      functionSpans: effectiveSpans.map((s) => ({
+        name: s.name,
+        startLine: s.startLine,
+        endLine: s.endLine,
+      })),
       associatedTestFiles,
+      reportGeneratedAtMs: lcovMtimeMs,
     });
     const fileChurn90d = gitFreshness.churn90d;
 
@@ -527,13 +537,6 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     findings,
     files,
   };
-
-  if (options.diffBase) {
-    const diff = await computeDiffComparison(rootDir, options.diffBase, report);
-    if (diff) {
-      report.diff = diff;
-    }
-  }
 
   return report;
 }

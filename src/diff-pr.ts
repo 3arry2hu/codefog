@@ -5,25 +5,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
 import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
+import { STATE_COLORS, STATE_EVIDENCE_RANK } from "./scoring.js";
 import type { CodefogReport, DiffComparison, EvidenceState } from "./types.js";
 
 const execFileAsync = promisify(execFile);
-
-const STATE_QUALITY_RANK: Record<EvidenceState, number> = {
-  verified: 5,
-  "weak-evidence": 4,
-  "self-proof-fog": 3,
-  fog: 2,
-  "fog-returned": 1,
-};
-
-const STATE_COLOR: Record<EvidenceState, string> = {
-  verified: "#EBEFF4",
-  "weak-evidence": "#BCCCE2",
-  "self-proof-fog": "#6E88AA",
-  fog: "#1D3656",
-  "fog-returned": "#BD4900",
-};
 
 async function runGit(rootDir: string, args: string[]): Promise<string | null> {
   try {
@@ -92,7 +77,6 @@ export async function computeDiffComparison(
     const prevFile = baseFileMap.get(curFile.path);
     if (!prevFile) continue;
 
-    // Also check if runtime AST changed compared to baseRef while state degraded or lacked fresh strong assertions
     const baseSource = await runGit(rootDir, ["show", `${baseRef}:${curFile.path}`]);
     const curSource = curFile.lines.join("\n");
     const baseFp = baseSource
@@ -108,12 +92,14 @@ export async function computeDiffComparison(
       }
     }
 
-    const prevRank = STATE_QUALITY_RANK[prevFile.dominantState];
-    const curRank = STATE_QUALITY_RANK[curFile.dominantState];
+    const prevRank = STATE_EVIDENCE_RANK[prevFile.dominantState];
+    const curRank = STATE_EVIDENCE_RANK[curFile.dominantState];
 
     if (
       curFile.dominantState === "fog-returned" ||
-      (runtimeChangedInFile && prevFile.dominantState === "verified" && curFile.dominantState !== "verified")
+      (runtimeChangedInFile &&
+        prevFile.dominantState === "verified" &&
+        curFile.dominantState !== "verified")
     ) {
       curFile.diffStatus = "fog-returned";
       fogReturnedFiles.push(curFile.path);
@@ -142,7 +128,7 @@ export async function computeDiffComparison(
   if (coverageUpEvidenceDown) {
     alertHeadline = `Coverage up, evidence down: Line coverage changed by ${lineCovDelta >= 0 ? "+" : ""}${lineCovDelta.toFixed(1)}%, while Checked Coverage changed by ${checkedCovDelta.toFixed(1)}% (Trust Score ${baseReport.summary.trustScore} -> ${currentReport.summary.trustScore}).`;
   } else if (fogReturnedFiles.length > 0 || weakenedFiles.length > 0) {
-    alertHeadline = `Fog regression detected against ${baseRef}: ${fogReturnedFiles.length} file(s) with Fog Returned, ${weakenedFiles.length} weakened file(s).`;
+    alertHeadline = `Fog Returned detected against ${baseRef}: ${fogReturnedFiles.length} file(s) with Fog Returned, ${weakenedFiles.length} weakened file(s).`;
   } else {
     alertHeadline = `Evidence held steady or improved against ${baseRef} (Trust Score ${baseReport.summary.trustScore} -> ${currentReport.summary.trustScore}).`;
   }
@@ -176,22 +162,37 @@ export function renderPrDiffSvg(report: CodefogReport): string {
   const beforeFiles = diff?.beforeSummary.files ?? [];
   const afterFiles = report.files;
 
-  function renderFileBlocks(
+  /**
+   * Renders a proportional 2D Treemap layout where tile height/area scales with file LOC
+   */
+  function renderTreemapColumn(
     items: Array<{ path: string; dominantState: EvidenceState; totalLoc: number }>,
     xOffset: number,
   ): string {
-    return items
-      .slice(0, 6)
+    const visible = items.slice(0, 6);
+    const totalLoc = visible.reduce((sum, f) => sum + Math.max(1, f.totalLoc), 0) || 1;
+    const totalHeight = 250;
+    let currentY = 105;
+
+    return visible
       .map((item, idx) => {
-        const y = 115 + idx * 42;
-        const fill = STATE_COLOR[item.dominantState];
+        const ratio = Math.max(1, item.totalLoc) / totalLoc;
+        const h =
+          idx === visible.length - 1
+            ? Math.max(32, 105 + totalHeight - currentY)
+            : Math.max(32, Math.round(ratio * totalHeight) - 4);
+        const y = currentY;
+        currentY += h + 6;
+        const fill = STATE_COLORS[item.dominantState];
         const textFill =
           item.dominantState === "verified" || item.dominantState === "weak-evidence"
             ? "#0F172A"
             : "#FFFFFF";
-        return `<g transform="translate(${xOffset}, ${y})">
-          <rect width="340" height="34" rx="6" fill="${fill}" stroke="#CBD5E1" stroke-width="1" />
-          <text x="12" y="21" font-family="ui-monospace, monospace" font-size="12" font-weight="600" fill="${textFill}">${item.path} (${item.dominantState})</text>
+        const badge =
+          item.dominantState === "fog-returned" ? " [RETURNED]" : ` (${item.dominantState})`;
+        return `<g transform="translate(${xOffset}, ${y})" data-loc="${item.totalLoc}">
+          <rect width="340" height="${h}" rx="6" fill="${fill}" stroke="#CBD5E1" stroke-width="1" />
+          <text x="12" y="21" font-family="ui-monospace, monospace" font-size="12" font-weight="600" fill="${textFill}">${item.path}${badge} · ${item.totalLoc} LOC</text>
         </g>`;
       })
       .join("\n");
@@ -200,16 +201,16 @@ export function renderPrDiffSvg(report: CodefogReport): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="780" height="390" viewBox="0 0 780 390">
   <rect width="780" height="390" rx="12" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="2" />
   <rect width="780" height="52" rx="12" fill="#0F172A" />
-  <text x="24" y="32" font-family="Inter, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">codefog PR Fog Comparison</text>
-  <text x="540" y="32" font-family="Inter, sans-serif" font-size="12" fill="#CBD5E1">Returned #BD4900 · Fog #1D3656 · Verified #EBEFF4</text>
+  <text x="24" y="32" font-family="Inter, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">codefog PR Fog Map Treemap Comparison</text>
+  <text x="490" y="32" font-family="Inter, sans-serif" font-size="12" fill="#CBD5E1">Returned #BD4900 · Fog #1D3656 · Self-proof #6E88AA · Weak #BCCCE2 · Verified #EBEFF4</text>
 
-  <!-- Left Column: BEFORE -->
+  <!-- Left Column: BEFORE Treemap -->
   <text x="30" y="86" font-family="Inter, sans-serif" font-size="14" font-weight="700" fill="#0F172A">${baseLabel} · Trust ${beforeScore}/100</text>
-  ${renderFileBlocks(beforeFiles, 30)}
+  ${renderTreemapColumn(beforeFiles, 30)}
 
-  <!-- Right Column: AFTER -->
+  <!-- Right Column: AFTER Treemap -->
   <text x="410" y="86" font-family="Inter, sans-serif" font-size="14" font-weight="700" fill="#0F172A">AFTER (PR) · Trust ${afterScore}/100</text>
-  ${renderFileBlocks(afterFiles, 410)}
+  ${renderTreemapColumn(afterFiles, 410)}
 </svg>`;
 }
 

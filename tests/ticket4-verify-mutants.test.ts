@@ -249,7 +249,7 @@ describe("Ticket 4: Stryker mutation report ingestion & codefog verify --mutants
       ],
       { stdout: (s) => out1.push(s), stderr: (s) => out1.push(s) },
     );
-    expect(code1).toBe(2);
+    expect(code1).toBe(1);
     expect(out1.join("")).toMatch(/Surviving mutant|mutant.*survived/i);
     // Confirm source file was cleanly restored after mutation testing
     expect(await fs.readFile(srcFile, "utf8")).toBe(originalSource);
@@ -277,7 +277,7 @@ describe("Ticket 4: Stryker mutation report ingestion & codefog verify --mutants
       ],
       { stdout: (s) => out2.push(s), stderr: (s) => out2.push(s) },
     );
-    expect(code2).toBe(2);
+    expect(code2).toBe(1);
     expect(out2.join("")).toMatch(/anti-gaming|branch|modified|complexity/i);
 
     // Restore original source and strengthen tests with boundary checks (80 and 79)

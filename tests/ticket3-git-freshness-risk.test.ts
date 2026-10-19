@@ -172,13 +172,13 @@ describe("Ticket 3: Git Freshness (Fog Returned, Self-proof Fog), AST comment/ty
     expect(report3.findings[1]?.state).toBe("self-proof-fog");
     expect(report3.findings[0]!.riskScore).toBeGreaterThan(report3.findings[1]!.riskScore);
 
-    // Verify --fail-on returned returns exit code 2 when fog-returned > 0, and --fail-on none returns 0
+    // Verify --fail-on returned returns exit code 1 when fog-returned > 0, and --fail-on none returns 0
     const logs: string[] = [];
     const codeReturned = await runCli(["--root", tmpDir, "--fail-on", "returned"], {
       stdout: (m) => logs.push(m),
       stderr: (m) => logs.push(m),
     });
-    expect(codeReturned).toBe(2);
+    expect(codeReturned).toBe(1);
 
     const codeNone = await runCli(["--root", tmpDir, "--fail-on", "none"], {
       stdout: (m) => logs.push(m),

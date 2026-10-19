@@ -1,6 +1,37 @@
 import * as crypto from "node:crypto";
 import type { EvidenceState, LocByState } from "./types.js";
 
+/**
+ * Five-State Fog-First OKLCH Slate Scale + Fog Returned Warning Orange (#BD4900)
+ * Defined in ADR 0001.
+ */
+export const STATE_COLORS: Record<EvidenceState, string> = {
+  verified: "#EBEFF4",
+  "weak-evidence": "#BCCCE2",
+  "self-proof-fog": "#6E88AA",
+  fog: "#1D3656",
+  "fog-returned": "#BD4900",
+};
+
+/**
+ * Evidence quality rank (higher = stronger verification evidence).
+ */
+export const STATE_EVIDENCE_RANK: Record<EvidenceState, number> = {
+  verified: 5,
+  "weak-evidence": 4,
+  "self-proof-fog": 3,
+  fog: 2,
+  "fog-returned": 1,
+};
+
+export const STATE_URGENCY_ORDER: EvidenceState[] = [
+  "fog-returned",
+  "fog",
+  "self-proof-fog",
+  "weak-evidence",
+  "verified",
+];
+
 export function emptyLocByState(): LocByState {
   return {
     "fog-returned": 0,
@@ -46,15 +77,15 @@ export function computeRiskScore(params: {
   state: EvidenceState;
 }): number {
   const weight = STATE_WEIGHTS[params.state];
-  if (weight === 0 || params.unverifiedLoc <= 0) return 0;
+  if (weight === 0 || params.unverifiedLoc <= 0) return 0.0;
 
   const locFactor = Math.log(1 + Math.max(1, params.unverifiedLoc));
   const churnFactor = Math.log(1 + Math.max(1, params.churn90d));
   const complexityFactor = Math.log(1 + Math.max(1, params.cyclomaticComplexity));
 
   const raw = locFactor * churnFactor * complexityFactor * weight;
-  // Normalize with smooth saturation into [1.0, 10.0]
-  const normalized = Math.min(10, Math.max(1.0, (raw / (raw + 3.5)) * 10));
+  // Normalize smoothly into [0.0, 10.0]
+  const normalized = Math.min(10.0, Math.max(0.1, (raw / (raw + 3.5)) * 10));
   return Math.round(normalized * 10) / 10;
 }
 
@@ -73,23 +104,8 @@ export function roundPct(numerator: number, denominator: number): number {
   return Math.round((numerator / denominator) * 1000) / 10;
 }
 
-const STATE_PRIORITY: Record<EvidenceState, number> = {
-  "fog-returned": 5,
-  fog: 4,
-  "self-proof-fog": 3,
-  "weak-evidence": 2,
-  verified: 1,
-};
-
 export function getDominantState(locByState: LocByState): EvidenceState {
-  const order: EvidenceState[] = [
-    "fog-returned",
-    "fog",
-    "self-proof-fog",
-    "weak-evidence",
-    "verified",
-  ];
-  for (const state of order) {
+  for (const state of STATE_URGENCY_ORDER) {
     if (locByState[state] > 0) {
       return state;
     }
@@ -97,6 +113,6 @@ export function getDominantState(locByState: LocByState): EvidenceState {
   return "verified";
 }
 
-export function compareStatePriority(a: EvidenceState, b: EvidenceState): number {
-  return STATE_PRIORITY[b] - STATE_PRIORITY[a];
+export function compareStateUrgency(a: EvidenceState, b: EvidenceState): number {
+  return STATE_EVIDENCE_RANK[a] - STATE_EVIDENCE_RANK[b];
 }

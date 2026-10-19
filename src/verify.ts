@@ -237,11 +237,35 @@ async function checkAntiGamingSourceIntegrity(
   return null;
 }
 
+async function detectDefaultTestCommand(
+  rootDir: string,
+  associatedTestFiles: string[],
+): Promise<string> {
+  const testTargets = associatedTestFiles.length > 0 ? ` ${associatedTestFiles.join(" ")}` : "";
+  try {
+    const pkgRaw = await fs.readFile(path.join(rootDir, "package.json"), "utf8");
+    const pkg = JSON.parse(pkgRaw) as {
+      scripts?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+      dependencies?: Record<string, string>;
+    };
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    if (deps.vitest || pkg.scripts?.test?.includes("vitest")) {
+      return `npx vitest run${testTargets}`;
+    }
+    if (deps.jest || pkg.scripts?.test?.includes("jest")) {
+      return `npx jest${testTargets}`;
+    }
+  } catch {
+    // Fallback below
+  }
+  return `node --test${testTargets}`;
+}
+
 export async function verifyTargetWithMutants(options: VerifyOptions): Promise<VerifyResult> {
   const rootDir = path.resolve(options.rootDir);
   const absTarget = path.resolve(rootDir, options.targetFile);
   const relTarget = path.relative(rootDir, absTarget).replace(/\\/g, "/");
-  const testCmd = options.testCmd ?? "npx vitest run";
 
   const originalSource = await fs.readFile(absTarget, "utf8");
   const violations: string[] = [];
@@ -266,8 +290,12 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
     options.startLine,
     options.endLine,
   );
+  const associatedTestFiles = new Set<string>();
   for (const fnName of targetFns) {
     const ev = lookupFunctionAstEvidence(astResult, relTarget, fnName);
+    if (ev) {
+      for (const tf of ev.testFiles) associatedTestFiles.add(tf);
+    }
     if (!ev || ev.assertionsOnOutcome === 0) {
       violations.push(
         `Anti-gaming gate triggered: function '${fnName}' in ${relTarget} has 0 outcome assertions in tests (pseudo-tested or untested).`,
@@ -278,7 +306,7 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
   if (violations.length > 0) {
     return {
       passed: false,
-      exitCode: 2,
+      exitCode: 1,
       summary: `Verification FAILED for ${relTarget}:\n` + violations.map((v) => `  - ${v}`).join("\n"),
       totalMutants: 0,
       killedMutants: 0,
@@ -286,6 +314,10 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
       violations,
     };
   }
+
+  const testCmd =
+    options.testCmd ??
+    (await detectDefaultTestCommand(rootDir, Array.from(associatedTestFiles)));
 
   // First ensure baseline tests pass on unmodified source
   const baselinePass = await runCommandPasses(testCmd, rootDir);
@@ -302,25 +334,16 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
     };
   }
 
-  if (!options.mutants) {
-    return {
-      passed: true,
-      exitCode: 0,
-      summary: `VERIFIED ${relTarget}: AST assertion and anti-gaming checks passed.`,
-      totalMutants: 0,
-      killedMutants: 0,
-      survivingMutants: [],
-      violations: [],
-    };
-  }
-
-  // Gate 3: Targeted mutation verification
-  const candidates = generateCandidateMutations(
+  // Gate 3: Targeted mutation verification (runs full operator + body clearance mutants when --mutants is set, or body clearance check by default)
+  const allCandidates = generateCandidateMutations(
     originalSource,
     relTarget,
     options.startLine,
     options.endLine,
   );
+  const candidates = options.mutants
+    ? allCandidates
+    : allCandidates.filter((c) => c.mutated.includes("return undefined"));
 
   const survivingMutants: SurvivingMutant[] = [];
   let killedMutants = 0;
@@ -355,7 +378,7 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
     }
     return {
       passed: false,
-      exitCode: 2,
+      exitCode: 1,
       summary:
         `Verification FAILED for ${relTarget}: ${survivingMutants.length} mutant(s) survived (${killedMutants}/${candidates.length} killed).\n` +
         violations.map((v) => `  - ${v}`).join("\n"),

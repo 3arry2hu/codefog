@@ -31,3 +31,8 @@ jobs:
 
       - name: Build CLI
         run: npm run build
+
+      - name: Run codefog PR Diff & Evidence Gate
+        if: github.event_name == 'pull_request'
+        run: |
+          npx codefog --diff origin/${{ github.base_ref }} --pr-comment .codefog --fail-on returned
