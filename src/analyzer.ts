@@ -7,6 +7,7 @@ import { parseLcov, type LcovFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
 import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
+import { computeDiffComparison } from "./diff-pr.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -499,7 +500,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     repoLocByState["weak-evidence"] +
     repoLocByState.verified;
 
-  return {
+  const report: CodefogReport = {
     $schema: "https://codefog.dev/schemas/v1/report.json",
     version: "1.0.0",
     repository: {
@@ -526,4 +527,13 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     findings,
     files,
   };
+
+  if (options.diffBase) {
+    const diff = await computeDiffComparison(rootDir, options.diffBase, report);
+    if (diff) {
+      report.diff = diff;
+    }
+  }
+
+  return report;
 }

@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { analyzeRepository } from "./analyzer.js";
+import { writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { verifyTargetWithMutants } from "./verify.js";
 import type { CodefogReport } from "./types.js";
@@ -113,6 +114,7 @@ export async function runCli(
     let strykerPath: string | undefined;
     let diffBase: string | undefined;
     let htmlPath: string | undefined;
+    let prCommentDir: string | undefined;
     let jsonMode = false;
     let failOn = "returned";
 
@@ -131,6 +133,8 @@ export async function runCli(
         diffBase = argv[++i];
       } else if (arg === "--html") {
         htmlPath = argv[++i];
+      } else if (arg === "--pr-comment") {
+        prCommentDir = argv[++i] ?? ".codefog";
       } else if (arg === "--open") {
         // Optional flag to open HTML report in browser
       } else if (arg === "--fail-on") {
@@ -150,6 +154,10 @@ export async function runCli(
       strykerPath,
       diffBase,
     });
+
+    if (prCommentDir) {
+      await writePrCommentArtifacts(rootDir, prCommentDir, report);
+    }
 
     if (jsonMode) {
       if (htmlPath) {
