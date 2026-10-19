@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ts from "typescript";
 import { parseLcov, type LcovFileRecord } from "./lcov.js";
+import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -156,6 +157,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
   }
 
   const lcovRecords = parseLcov(lcovContent, rootDir);
+  const astResult = await analyzeTestAstEvidence(rootDir);
   const gitMeta = await readGitMeta(rootDir);
 
   let totalLinesFound = 0;
@@ -163,6 +165,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
   let totalBranchesFound = 0;
   let totalBranchesHit = 0;
   let totalCheckedLines = 0;
+  let totalPseudoTestedMethods = 0;
 
   const files: FileSummary[] = [];
   const findings: Finding[] = [];
@@ -221,22 +224,55 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       );
       const spanBranchHit = spanBranches.filter((b) => b.taken > 0).length;
       const spanBranchPct = roundPct(spanBranchHit, spanBranches.length);
+      const hasIncompleteBranches =
+        spanBranches.length > 0 && spanBranchHit < spanBranches.length;
 
       const hitsCount = spanLines.filter(([, h]) => h > 0).length;
-      let regionState: EvidenceState = hitsCount === 0 ? "fog" : "verified";
+      const fnRecord = record.functions.find((f) => f.name === span.name);
+      const lcovFnHits = fnRecord ? fnRecord.hits : hitsCount > 0 ? 1 : 0;
+
+      const astEvidence = lookupFunctionAstEvidence(astResult, relPath, span.name);
+      const executedByTests =
+        hitsCount === 0
+          ? 0
+          : astEvidence
+            ? Math.max(1, astEvidence.executedTestBlocks)
+            : Math.max(1, lcovFnHits);
+
+      const assertionsOnOutcome =
+        hitsCount === 0
+          ? 0
+          : astResult.testFileCount > 0
+            ? astEvidence?.assertionsOnOutcome ?? 0
+            : 1;
+
+      const pseudoTested = hitsCount > 0 && assertionsOnOutcome === 0;
+      if (pseudoTested) {
+        totalPseudoTestedMethods++;
+      }
+
+      let regionState: EvidenceState;
+      if (hitsCount === 0) {
+        regionState = "fog";
+      } else if (pseudoTested || hasIncompleteBranches) {
+        regionState = "weak-evidence";
+      } else {
+        regionState = "verified";
+      }
 
       for (const [ln, hits] of spanLines) {
         const lineState: EvidenceState = hits > 0 ? regionState : "fog";
         lineStates[ln] = lineState;
         fileLocByState[lineState]++;
-        if (lineState === "verified") {
+        if (hits > 0 && assertionsOnOutcome > 0) {
           totalCheckedLines++;
         }
       }
 
-      const unverifiedInSpan = spanLines.filter(([, h]) => h === 0).length;
+      const unverifiedInSpan =
+        regionState === "verified" ? 0 : spanLines.length;
       const regionRisk = computeRiskScore({
-        unverifiedLoc: regionState === "verified" ? 0 : Math.max(1, unverifiedInSpan || spanLines.length),
+        unverifiedLoc: regionState === "verified" ? 0 : Math.max(1, unverifiedInSpan),
         churn90d: 1,
         cyclomaticComplexity: span.cyclomaticComplexity,
         state: regionState,
@@ -255,15 +291,28 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         state: regionState,
         riskScore: regionRisk,
         cyclomaticComplexity: span.cyclomaticComplexity,
-        executedByTests: hitsCount > 0 ? 1 : 0,
-        assertionsOnOutcome: hitsCount > 0 ? 1 : 0,
-        pseudoTested: false,
+        executedByTests,
+        assertionsOnOutcome,
+        pseudoTested,
         branchCoveragePct: spanBranchPct,
         survivingMutants: [],
         findingId,
       });
 
       if (regionState !== "verified" && findingId) {
+        let reason: string;
+        let suggestedAction: string;
+        if (regionState === "fog") {
+          reason = `No test evidence executing ${span.name} (${spanLines.length} lines in fog).`;
+          suggestedAction = `Add unit tests covering ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) with outcome assertions.`;
+        } else if (pseudoTested) {
+          reason = `${span.name} is executed by ${executedByTests} test(s) but has 0 outcome assertions (pseudo-tested method).`;
+          suggestedAction = `Add explicit outcome assertions on the return value or side effects of ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}).`;
+        } else {
+          reason = `${span.name} has incomplete branch coverage (${spanBranchPct}% branches taken).`;
+          suggestedAction = `Add branch tests for ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) to cover all conditional paths with outcome assertions.`;
+        }
+
         findings.push({
           id: findingId,
           title: span.name,
@@ -276,14 +325,14 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             startLine: span.startLine,
             endLine: span.endLine,
           },
-          reason: `No test evidence executing ${span.name} (${spanLines.length} lines in fog).`,
+          reason,
           evidence: {
-            executedByTests: 0,
-            assertionsOnOutcome: 0,
-            pseudoTested: false,
+            executedByTests,
+            assertionsOnOutcome,
+            pseudoTested,
             survivingMutants: [],
           },
-          suggestedAction: `Add unit tests covering ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) with outcome assertions.`,
+          suggestedAction,
           acceptanceCheck: {
             command: `npx codefog verify ${relPath} --mutants --lines ${span.startLine}-${span.endLine}`,
             criteria: [
@@ -413,7 +462,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         branchCoveragePct: roundPct(totalBranchesHit, totalBranchesFound),
         checkedCoveragePct: roundPct(totalCheckedLines, totalLinesFound),
         mutationScorePct: 0,
-        pseudoTestedMethods: 0,
+        pseudoTestedMethods: totalPseudoTestedMethods,
       },
       locByState: repoLocByState,
     },
