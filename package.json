@@ -1,0 +1,29 @@
+{
+  "name": "codefog",
+  "version": "1.0.0",
+  "description": "See which parts of your codebase you can actually trust. Fog-first trust and risk map for TypeScript/JavaScript repositories.",
+  "type": "module",
+  "bin": {
+    "codefog": "./dist/bin.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "typescript": "^5.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "vitest": "^3.0.8"
+  }
+}
