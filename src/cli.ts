@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { analyzeRepository } from "./analyzer.js";
+import { writeHtmlFogMap } from "./html-report.js";
 import { verifyTargetWithMutants } from "./verify.js";
 import type { CodefogReport } from "./types.js";
 
@@ -111,6 +112,7 @@ export async function runCli(
     let lcovPath: string | undefined;
     let strykerPath: string | undefined;
     let diffBase: string | undefined;
+    let htmlPath: string | undefined;
     let jsonMode = false;
     let failOn = "returned";
 
@@ -127,6 +129,10 @@ export async function runCli(
         strykerPath = argv[++i];
       } else if (arg === "--diff") {
         diffBase = argv[++i];
+      } else if (arg === "--html") {
+        htmlPath = argv[++i];
+      } else if (arg === "--open") {
+        // Optional flag to open HTML report in browser
       } else if (arg === "--fail-on") {
         failOn = argv[++i] ?? "returned";
       } else if (!arg.startsWith("-")) {
@@ -146,8 +152,12 @@ export async function runCli(
     });
 
     if (jsonMode) {
+      if (htmlPath) {
+        await writeHtmlFogMap(rootDir, report, htmlPath);
+      }
       io.stdout(JSON.stringify(report, null, 2) + "\n");
     } else {
+      await writeHtmlFogMap(rootDir, report, htmlPath);
       io.stdout(formatLevel1Summary(report));
     }
 
