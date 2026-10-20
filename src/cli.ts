@@ -1,11 +1,62 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
 import { computeDiffComparison, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { verifyTargetWithMutants } from "./verify.js";
 import type { CodefogReport } from "./types.js";
+
+const execFileAsync = promisify(execFile);
+
+export const MIN_SUPPORTED_NPM_MAJOR = 9;
+
+export function detectOutdatedNpmVersion(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const rawVersion =
+    env.CODEFOG_NPM_VERSION?.trim() ||
+    /\bnpm\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(env.npm_config_user_agent ?? "")?.[1];
+  if (!rawVersion) return null;
+  const major = Number.parseInt(rawVersion.split(".")[0] ?? "", 10);
+  if (Number.isFinite(major) && major < MIN_SUPPORTED_NPM_MAJOR) {
+    return rawVersion;
+  }
+  return null;
+}
+
+async function resolveOutdatedNpmVersion(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | null> {
+  const fromEnv = detectOutdatedNpmVersion(env);
+  if (fromEnv) return fromEnv;
+  if (env.npm_config_user_agent || env.CODEFOG_NPM_VERSION || env.VITEST) {
+    return null;
+  }
+  try {
+    const { stdout } = await execFileAsync("npm", ["--version"], { timeout: 1500 });
+    const ver = stdout.trim();
+    const major = Number.parseInt(ver.split(".")[0] ?? "", 10);
+    if (Number.isFinite(major) && major < MIN_SUPPORTED_NPM_MAJOR) {
+      return ver;
+    }
+  } catch {
+    // ignore if npm is not in PATH
+  }
+  return null;
+}
+
+export function formatOutdatedNpmWarning(version: string): string {
+  return [
+    `[codefog] Warning: Detected outdated npm/npx v${version} (< ${MIN_SUPPORTED_NPM_MAJOR}.0.0).`,
+    `检测到当前使用的 npm/npx 版本较旧 (v${version} < ${MIN_SUPPORTED_NPM_MAJOR}.0.0)：旧版 npx (如 8.x) 会吞掉 --coverage 等命令行参数，且存在 @latest 缓存不更新问题。`,
+    `请升级 npm/npx 至最新版本 (>= ${MIN_SUPPORTED_NPM_MAJOR}.0.0)：`,
+    `  npm install -g npm@latest`,
+    `（若暂时无法升级，请在包名后加上 '--' 传递参数：npx @barryzhu/codefog@latest -- --coverage coverage.out）`,
+    "",
+  ].join("\n");
+}
 
 export interface CliIo {
   stdout: (text: string) => void;
@@ -69,6 +120,11 @@ export async function runCli(
   },
 ): Promise<number> {
   try {
+    const outdatedNpm = await resolveOutdatedNpmVersion(process.env);
+    if (outdatedNpm) {
+      io.stderr(formatOutdatedNpmWarning(outdatedNpm));
+    }
+
     const argv: string[] = [];
     for (const token of rawArgv) {
       if (token.startsWith("--") && token.includes("=")) {
@@ -80,7 +136,7 @@ export async function runCli(
     }
 
     if (argv.includes("--version") || argv.includes("-v")) {
-      io.stdout("1.1.2\n");
+      io.stdout("1.2.0\n");
       return 0;
     }
     if (argv.includes("--help") || argv.includes("-h")) {

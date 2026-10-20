@@ -49,6 +49,8 @@
 npx @barryzhu/codefog
 ```
 
+> **提示（`npm` / `npx` 版本要求）**：推荐使用 **npm / npx `>= 9.0.0`**。旧版 `npm` / `npx`（如 `8.15.0`）在未加 `--` 分隔符时会拦截并吞掉 `--coverage` 等命令行参数；`codefog` 在检测到旧版 `npm` / `npx` (`< 9.0.0`) 时会自动输出升级提示（`npm install -g npm@latest`）并兼容被剥离的参数。
+
 或者作为项目开发依赖安装：
 
 ```bash

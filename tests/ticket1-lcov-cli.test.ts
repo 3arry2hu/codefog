@@ -185,7 +185,7 @@ describe("Ticket 1: LCOV end-to-end CLI scan & --json report skeleton", () => {
         stderr: () => {},
       }),
     ).toBe(0);
-    expect(verOut.trim()).toBe("1.1.2");
+    expect(verOut.trim()).toBe("1.2.0");
 
     let helpOut = "";
     expect(
@@ -238,5 +238,45 @@ describe("Ticket 1: LCOV end-to-end CLI scan & --json report skeleton", () => {
       }),
     ).toBe(1);
     expect(verifyErr).toContain("requires a <target> file path");
+  });
+
+  it("detects outdated npm/npx versions (e.g. 8.15.0 < 9.0.0) and prints an upgrade prompt to stderr", async () => {
+    const prevUserAgent = process.env.npm_config_user_agent;
+    try {
+      process.env.npm_config_user_agent =
+        "npm/8.15.0 node/v16.17.0 darwin arm64 workspaces/false";
+      let out = "";
+      let err = "";
+      const code = await runCli(["--root", tmpDir, "--fail-on", "none"], {
+        stdout: (s) => {
+          out += s;
+        },
+        stderr: (s) => {
+          err += s;
+        },
+      });
+      expect(code).toBe(0);
+      expect(out).toContain("Trust Score:");
+      expect(err).toContain("8.15.0");
+      expect(err).toContain("npm install -g npm@latest");
+
+      // Modern npm/npx (>= 9.0.0) does not emit an upgrade warning
+      process.env.npm_config_user_agent =
+        "npm/10.8.2 node/v20.17.0 darwin arm64 workspaces/false";
+      let modernErr = "";
+      await runCli(["--root", tmpDir, "--fail-on", "none"], {
+        stdout: () => {},
+        stderr: (s) => {
+          modernErr += s;
+        },
+      });
+      expect(modernErr).toBe("");
+    } finally {
+      if (prevUserAgent === undefined) {
+        delete process.env.npm_config_user_agent;
+      } else {
+        process.env.npm_config_user_agent = prevUserAgent;
+      }
+    }
   });
 });
