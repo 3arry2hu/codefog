@@ -181,11 +181,6 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
   const findings: Finding[] = [];
 
   for (const [relPath, record] of lcovRecords.entries()) {
-    totalLinesFound += record.linesFound;
-    totalLinesHit += record.linesHit;
-    totalBranchesFound += record.branchesFound;
-    totalBranchesHit += record.branchesHit;
-
     const absPath = path.join(rootDir, relPath);
     let sourceText = "";
     try {
@@ -202,6 +197,23 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           endLine: arr[idx + 1] ? arr[idx + 1]!.line - 1 : Math.max(f.line, ...record.lines.keys()),
           cyclomaticComplexity: 1,
         }));
+
+    if (relPath.endsWith(".rs") && spans.length > 0) {
+      // Exclude inline `#[cfg(test)]` DA lines outside production function spans from production metrics
+      for (const ln of Array.from(record.lines.keys())) {
+        const inProdSpan = spans.some((s) => ln >= s.startLine && ln <= s.endLine);
+        if (!inProdSpan) {
+          record.lines.delete(ln);
+        }
+      }
+      record.linesFound = record.lines.size;
+      record.linesHit = Array.from(record.lines.values()).filter((v) => v > 0).length;
+    }
+
+    totalLinesFound += record.linesFound;
+    totalLinesHit += record.linesHit;
+    totalBranchesFound += record.branchesFound;
+    totalBranchesHit += record.branchesHit;
 
     const effectiveSpans: ParsedFunctionSpan[] =
       spans.length > 0

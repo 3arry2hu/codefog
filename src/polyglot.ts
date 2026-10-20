@@ -111,8 +111,11 @@ export function stripCommentsAndMaskStrings(source: string): {
       continue;
     }
 
-    // Single-quoted char/rune '...'
-    if (ch === "'") {
+    // Single-quoted char/rune '...' (not Rust lifetime `'a` or `'static`)
+    if (
+      ch === "'" &&
+      (source[i + 2] === "'" || (source[i + 1] === "\\" && source[i + 3] === "'"))
+    ) {
       maskedChars[i] = " ";
       i++;
       while (i < len && source[i] !== "'" && source[i] !== "\n") {
@@ -264,12 +267,129 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
 
 export function isPolyglotSourceFile(fileName: string): boolean {
   if (fileName.endsWith(".go") && !fileName.endsWith("_test.go")) return true;
+  if (fileName.endsWith(".rs") && !isPolyglotTestFile(fileName)) return true;
   return false;
 }
 
 export function isPolyglotTestFile(fileName: string): boolean {
-  if (fileName.endsWith("_test.go")) return true;
+  const norm = fileName.replace(/\\/g, "/");
+  if (norm.endsWith("_test.go")) return true;
+  if (norm.endsWith(".rs") && /(?:^|\/)tests\//.test(norm)) return true;
   return false;
+}
+
+export function findRustInlineTestByteRanges(
+  masked: string,
+): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const attrRe = /#\s*\[\s*(?:cfg\s*\(\s*test\s*\)|(?:\w+::)*test)\s*\]/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = attrRe.exec(masked)) !== null) {
+    const startIdx = m.index;
+    const openBraceIdx = masked.indexOf("{", m.index + m[0].length);
+    if (openBraceIdx === -1) continue;
+    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+    if (closeBraceIdx === -1) continue;
+    ranges.push({ start: startIdx, end: closeBraceIdx + 1 });
+    attrRe.lastIndex = closeBraceIdx + 1;
+  }
+
+  return ranges;
+}
+
+export function extractRustInlineTestFingerprint(sourceText: string): string {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const ranges = findRustInlineTestByteRanges(masked);
+  if (ranges.length === 0) return "";
+  return ranges
+    .map((r) => noComments.slice(r.start, r.end).replace(/\s+/g, " ").trim())
+    .join("||");
+}
+
+function parseAllRustFunctions(
+  sourceText: string,
+): Array<PolyglotFunctionSpan & { isTest: boolean; startOffset: number; endOffset: number }> {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const lineStarts = buildLineStarts(sourceText);
+  const inlineTestRanges = findRustInlineTestByteRanges(masked);
+  const fnRegex = /\bfn\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+  const results: Array<
+    PolyglotFunctionSpan & { isTest: boolean; startOffset: number; endOffset: number }
+  > = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = fnRegex.exec(masked)) !== null) {
+    const fnStartIdx = match.index;
+    const fnName = match[1]!;
+    let cursor = fnStartIdx + match[0].length;
+
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+    if (masked[cursor] === "<") {
+      const closeGen = findMatchingDelimiter(masked, cursor, "<", ">");
+      if (closeGen === -1) continue;
+      cursor = closeGen + 1;
+    }
+
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+    if (masked[cursor] !== "(") continue;
+    const closeParams = findMatchingDelimiter(masked, cursor, "(", ")");
+    if (closeParams === -1) continue;
+    cursor = closeParams + 1;
+
+    const openBraceIdx = masked.indexOf("{", cursor);
+    const semiIdx = masked.indexOf(";", cursor);
+    if (openBraceIdx === -1 || (semiIdx !== -1 && semiIdx < openBraceIdx)) {
+      // Trait method signature without body
+      continue;
+    }
+
+    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+    if (closeBraceIdx === -1) continue;
+
+    const headerSlice = noComments.slice(cursor, openBraceIdx).trim();
+    const arrowIdx = headerSlice.indexOf("->");
+    const returnSignature =
+      arrowIdx !== -1
+        ? headerSlice
+            .slice(arrowIdx + 2)
+            .replace(/\bwhere\b[\s\S]*$/, "")
+            .trim()
+        : "";
+
+    const insideTestRange = inlineTestRanges.some(
+      (r) => fnStartIdx >= r.start && closeBraceIdx <= r.end,
+    );
+    const startLine = offsetToLine(lineStarts, fnStartIdx);
+    const endLine = offsetToLine(lineStarts, closeBraceIdx);
+    const bodyMasked = masked.slice(openBraceIdx, closeBraceIdx + 1);
+    const runtimeSlice = noComments
+      .slice(fnStartIdx, closeBraceIdx + 1)
+      .replace(/\s+/g, " ")
+      .trim();
+
+    results.push({
+      name: fnName,
+      startLine,
+      endLine,
+      cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked),
+      returnSignature,
+      runtimeFingerprint: `${fnName}:${runtimeSlice}`,
+      isTest: insideTestRange,
+      startOffset: fnStartIdx,
+      endOffset: closeBraceIdx + 1,
+    });
+
+    fnRegex.lastIndex = closeBraceIdx + 1;
+  }
+
+  return results;
+}
+
+export function extractRustFunctionSpans(sourceText: string): PolyglotFunctionSpan[] {
+  return parseAllRustFunctions(sourceText)
+    .filter((f) => !f.isTest)
+    .map(({ isTest: _t, startOffset: _s, endOffset: _e, ...rest }) => rest);
 }
 
 export function extractPolyglotFunctionSpans(
@@ -278,6 +398,9 @@ export function extractPolyglotFunctionSpans(
 ): PolyglotFunctionSpan[] {
   if (fileName.endsWith(".go")) {
     return extractGoFunctionSpans(sourceText);
+  }
+  if (fileName.endsWith(".rs")) {
+    return extractRustFunctionSpans(sourceText);
   }
   return [];
 }
@@ -842,6 +965,418 @@ export async function analyzeGoFilesAstEvidence(
         const ev = getOrCreateEv(target.fileStem, target.name);
         ev.executedBlocks.add(blockId);
         ev.testFiles.add(toPosix(testRel));
+        const sc = strongForTarget.get(k) ?? 0;
+        const wc = weakForTarget.get(k) ?? 0;
+        if (sc > 0) {
+          ev.strongAssertedBlocks.add(blockId);
+          ev.directStrongAssertions += sc;
+        } else if (wc > 0) {
+          ev.weakAssertedBlocks.add(blockId);
+          ev.directWeakAssertions += wc;
+        }
+      }
+    }
+  }
+
+  return {
+    evidenceEntries: Array.from(evidenceMap.values()),
+    callGraphEdges,
+  };
+}
+
+export function buildRustZeroReturnBody(returnSignature: string): string {
+  const sig = returnSignature.trim();
+  if (!sig || sig === "()") return "{}";
+  if (sig === "bool") return "{ false }";
+  if (sig === "String") return "{ String::new() }";
+  if (sig === "&str" || sig === "&'static str") return '{ "" }';
+  if (/^(?:[iu](?:8|16|32|64|128|size)|f(?:32|64))$/.test(sig)) {
+    return `{ 0 as ${sig} }`;
+  }
+  if (sig.startsWith("Option<")) return "{ None }";
+  if (sig.startsWith("Vec<")) return "{ Vec::new() }";
+  if (sig.startsWith("Result<")) {
+    const inner = sig.slice("Result<".length, -1);
+    const commaIdx = inner.indexOf(",");
+    const okType = (commaIdx !== -1 ? inner.slice(0, commaIdx) : inner).trim();
+    const okBody = buildRustZeroReturnBody(okType)
+      .replace(/^\{\s*/, "")
+      .replace(/\s*\}$/, "");
+    return `{ Ok(${okBody || "Default::default()"}) }`;
+  }
+  return "{ Default::default() }";
+}
+
+export function generateRustCandidateMutations(
+  sourceText: string,
+  startLine?: number,
+  endLine?: number,
+): PolyglotCandidateMutation[] {
+  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  const inlineTestRanges = findRustInlineTestByteRanges(masked);
+  const prodFns = parseAllRustFunctions(sourceText).filter((f) => !f.isTest);
+  const candidates: PolyglotCandidateMutation[] = [];
+  let seq = 1;
+
+  function inRange(line: number): boolean {
+    if (startLine !== undefined && line < startLine) return false;
+    if (endLine !== undefined && line > endLine) return false;
+    return true;
+  }
+
+  function isOffsetInInlineTest(offset: number): boolean {
+    return inlineTestRanges.some((r) => offset >= r.start && offset < r.end);
+  }
+
+  function addMutation(
+    startOffset: number,
+    endOffset: number,
+    replacement: string,
+    line: number,
+    isBodyClearance = false,
+  ): void {
+    const original = sourceText.slice(startOffset, endOffset);
+    if (original === replacement) return;
+    candidates.push({
+      id: `mut_${seq++}`,
+      line,
+      original,
+      mutated: replacement,
+      mutatedSource:
+        sourceText.slice(0, startOffset) + replacement + sourceText.slice(endOffset),
+      isBodyClearance,
+    });
+  }
+
+  for (const fn of prodFns) {
+    const overlapsRange =
+      (startLine === undefined || fn.endLine >= startLine) &&
+      (endLine === undefined || fn.startLine <= endLine);
+    if (!overlapsRange) continue;
+    const openBraceIdx = masked.indexOf("{", fn.startOffset);
+    if (openBraceIdx === -1 || openBraceIdx >= fn.endOffset) continue;
+    const zeroBody = buildRustZeroReturnBody(fn.returnSignature);
+    addMutation(openBraceIdx, fn.endOffset, zeroBody, fn.startLine, true);
+  }
+
+  const lines = sourceText.split("\n");
+  const maskedLines = masked.split("\n");
+  let lineOffset = 0;
+
+  const opRules: Array<{ pattern: RegExp; replacements: string[] }> = [
+    { pattern: /([A-Za-z0-9_)\]]+)\s*<=\s*([A-Za-z0-9_([\]]+)/g, replacements: ["<", ">"] },
+    { pattern: /([A-Za-z0-9_)\]]+)\s*>=\s*([A-Za-z0-9_([\]]+)/g, replacements: [">", "<"] },
+    { pattern: /([A-Za-z0-9_)\]]+)\s*==\s*([A-Za-z0-9_([\]]+)/g, replacements: ["!="] },
+    { pattern: /([A-Za-z0-9_)\]]+)\s*!=\s*([A-Za-z0-9_([\]]+)/g, replacements: ["=="] },
+  ];
+
+  for (let idx = 0; idx < lines.length; idx++) {
+    const lineNum = idx + 1;
+    const rawLine = lines[idx]!;
+    const mLine = maskedLines[idx]!;
+    if (inRange(lineNum) && !isOffsetInInlineTest(lineOffset)) {
+      for (const rule of opRules) {
+        rule.pattern.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = rule.pattern.exec(mLine)) !== null) {
+          const matchStart = lineOffset + m.index;
+          if (isOffsetInInlineTest(matchStart)) continue;
+          const matchEnd = matchStart + m[0].length;
+          if (m.length >= 3 && m[1] && m[2]) {
+            const left = rawLine.slice(m.index, m.index + m[1].length);
+            const right = rawLine.slice(
+              m.index + m[0].length - m[2].length,
+              m.index + m[0].length,
+            );
+            for (const op of rule.replacements) {
+              addMutation(matchStart, matchEnd, `${left} ${op} ${right}`, lineNum);
+            }
+          }
+        }
+      }
+    }
+    lineOffset += rawLine.length + 1;
+  }
+
+  return candidates;
+}
+
+export interface RustFunctionAstMeta {
+  name: string;
+  fileStem: string;
+  calledSymbols: string[];
+}
+
+export async function analyzeRustFilesAstEvidence(
+  rootDir: string,
+  rustSourceFiles: string[],
+  rustTestFiles: string[],
+): Promise<{
+  evidenceEntries: Array<{
+    fileStem: string;
+    symbol: string;
+    executedBlocks: Set<string>;
+    strongAssertedBlocks: Set<string>;
+    weakAssertedBlocks: Set<string>;
+    directStrongAssertions: number;
+    directWeakAssertions: number;
+    testFiles: Set<string>;
+  }>;
+  callGraphEdges: Map<string, Set<string>>;
+}> {
+  const toPosix = (p: string) => p.replace(/\\/g, "/");
+  const stripExt = (p: string) => p.replace(/\.rs$/, "");
+
+  const rustFunctionsByKey = new Map<string, RustFunctionAstMeta>();
+  const rustFunctionsByStemAndName = new Map<string, RustFunctionAstMeta>();
+  const rustFunctionsByName = new Map<string, RustFunctionAstMeta[]>();
+  const callGraphEdges = new Map<string, Set<string>>();
+
+  const allRustFiles = Array.from(new Set([...rustSourceFiles, ...rustTestFiles]));
+  const parsedByFile = new Map<
+    string,
+    {
+      content: string;
+      noComments: string;
+      fns: Array<
+        PolyglotFunctionSpan & { isTest: boolean; startOffset: number; endOffset: number }
+      >;
+    }
+  >();
+
+  const RUST_IGNORE_CALLEES = new Set([
+    "if",
+    "for",
+    "while",
+    "match",
+    "return",
+    "Some",
+    "None",
+    "Ok",
+    "Err",
+    "vec",
+    "format",
+    "println",
+    "eprintln",
+    "panic",
+    "unwrap",
+    "expect",
+    "is_ok",
+    "is_err",
+    "is_some",
+    "is_none",
+    "new",
+    "len",
+    "is_empty",
+    "clone",
+    "into",
+    "from",
+  ]);
+
+  for (const rel of allRustFiles) {
+    const fullPath = path.join(rootDir, rel);
+    let content = "";
+    try {
+      content = await fs.readFile(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+    const { noComments } = stripCommentsAndMaskStrings(content);
+    const fns = parseAllRustFunctions(content);
+    parsedByFile.set(rel, { content, noComments, fns });
+
+    if (rustSourceFiles.includes(rel)) {
+      const fileStem = stripExt(toPosix(rel));
+      const lines = noComments.split("\n");
+      for (const fn of fns) {
+        if (fn.isTest) continue;
+        const bodyText = lines.slice(fn.startLine - 1, fn.endLine).join("\n");
+        const calledSymbols: string[] = [];
+        const callRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+        let cm: RegExpExecArray | null;
+        while ((cm = callRe.exec(bodyText)) !== null) {
+          const callee = cm[1]!;
+          if (callee !== fn.name && !RUST_IGNORE_CALLEES.has(callee)) {
+            calledSymbols.push(callee);
+          }
+        }
+        const meta: RustFunctionAstMeta = {
+          name: fn.name,
+          fileStem,
+          calledSymbols,
+        };
+        const key = `${fileStem}::${fn.name}`;
+        rustFunctionsByKey.set(key, meta);
+        rustFunctionsByStemAndName.set(key, meta);
+        const list = rustFunctionsByName.get(fn.name) ?? [];
+        list.push(meta);
+        rustFunctionsByName.set(fn.name, list);
+      }
+    }
+  }
+
+  for (const [callerKey, meta] of rustFunctionsByKey.entries()) {
+    const edges = new Set<string>();
+    for (const calleeName of meta.calledSymbols) {
+      const sameFile = rustFunctionsByStemAndName.get(`${meta.fileStem}::${calleeName}`);
+      const targets = sameFile ? [sameFile] : (rustFunctionsByName.get(calleeName) ?? []);
+      for (const t of targets) {
+        edges.add(`${t.fileStem}::${t.name}`);
+      }
+    }
+    callGraphEdges.set(callerKey, edges);
+  }
+
+  const evidenceMap = new Map<
+    string,
+    {
+      fileStem: string;
+      symbol: string;
+      executedBlocks: Set<string>;
+      strongAssertedBlocks: Set<string>;
+      weakAssertedBlocks: Set<string>;
+      directStrongAssertions: number;
+      directWeakAssertions: number;
+      testFiles: Set<string>;
+    }
+  >();
+
+  function getOrCreateEv(fileStem: string, symbol: string) {
+    const key = `${fileStem}::${symbol}`;
+    let entry = evidenceMap.get(key);
+    if (!entry) {
+      entry = {
+        fileStem,
+        symbol,
+        executedBlocks: new Set(),
+        strongAssertedBlocks: new Set(),
+        weakAssertedBlocks: new Set(),
+        directStrongAssertions: 0,
+        directWeakAssertions: 0,
+        testFiles: new Set(),
+      };
+      evidenceMap.set(key, entry);
+    }
+    return entry;
+  }
+
+  for (const [rel, parsed] of parsedByFile.entries()) {
+    const fileStem = stripExt(toPosix(rel));
+    const lines = parsed.noComments.split("\n");
+    const isDedicatedTestFile = rustTestFiles.includes(rel);
+    let blockCounter = 0;
+
+    function resolveRustTarget(calleeName: string): RustFunctionAstMeta[] {
+      const sameFile = rustFunctionsByStemAndName.get(`${fileStem}::${calleeName}`);
+      if (sameFile) return [sameFile];
+      return rustFunctionsByName.get(calleeName) ?? [];
+    }
+
+    for (const fn of parsed.fns) {
+      if (!fn.isTest && !isDedicatedTestFile) continue;
+      const blockId = `${toPosix(rel)}#${++blockCounter}`;
+      const bodyText = lines.slice(fn.startLine - 1, fn.endLine).join("\n");
+
+      const varToTargets = new Map<string, RustFunctionAstMeta[]>();
+      const calledTargetsInBlock = new Map<string, RustFunctionAstMeta>();
+      const strongForTarget = new Map<string, number>();
+      const weakForTarget = new Map<string, number>();
+
+      // 1. Track `let [mut] <var> = ... <callee>(...)`
+      const letRe =
+        /\blet\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?=\s*([^;]+);/g;
+      let lm: RegExpExecArray | null;
+      while ((lm = letRe.exec(bodyText)) !== null) {
+        const varName = lm[1]!;
+        const rhs = lm[2]!;
+        const callRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+        let cm: RegExpExecArray | null;
+        const rhsTargets: RustFunctionAstMeta[] = [];
+        while ((cm = callRe.exec(rhs)) !== null) {
+          const targets = resolveRustTarget(cm[1]!);
+          for (const t of targets) {
+            calledTargetsInBlock.set(`${t.fileStem}::${t.name}`, t);
+            rhsTargets.push(t);
+          }
+        }
+        if (varName !== "_" && rhsTargets.length > 0) {
+          varToTargets.set(varName, rhsTargets);
+          if (/\.\s*(?:unwrap|expect)\s*\(/.test(rhs)) {
+            for (const t of rhsTargets) {
+              const k = `${t.fileStem}::${t.name}`;
+              weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+            }
+          }
+        } else if (varName === "_" && rhsTargets.length > 0 && /\.\s*(?:unwrap|expect)\s*\(/.test(rhs)) {
+          for (const t of rhsTargets) {
+            const k = `${t.fileStem}::${t.name}`;
+            weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+          }
+        }
+      }
+
+      // 2. Track all calls in test body
+      const callRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      let cm: RegExpExecArray | null;
+      while ((cm = callRe.exec(bodyText)) !== null) {
+        const callee = cm[1]!;
+        for (const t of resolveRustTarget(callee)) {
+          calledTargetsInBlock.set(`${t.fileStem}::${t.name}`, t);
+        }
+      }
+
+      function collectTargetsInExpr(expr: string): RustFunctionAstMeta[] {
+        const found: RustFunctionAstMeta[] = [];
+        for (const [vName, targets] of varToTargets.entries()) {
+          if (new RegExp(`\\b${vName}\\b`).test(expr)) {
+            found.push(...targets);
+          }
+        }
+        const exprCallRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+        let ecm: RegExpExecArray | null;
+        while ((ecm = exprCallRe.exec(expr)) !== null) {
+          found.push(...resolveRustTarget(ecm[1]!));
+        }
+        return found;
+      }
+
+      // 3. Strong assertions: `assert_eq!(...)`, `assert_ne!(...)`, `matches!(...)`
+      const strongMacroRe = /\b(?:assert_eq|assert_ne|debug_assert_eq|debug_assert_ne|assert_matches)!\s*\(([^;]+)\)/g;
+      let sm: RegExpExecArray | null;
+      while ((sm = strongMacroRe.exec(bodyText)) !== null) {
+        const expr = sm[1]!;
+        for (const t of collectTargetsInExpr(expr)) {
+          const k = `${t.fileStem}::${t.name}`;
+          strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
+        }
+      }
+
+      // 4. `assert!(<cond>)`: check if `<cond>` is purely `.is_ok()` / `.is_some()` / `.is_err()` / `.is_none()` (Liveness Check) vs concrete comparison (Outcome Assertion)
+      const assertMacroRe = /\b(?:assert|debug_assert)!\s*\(([^;]+)\)/g;
+      let am: RegExpExecArray | null;
+      while ((am = assertMacroRe.exec(bodyText)) !== null) {
+        const expr = am[1]!;
+        const targets = collectTargetsInExpr(expr);
+        if (targets.length === 0) continue;
+
+        const isPureLiveness =
+          /\.\s*(?:is_ok|is_some)\s*\(\s*\)/.test(expr) &&
+          !/==|!=|<=|>=|<|>|\bmatches!\b/.test(expr);
+
+        for (const t of targets) {
+          const k = `${t.fileStem}::${t.name}`;
+          if (isPureLiveness) {
+            weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+          } else {
+            strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
+          }
+        }
+      }
+
+      for (const [k, target] of calledTargetsInBlock.entries()) {
+        const ev = getOrCreateEv(target.fileStem, target.name);
+        ev.executedBlocks.add(blockId);
+        ev.testFiles.add(toPosix(rel));
         const sc = strongForTarget.get(k) ?? 0;
         const wc = weakForTarget.get(k) ?? 0;
         if (sc > 0) {

@@ -7,6 +7,7 @@ import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidenc
 import {
   extractPolyglotFunctionSpans,
   generateGoCandidateMutations,
+  generateRustCandidateMutations,
   isCompilerErrorOutput,
   isPolyglotSourceFile,
 } from "./polyglot.js";
@@ -156,6 +157,9 @@ export function generateCandidateMutations(
   if (fileName.endsWith(".go")) {
     return generateGoCandidateMutations(sourceText, startLine, endLine);
   }
+  if (fileName.endsWith(".rs")) {
+    return generateRustCandidateMutations(sourceText, startLine, endLine);
+  }
   const sf = ts.createSourceFile(
     fileName,
     sourceText,
@@ -292,6 +296,9 @@ async function detectDefaultTestCommand(
 ): Promise<string> {
   if (targetFile.endsWith(".go")) {
     return "go test ./...";
+  }
+  if (targetFile.endsWith(".rs")) {
+    return "cargo test";
   }
   const testTargets = associatedTestFiles.length > 0 ? ` ${associatedTestFiles.join(" ")}` : "";
   try {

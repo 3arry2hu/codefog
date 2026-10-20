@@ -91,17 +91,83 @@ function extractOriginalSnippet(
     .trim();
 }
 
+interface RawCargoMutantEntry {
+  scenario?: {
+    Mutant?: {
+      package?: string;
+      file?: string;
+      function?: { function_name?: string; return_type?: string };
+      span?: {
+        start?: { line?: number; column?: number };
+        end?: { line?: number; column?: number };
+      };
+      replacement?: string;
+      genre?: string;
+    };
+  };
+  summary?: string;
+}
+
+interface RawCargoMutantsReport {
+  outcomes?: RawCargoMutantEntry[];
+}
+
 export async function loadStrykerReport(
   rootDir: string,
   strykerPath: string,
 ): Promise<ParsedStrykerReport> {
   const absPath = path.resolve(rootDir, strykerPath);
   const rawContent = await fs.readFile(absPath, "utf8");
-  const parsed = JSON.parse(rawContent) as RawStrykerReport;
+  const parsed = JSON.parse(rawContent) as RawStrykerReport & RawCargoMutantsReport;
 
   const byFile = new Map<string, StrykerFileSummary>();
   let totalMutants = 0;
   let killedMutants = 0;
+
+  if (Array.isArray(parsed.outcomes)) {
+    let seq = 1;
+    for (const outcome of parsed.outcomes) {
+      const mut = outcome.scenario?.Mutant;
+      if (!mut?.file) continue;
+      const summary = outcome.summary ?? "Missed";
+      if (summary === "Unviable" || summary === "Ignored") {
+        continue;
+      }
+      totalMutants++;
+      const killed = summary === "Caught" || summary === "Timeout";
+      if (killed) {
+        killedMutants++;
+      }
+      const relPath = normalizeRelPath(mut.file, rootDir);
+      const startLine = mut.span?.start?.line ?? 1;
+      const endLine = mut.span?.end?.line ?? startLine;
+      let fileSummary = byFile.get(relPath);
+      if (!fileSummary) {
+        fileSummary = { mutants: [] };
+        byFile.set(relPath, fileSummary);
+      }
+      fileSummary.mutants.push({
+        id: `cargo_mut_${seq++}`,
+        line: startLine,
+        endLine,
+        original: mut.function?.function_name ?? "",
+        mutated: mut.replacement ?? "",
+        testsRun: 1,
+        killed,
+        status: killed ? "Killed" : "Survived",
+      });
+    }
+
+    const mutationScorePct =
+      totalMutants > 0 ? Math.round((killedMutants / totalMutants) * 1000) / 10 : 0;
+
+    return {
+      totalMutants,
+      killedMutants,
+      mutationScorePct,
+      byFile,
+    };
+  }
 
   for (const [fileKey, fileData] of Object.entries(parsed.files ?? {})) {
     const relPath = normalizeRelPath(fileKey, rootDir);

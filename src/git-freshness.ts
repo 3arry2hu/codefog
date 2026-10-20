@@ -1,8 +1,11 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ts from "typescript";
-import { extractPolyglotRuntimeFingerprints, isPolyglotSourceFile } from "./polyglot.js";
-import { extractPolyglotRuntimeFingerprints, isPolyglotSourceFile } from "./polyglot.js";
+import {
+  extractPolyglotRuntimeFingerprints,
+  extractRustInlineTestFingerprint,
+  isPolyglotSourceFile,
+} from "./polyglot.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -262,12 +265,22 @@ export async function analyzeFileGitFreshness(params: {
   const oldestSrc = srcHistory[srcHistory.length - 1]!;
   const currentFingerprints = extractRuntimeFunctionFingerprints(currentSourceText, relPath);
   const baselineFingerprintCache = new Map<string, Map<string, string>>();
+  const sourceTextAtCommitCache = new Map<string, string | null>();
+
+  async function getSourceTextAtCommit(sha: string): Promise<string | null> {
+    if (sourceTextAtCommitCache.has(sha)) {
+      return sourceTextAtCommitCache.get(sha)!;
+    }
+    const text = await runGit(rootDir, ["show", `${sha}:${relPath}`]);
+    sourceTextAtCommitCache.set(sha, text);
+    return text;
+  }
 
   async function getFingerprintsAtCommit(sha: string): Promise<Map<string, string>> {
     if (baselineFingerprintCache.has(sha)) {
       return baselineFingerprintCache.get(sha)!;
     }
-    const historicalText = await runGit(rootDir, ["show", `${sha}:${relPath}`]);
+    const historicalText = await getSourceTextAtCommit(sha);
     const fp = historicalText
       ? extractRuntimeFunctionFingerprints(historicalText, relPath)
       : new Map<string, string>();
@@ -275,12 +288,46 @@ export async function analyzeFileGitFreshness(params: {
     return fp;
   }
 
+  // If the file is a Rust source file with inline `#[cfg(test)]`, find the latest commit where the inline test block changed
+  let inlineRustTestCommits: GitCommitEntry[] | null = null;
+  if (relPath.endsWith(".rs") && srcHistory.length > 0) {
+    const inlineCommits: GitCommitEntry[] = [];
+    // Walk from oldest to newest to find commits that introduced or modified inline test blocks
+    for (let i = srcHistory.length - 1; i >= 0; i--) {
+      const c = srcHistory[i]!;
+      const curText = await getSourceTextAtCommit(c.sha);
+      const curTestFp = curText ? extractRustInlineTestFingerprint(curText) : "";
+      if (!curTestFp) continue;
+      if (i === srcHistory.length - 1) {
+        inlineCommits.unshift(c);
+      } else {
+        const prevCommit = srcHistory[i + 1]!;
+        const prevText = await getSourceTextAtCommit(prevCommit.sha);
+        const prevTestFp = prevText ? extractRustInlineTestFingerprint(prevText) : "";
+        if (curTestFp !== prevTestFp) {
+          inlineCommits.unshift(c);
+        }
+      }
+    }
+    if (inlineCommits.length > 0) {
+      inlineRustTestCommits = inlineCommits;
+    }
+  }
+
   const functions = new Map<string, FunctionFreshnessInfo>();
 
   for (const span of functionSpans) {
     const fnName = span.name;
     const testFiles = associatedTestFiles.get(fnName) ?? [];
-    const testHistory = await getCommitHistory(rootDir, testFiles);
+    const usesSameFileInlineRustTests =
+      relPath.endsWith(".rs") &&
+      testFiles.length === 1 &&
+      testFiles[0] === relPath &&
+      inlineRustTestCommits !== null;
+
+    const testHistory = usesSameFileInlineRustTests
+      ? inlineRustTestCommits!
+      : await getCommitHistory(rootDir, testFiles);
     const latestTest = testHistory[0];
 
     let isFogReturned = false;

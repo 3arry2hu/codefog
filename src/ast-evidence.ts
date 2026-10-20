@@ -3,6 +3,7 @@ import * as path from "node:path";
 import ts from "typescript";
 import {
   analyzeGoFilesAstEvidence,
+  analyzeRustFilesAstEvidence,
   isPolyglotSourceFile,
   isPolyglotTestFile,
 } from "./polyglot.js";
@@ -513,6 +514,26 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
     }
   }
 
+  const rustSourceFiles = sourceFiles.filter((f) => f.endsWith(".rs"));
+  const rustTestFiles = testFiles.filter((f) => f.endsWith(".rs"));
+  if (rustSourceFiles.length > 0 || rustTestFiles.length > 0) {
+    const rustRes = await analyzeRustFilesAstEvidence(rootDir, rustSourceFiles, rustTestFiles);
+    for (const ev of rustRes.evidenceEntries) {
+      const target = getOrCreateInternal(ev.fileStem, ev.symbol);
+      for (const b of ev.executedBlocks) target.executedBlocks.add(b);
+      for (const sb of ev.strongAssertedBlocks) target.strongAssertedBlocks.add(sb);
+      for (const wb of ev.weakAssertedBlocks) target.weakAssertedBlocks.add(wb);
+      target.directStrongAssertions += ev.directStrongAssertions;
+      target.directWeakAssertions += ev.directWeakAssertions;
+      for (const tf of ev.testFiles) target.testFiles.add(tf);
+    }
+    for (const [callerKey, edges] of rustRes.callGraphEdges.entries()) {
+      const existing = callGraph.get(callerKey) ?? new Set<string>();
+      for (const edge of edges) existing.add(edge);
+      callGraph.set(callerKey, existing);
+    }
+  }
+
   for (const srcFileRel of sourceFiles) {
     if (isPolyglotSourceFile(srcFileRel)) {
       continue;
@@ -667,8 +688,17 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
     }
   }
 
+  let inlineTestCount = 0;
+  for (const internal of internalMap.values()) {
+    for (const tf of internal.testFiles) {
+      if (!testFiles.includes(tf)) {
+        inlineTestCount++;
+      }
+    }
+  }
+
   return {
-    testFileCount: testFiles.length,
+    testFileCount: testFiles.length + inlineTestCount,
     byFileAndSymbol,
     bySymbol,
   };
