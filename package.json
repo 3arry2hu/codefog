@@ -1,5 +1,5 @@
 {
-  "name": "codefog",
+  "name": "@barryzhu/codefog",
   "version": "1.0.0",
   "description": "See which parts of your codebase you can actually trust. Fog-first trust and risk map for TypeScript/JavaScript repositories.",
   "license": "MIT",
