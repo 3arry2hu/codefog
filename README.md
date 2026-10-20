@@ -118,6 +118,46 @@ Top Fog Hotspots & Findings:
 
 ---
 
+## 一键安装 AI Agent Skill（Codex / Claude Code / CodeBuddy / Cursor）
+
+`codefog` 内置了专用于 AI 编码代理的 **代码质量与测试可信度评测优化闭环 Skill**。通过一行 `npx` 命令即可自动为 **Codex**、**Claude Code**、**CodeBuddy** 和 **Cursor** 安装该 Skill：
+
+### 1. 一键安装 Skill
+
+```bash
+# 在当前项目根目录为全部四大 AI 平台（codex, claude-code, codebuddy, cursor）安装 Skill
+npx @barryzhu/codefog@latest install-skill
+
+# 仅针对指定 AI 工具安装（支持逗号分隔或重复传参）
+npx @barryzhu/codefog@latest install-skill --agent cursor,claude-code
+
+# 全局安装到用户主目录（~/.codex/skills、~/.claude/skills、~/.codebuddy/skills、~/.cursor/skills 等）
+npx @barryzhu/codefog@latest install-skill --global
+```
+
+| 平台 (`--agent`) | 项目级安装路径 | 全局安装路径 (`--global` / `-g`) |
+| :--- | :--- | :--- |
+| `codex` | `.codex/skills/codefog/SKILL.md` & `.agents/skills/codefog/SKILL.md` | `~/.codex/skills/codefog/SKILL.md` & `~/.agents/skills/codefog/SKILL.md` |
+| `claude-code` | `.claude/skills/codefog/SKILL.md` | `~/.claude/skills/codefog/SKILL.md` |
+| `codebuddy` | `.codebuddy/skills/codefog/SKILL.md` | `~/.codebuddy/skills/codefog/SKILL.md` |
+| `cursor` | `.cursor/skills/codefog/SKILL.md` | `~/.cursor/skills/codefog/SKILL.md` |
+
+### 2. AI Agent 自动评测与持续迭代闭环工作流
+
+安装完成后，在 Codex、Claude Code、CodeBuddy 或 Cursor 中对 AI Agent 说：
+> **“使用 codefog 对当前项目做代码质量评测，给出评测结论，并持续优化测试直到达标”**
+
+AI Agent 将按照 Skill 定义的四步闭环自动执行：
+1. **基线采集与扫描（Baseline Evaluation）**：自动识别项目语言（TS/JS、Go、Rust、Java），运行对应的覆盖率命令并执行 `npx --yes @barryzhu/codefog@latest` 获取基线报告。
+2. **输出结构化评测结论（Evaluation Conclusion）**：给出当前 `Trust Score`、五态代码行分布（`fog-returned` / `fog` / `self-proof-fog` / `weak-evidence` / `verified`）、Top 高风险 `Finding` (`CF-xxxx`) 的根因诊断（无覆盖、仅有存活性检查或测试滞后）以及明确的收敛目标。
+3. **持续迭代优化与反作弊验证（Iterative Optimization Loop）**：
+   - 按风险优先级（`fog-returned` → `fog` → `weak-evidence` → `self-proof-fog`）逐个强化实质性结果断言（`Outcome Assertions`），严禁通过删减生产代码分支作弊；
+   - 每修复一个目标文件，自动调用 `npx --yes @barryzhu/codefog@latest verify <targetFile> --mutants --lines <start>-<end>` 执行函数体零值清空与算子变异反作弊验证；
+   - 若存在存活变异体或伪测试方法，Agent 会根据反馈继续补充边界与返回值断言，随后重新生成覆盖率与 `codefog` 报告，循环迭代直至达到目标 `Trust Score` 且消除高优风险项。
+4. **最终收敛报告（Final Convergence Report）**：输出优化前后的 `Trust Score`、检验覆盖率、变异得分对比表与 `.codefog/report.html` 报告路径。
+
+---
+
 ## CLI 命令与参数说明
 
 ### `codefog [rootDir] [options]`

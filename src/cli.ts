@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
 import { computeDiffComparison, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
+import { installCodefogSkill } from "./skill-installer.js";
 import { verifyTargetWithMutants } from "./verify.js";
 import type { CodefogReport } from "./types.js";
 
@@ -136,7 +137,7 @@ export async function runCli(
     }
 
     if (argv.includes("--version") || argv.includes("-v")) {
-      io.stdout("1.2.0\n");
+      io.stdout("1.3.0\n");
       return 0;
     }
     if (argv.includes("--help") || argv.includes("-h")) {
@@ -147,6 +148,7 @@ export async function runCli(
           "Usage:",
           "  codefog [rootDir] [options]",
           "  codefog verify <targetFile> [--lines start-end] [--mutants] [--test-cmd <cmd>]",
+          "  codefog install-skill [--agent <codex|claude-code|codebuddy|cursor|all>] [--global|-g]",
           "",
           "Options:",
           "  --coverage <path>     Path(s) to coverage file(s) (LCOV, Go coverprofile, JaCoCo XML; comma-separated or repeatable)",
@@ -159,11 +161,68 @@ export async function runCli(
           "  --json                Output full JSON report to stdout",
           "  --open                Open HTML Fog Map in default browser",
           "  --fail-on <policy>    Exit gate policy: returned | regression | any-fog | none (default: returned)",
+          "  --install-skill [ag]  Install AI agent skill for codex, claude-code, codebuddy, cursor (default: all)",
+          "  -g, --global          Install AI skill into user home directory (~/.cursor/skills, ~/.claude/skills, etc.)",
           "  -v, --version         Print version",
           "  -h, --help            Print help",
           "",
         ].join("\n"),
       );
+      return 0;
+    }
+
+    const isInstallSkillCmd =
+      argv[0] === "install-skill" ||
+      argv[0] === "skill" ||
+      argv[0] === "init-skill" ||
+      argv.includes("--install-skill") ||
+      (process.env.npm_command === "exec" && Boolean(process.env.npm_config_install_skill));
+
+    if (isInstallSkillCmd) {
+      let rootDir = process.cwd();
+      let isGlobal = false;
+      const agentSpecs: string[] = [];
+
+      if (process.env.npm_command === "exec") {
+        if (process.env.npm_config_global === "true") isGlobal = true;
+        const envAgent = process.env.npm_config_agent || process.env.npm_config_target;
+        if (envAgent && envAgent !== "true" && envAgent !== "false") {
+          agentSpecs.push(envAgent);
+        }
+        const envInstallSkill = process.env.npm_config_install_skill;
+        if (envInstallSkill && envInstallSkill !== "true" && envInstallSkill !== "false") {
+          agentSpecs.push(envInstallSkill);
+        }
+      }
+
+      for (let i = 0; i < argv.length; i++) {
+        const arg = argv[i]!;
+        if (arg === "install-skill" || arg === "skill" || arg === "init-skill") {
+          continue;
+        }
+        if (arg === "--install-skill") {
+          const next = argv[i + 1];
+          if (next && !next.startsWith("-")) {
+            agentSpecs.push(argv[++i]!);
+          }
+        } else if (arg === "--agent" || arg === "--agents" || arg === "--target") {
+          const next = argv[++i];
+          if (next) agentSpecs.push(next);
+        } else if (arg === "--global" || arg === "-g") {
+          isGlobal = true;
+        } else if (arg === "--root") {
+          rootDir = path.resolve(argv[++i] ?? ".");
+        } else if (!arg.startsWith("-")) {
+          agentSpecs.push(arg);
+        }
+      }
+
+      const res = await installCodefogSkill({
+        rootDir,
+        agents: agentSpecs.length > 0 ? agentSpecs : undefined,
+        global: isGlobal,
+      });
+      io.stdout(res.summary + "\n");
       return 0;
     }
     if (argv[0] === "verify") {
