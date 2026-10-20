@@ -60,6 +60,14 @@ _Avoid_: Recency（近期性）, Age（库龄）
 被测试执行且实际影响到断言评估结果的语句比例。
 _Avoid_: Line Coverage（行覆盖率）, Assertion Count（断言数）
 
+**Outcome Assertion（结果断言）**:
+对被测函数返回的具体业务值、状态变更或预期错误类型进行明确校验的断言，是构成 `Verified` 状态与 `Checked Coverage` 的必要证据。
+_Avoid_: Value Check（值检查）, Strong Assertion（强断言）
+
+**Liveness Check（存活性检查）**:
+仅验证代码执行未崩溃、返回值非空或未抛出异常的浅层检查，无法证明业务逻辑正确性，仅能归类为 `Weak Evidence`。
+_Avoid_: Smoke Check（冒烟检查）, Weak Assertion（弱断言）
+
 **Pseudo-tested Method（伪测试方法）**:
 被测试执行过，但即使清空整个函数体或替换为默认返回值，现有测试套件依然全部通过的方法。
 _Avoid_: Untested Method（未测方法）, Partially Tested Method（部分测试方法）
