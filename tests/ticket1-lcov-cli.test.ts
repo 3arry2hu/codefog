@@ -185,7 +185,7 @@ describe("Ticket 1: LCOV end-to-end CLI scan & --json report skeleton", () => {
         stderr: () => {},
       }),
     ).toBe(0);
-    expect(verOut.trim()).toBe("1.1.1");
+    expect(verOut.trim()).toBe("1.1.2");
 
     let helpOut = "";
     expect(

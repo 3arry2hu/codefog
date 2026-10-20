@@ -1,15 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import {
   extractPolyglotFunctionSpans,
   findFilesByExtensionInRepo,
   getPolyglotAdapter,
   isPolyglotSourceFile,
 } from "./polyglot.js";
-
-const execFileAsync = promisify(execFile);
 
 export interface LcovBranchEntry {
   line: number;
@@ -459,25 +455,8 @@ export async function loadCoverageRecords(
         latestMtimeMs = stat.mtimeMs;
       }
     } catch {
-      if (goModulePrefix && absPath.endsWith(".out")) {
-        try {
-          await execFileAsync("go", ["test", `-coverprofile=${absPath}`, "./..."], {
-            cwd: rootDir,
-            timeout: 25000,
-          });
-          content = await fs.readFile(absPath, "utf8");
-          const stat = await fs.stat(absPath);
-          if (latestMtimeMs === undefined || stat.mtimeMs > latestMtimeMs) {
-            latestMtimeMs = stat.mtimeMs;
-          }
-        } catch {
-          missingPaths.push(absPath);
-          continue;
-        }
-      } else {
-        missingPaths.push(absPath);
-        continue;
-      }
+      missingPaths.push(absPath);
+      continue;
     }
 
     const trimmed = content.trimStart();
@@ -499,29 +478,7 @@ export async function loadCoverageRecords(
   }
 
   if (merged.size === 0) {
-    if (goModulePrefix && resolvedPaths.length === 0) {
-      const autoCoverOut = path.join(rootDir, "coverage.out");
-      try {
-        await execFileAsync("go", ["test", `-coverprofile=${autoCoverOut}`, "./..."], {
-          cwd: rootDir,
-          timeout: 25000,
-        });
-        const content = await fs.readFile(autoCoverOut, "utf8");
-        const stat = await fs.stat(autoCoverOut);
-        latestMtimeMs = stat.mtimeMs;
-        repoGoFiles = await findFilesByExtensionInRepo(rootDir, rootDir, ".go");
-        const parsed = parseGoCoverProfile(content, rootDir, goModulePrefix, repoGoFiles);
-        for (const [rel, rec] of parsed.entries()) {
-          merged.set(rel, rec);
-        }
-      } catch {
-        // fallback to static zero-hit repo synthesis below
-      }
-    }
-
-    if (merged.size === 0) {
-      await synthesizeZeroHitRecordsFromRepo(rootDir, merged);
-    }
+    await synthesizeZeroHitRecordsFromRepo(rootDir, merged);
 
     if (merged.size === 0) {
       const targetErrPath =
