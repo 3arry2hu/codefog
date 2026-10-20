@@ -181,7 +181,16 @@ function resolveExpressionSymbols(
   const results: CallTarget[] = [];
 
   function visit(node: ts.Node): void {
-    if (ts.isCallExpression(node)) {
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
+      const id = node.expression.text;
+      const imp = imports.get(id);
+      if (imp && imp.exportedName !== "*") {
+        results.push({
+          symbol: imp.exportedName === "default" ? id : imp.exportedName,
+          targetFileStem: imp.targetFileStem,
+        });
+      }
+    } else if (ts.isCallExpression(node)) {
       if (ts.isIdentifier(node.expression)) {
         const id = node.expression.text;
         const imp = imports.get(id);
@@ -196,13 +205,24 @@ function resolveExpressionSymbols(
       } else if (ts.isPropertyAccessExpression(node.expression)) {
         const obj = node.expression.expression;
         const prop = node.expression.name.text;
+        if (ts.isNewExpression(obj) && ts.isIdentifier(obj.expression)) {
+          const imp = imports.get(obj.expression.text);
+          results.push({
+            symbol: prop,
+            targetFileStem: imp ? imp.targetFileStem : null,
+          });
+          return;
+        }
         if (ts.isIdentifier(obj)) {
           const imp = imports.get(obj.text);
-          if (imp && imp.exportedName === "*") {
+          if (imp) {
             results.push({ symbol: prop, targetFileStem: imp.targetFileStem });
           } else if (taintedVars.has(obj.text)) {
             for (const t of taintedVars.get(obj.text)!) {
               results.push(t);
+              if (t.targetFileStem) {
+                results.push({ symbol: prop, targetFileStem: t.targetFileStem });
+              }
             }
           } else {
             results.push({ symbol: prop, targetFileStem: null });
@@ -398,25 +418,10 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
               }
             }
           } else {
-            if (ts.isIdentifier(node.expression)) {
-              const id = node.expression.text;
-              const imp = imports.get(id);
-              if (imp && imp.exportedName !== "*") {
-                recordCallTarget({
-                  symbol: imp.exportedName === "default" ? id : imp.exportedName,
-                  targetFileStem: imp.targetFileStem,
-                });
-              }
-            } else if (
-              ts.isPropertyAccessExpression(node.expression) &&
-              ts.isIdentifier(node.expression.expression)
-            ) {
-              const ns = imports.get(node.expression.expression.text);
-              if (ns && ns.exportedName === "*") {
-                recordCallTarget({
-                  symbol: node.expression.name.text,
-                  targetFileStem: ns.targetFileStem,
-                });
+            const directTargets = resolveExpressionSymbols(node, imports, taintedVars);
+            for (const t of directTargets) {
+              if (t.targetFileStem !== null) {
+                recordCallTarget(t);
               }
             }
           }

@@ -132,4 +132,96 @@ describe("Ticket 2: AST assertion dataflow, Weak Evidence, Checked Coverage & Ps
     expect(discountFinding?.evidence.assertionsOnOutcome).toBe(1);
     expect(discountFinding?.evidence.pseudoTested).toBe(false);
   });
+
+  it("scopes class method assertions (new Class().method and instance.method) to the imported class file without colliding with same-named methods in other files", async () => {
+    await fs.mkdir(path.join(tmpDir, "src", "auth"), { recursive: true });
+
+    // File 1: src/billing/parser.ts -> class InvoiceParser { parse(raw: string): number }
+    await fs.writeFile(
+      path.join(tmpDir, "src", "billing", "parser.ts"),
+      [
+        "export class InvoiceParser {",
+        "  parse(raw: string): number {",
+        "    return Number.parseInt(raw, 10);",
+        "  }",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    // File 2: src/auth/token-parser.ts -> class TokenParser { parse(raw: string): string }
+    await fs.writeFile(
+      path.join(tmpDir, "src", "auth", "token-parser.ts"),
+      [
+        "export class TokenParser {",
+        "  parse(raw: string): string {",
+        "    return raw.trim();",
+        "  }",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    // Test file: strongly asserts on new InvoiceParser().parse('42'), but calls new TokenParser().parse('abc') WITHOUT any assertion
+    await fs.writeFile(
+      path.join(tmpDir, "tests", "parsers.test.ts"),
+      [
+        "import { describe, it, expect } from 'vitest';",
+        "import { InvoiceParser } from '../src/billing/parser.js';",
+        "import { TokenParser } from '../src/auth/token-parser.js';",
+        "",
+        "describe('parsers', () => {",
+        "  it('asserts on InvoiceParser.parse inline and via instance variable', () => {",
+        "    expect(new InvoiceParser().parse('42')).toBe(42);",
+        "    const tp = new TokenParser();",
+        "    tp.parse('unverified_token');",
+        "  });",
+        "});",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
+      path.join(tmpDir, "coverage", "lcov.info"),
+      [
+        "TN:",
+        "SF:src/billing/parser.ts",
+        "FN:2,parse",
+        "FNF:1",
+        "FNH:1",
+        "FNDA:1,parse",
+        "DA:2,1",
+        "DA:3,1",
+        "LF:2",
+        "LH:2",
+        "end_of_record",
+        "TN:",
+        "SF:src/auth/token-parser.ts",
+        "FN:2,parse",
+        "FNF:1",
+        "FNH:1",
+        "FNDA:1,parse",
+        "DA:2,1",
+        "DA:3,1",
+        "LF:2",
+        "LH:2",
+        "end_of_record",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const report = await analyzeRepository({ rootDir: tmpDir });
+
+    const billingFile = report.files.find((f) => f.path === "src/billing/parser.ts");
+    const authFile = report.files.find((f) => f.path === "src/auth/token-parser.ts");
+
+    expect(billingFile?.regions[0]?.state).toBe("verified");
+    expect(billingFile?.regions[0]?.pseudoTested).toBe(false);
+    expect(billingFile?.regions[0]?.assertionsOnOutcome).toBe(1);
+
+    // TokenParser.parse was called without assertion, so it must NOT inherit InvoiceParser.parse's assertion!
+    expect(authFile?.regions[0]?.state).toBe("weak-evidence");
+    expect(authFile?.regions[0]?.pseudoTested).toBe(true);
+    expect(authFile?.regions[0]?.assertionsOnOutcome).toBe(0);
+  });
 });

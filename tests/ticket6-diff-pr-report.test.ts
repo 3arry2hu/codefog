@@ -207,4 +207,163 @@ describe("Ticket 6: Incremental --diff and PR Before/After Comparison Report (--
     expect(md).toContain("Pseudo-tested");
     expect(md).toContain("pr-diff.svg");
   });
+
+  it("marks newly added and strengthened files as improved when PR increases Trust Score and passes --fail-on regression", async () => {
+    const srcFile = path.join(tmpDir, "src", "payments", "checkout.ts");
+    const testFile = path.join(tmpDir, "tests", "checkout.test.ts");
+    const lcovFile = path.join(tmpDir, "coverage", "lcov.info");
+
+    await fs.writeFile(
+      srcFile,
+      [
+        "export function validateCart(items: number): boolean {",
+        "  return items > 0;",
+        "}",
+        "",
+        "export function processPayment(amount: number): boolean {",
+        "  const tax = amount * 0.1;",
+        "  return amount + tax > 0;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "src/payments/checkout.ts"]);
+    await git(tmpDir, ["commit", "-m", "feat: add checkout source"]);
+
+    await fs.writeFile(
+      testFile,
+      [
+        "import { describe, it, expect } from 'vitest';",
+        "import { validateCart } from '../src/payments/checkout.js';",
+        "describe('checkout', () => {",
+        "  it('validates cart', () => {",
+        "    expect(validateCart(2)).toBe(true);",
+        "  });",
+        "});",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
+      lcovFile,
+      [
+        "TN:",
+        "SF:src/payments/checkout.ts",
+        "FN:1,validateCart",
+        "FN:5,processPayment",
+        "FNF:2",
+        "FNH:1",
+        "FNDA:1,validateCart",
+        "FNDA:0,processPayment",
+        "DA:1,1",
+        "DA:2,1",
+        "DA:5,0",
+        "DA:6,0",
+        "DA:7,0",
+        "LF:5",
+        "LH:2",
+        "end_of_record",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "."]);
+    await git(tmpDir, ["commit", "-m", "test: baseline partial coverage"]);
+
+    // Feature branch: adds strong tests for processPayment AND introduces a new verified file src/payments/receipt.ts
+    await git(tmpDir, ["checkout", "-b", "feat/strengthen-evidence"]);
+
+    const receiptFile = path.join(tmpDir, "src", "payments", "receipt.ts");
+    await fs.writeFile(
+      receiptFile,
+      [
+        "export function formatReceipt(id: number): string {",
+        "  return `RCPT-${id}`;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "src/payments/receipt.ts"]);
+    await git(tmpDir, ["commit", "-m", "feat: add receipt module"]);
+
+    await fs.writeFile(
+      testFile,
+      [
+        "import { describe, it, expect } from 'vitest';",
+        "import { validateCart, processPayment } from '../src/payments/checkout.js';",
+        "import { formatReceipt } from '../src/payments/receipt.js';",
+        "describe('checkout and receipt', () => {",
+        "  it('verifies cart, payment, and receipt', () => {",
+        "    expect(validateCart(2)).toBe(true);",
+        "    expect(processPayment(100)).toBe(true);",
+        "    expect(formatReceipt(7)).toBe('RCPT-7');",
+        "  });",
+        "});",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
+      lcovFile,
+      [
+        "TN:",
+        "SF:src/payments/checkout.ts",
+        "FN:1,validateCart",
+        "FN:5,processPayment",
+        "FNF:2",
+        "FNH:2",
+        "FNDA:1,validateCart",
+        "FNDA:1,processPayment",
+        "DA:1,1",
+        "DA:2,1",
+        "DA:5,1",
+        "DA:6,1",
+        "DA:7,1",
+        "LF:5",
+        "LH:5",
+        "end_of_record",
+        "TN:",
+        "SF:src/payments/receipt.ts",
+        "FN:1,formatReceipt",
+        "FNF:1",
+        "FNH:1",
+        "FNDA:1,formatReceipt",
+        "DA:1,1",
+        "DA:2,1",
+        "LF:2",
+        "LH:2",
+        "end_of_record",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "."]);
+    await git(tmpDir, ["commit", "-m", "test: verify payment and receipt"]);
+
+    const stdoutChunks: string[] = [];
+    const exitCode = await runCli(
+      ["--root", tmpDir, "--diff", "main", "--pr-comment", "--json", "--fail-on", "regression"],
+      {
+        stdout: (s) => stdoutChunks.push(s),
+        stderr: () => {},
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    const report = JSON.parse(stdoutChunks.join(""));
+    expect(report.diff.coverageUpEvidenceDown).toBe(false);
+    expect(report.diff.alertHeadline).toContain(
+      "Evidence held steady or improved against main (Trust Score 40 -> 100).",
+    );
+
+    const checkoutSummary = report.files.find(
+      (f: { path: string }) => f.path === "src/payments/checkout.ts",
+    );
+    const receiptSummary = report.files.find(
+      (f: { path: string }) => f.path === "src/payments/receipt.ts",
+    );
+    expect(checkoutSummary.diffStatus).toBe("improved");
+    expect(receiptSummary.diffStatus).toBe("improved");
+
+    const md = await fs.readFile(path.join(tmpDir, ".codefog", "pr-comment.md"), "utf8");
+    expect(md).toContain("40 → **100** (+60)");
+  });
 });

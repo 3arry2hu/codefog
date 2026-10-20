@@ -75,7 +75,18 @@ export async function computeDiffComparison(
 
   for (const curFile of currentReport.files) {
     const prevFile = baseFileMap.get(curFile.path);
-    if (!prevFile) continue;
+    if (!prevFile) {
+      if (curFile.dominantState === "fog-returned") {
+        curFile.diffStatus = "fog-returned";
+        fogReturnedFiles.push(curFile.path);
+      } else if (curFile.dominantState === "verified") {
+        curFile.diffStatus = "improved";
+      } else {
+        curFile.diffStatus = "weakened";
+        weakenedFiles.push(curFile.path);
+      }
+      continue;
+    }
 
     const baseSource = await runGit(rootDir, ["show", `${baseRef}:${curFile.path}`]);
     const curSource = curFile.lines.join("\n");

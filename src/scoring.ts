@@ -112,7 +112,3 @@ export function getDominantState(locByState: LocByState): EvidenceState {
   }
   return "verified";
 }
-
-export function compareStateUrgency(a: EvidenceState, b: EvidenceState): number {
-  return STATE_EVIDENCE_RANK[a] - STATE_EVIDENCE_RANK[b];
-}

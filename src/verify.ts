@@ -198,13 +198,19 @@ export function generateCandidateMutations(
       } else if (node.kind === ts.SyntaxKind.FalseKeyword) {
         addReplacement(node, "true", line);
       } else if (
-        (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) &&
-        node.body &&
-        node.body.statements.length > 0
+        (ts.isFunctionDeclaration(node) ||
+          ts.isMethodDeclaration(node) ||
+          ts.isArrowFunction(node) ||
+          ts.isFunctionExpression(node)) &&
+        node.body
       ) {
-        // Method body clearance check (Pseudo-tested method detector)
+        // Method/function body clearance check (Pseudo-tested method detector)
         const bodyLine = sf.getLineAndCharacterOfPosition(node.body.getStart(sf)).line + 1;
-        addReplacement(node.body, "{ return undefined as any; }", bodyLine);
+        if (ts.isBlock(node.body) && node.body.statements.length > 0) {
+          addReplacement(node.body, "{ return undefined as any; }", bodyLine);
+        } else if (!ts.isBlock(node.body)) {
+          addReplacement(node.body, "(undefined as any)", bodyLine);
+        }
       }
     }
     ts.forEachChild(node, visit);
@@ -348,7 +354,7 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
   );
   const candidates = options.mutants
     ? allCandidates
-    : allCandidates.filter((c) => c.mutated.includes("return undefined"));
+    : allCandidates.filter((c) => c.mutated.includes("undefined as any"));
 
   const survivingMutants: SurvivingMutant[] = [];
   let killedMutants = 0;

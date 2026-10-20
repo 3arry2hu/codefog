@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "../src/analyzer.js";
 import { runCli } from "../src/cli.js";
+import { verifyTargetWithMutants } from "../src/verify.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -317,5 +318,102 @@ describe("Ticket 4: Stryker mutation report ingestion & codefog verify --mutants
     expect(code3).toBe(0);
     expect(out3.join("")).toMatch(/VERIFIED|passed/i);
     expect(await fs.readFile(srcFile, "utf8")).toBe(originalSource);
+  });
+
+  it("verifies arrow functions and class methods within --lines range, supports --allow-source-change, and auto-detects default test command from package.json", async () => {
+    const couponFile = path.join(tmpDir, "src", "billing", "coupon.ts");
+    const testFile = path.join(tmpDir, "tests", "coupon.test.mjs");
+
+    const initialCouponSource = [
+      "export const applyCoupon = (total: number): number => {",
+      "  if (total >= 50) {",
+      "    return total - 10;",
+      "  }",
+      "  return total;",
+      "};",
+      "",
+      "export function outOfRangeHelper(x: number): number {",
+      "  return x + 1;",
+      "}",
+    ].join("\n");
+    await fs.writeFile(couponFile, initialCouponSource, "utf8");
+
+    // Test file that exercises applyCoupon with strong outcome assertions AND can be executed directly by `node --test`
+    await fs.writeFile(
+      testFile,
+      [
+        "import test from 'node:test';",
+        "import assert from 'node:assert/strict';",
+        "import * as fs from 'node:fs';",
+        "const expect = (v) => ({ toBe: (e) => assert.strictEqual(v, e) });",
+        "test('applyCoupon discounts orders >= 50', () => {",
+        "  const src = fs.readFileSync('src/billing/coupon.ts', 'utf8');",
+        "  const js = src",
+        "    .replace('export const applyCoupon = (total: number): number =>', 'const applyCoupon = (total) =>')",
+        "    .replace(/as any/g, '')",
+        "    .replace(/export function outOfRangeHelper[\\s\\S]*/, '');",
+        "  const applyCoupon = new Function(js + '; return applyCoupon;')();",
+        "  expect(applyCoupon(50)).toBe(40);",
+        "  expect(applyCoupon(30)).toBe(30);",
+        "});",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ name: "coupon-pkg", scripts: { test: "node --test" } }),
+      "utf8",
+    );
+
+    await git(tmpDir, ["add", "."]);
+    await git(tmpDir, ["commit", "-m", "feat: add coupon arrow function"]);
+
+    // Modify source to remove the branch (intentional refactor) and verify with --allow-source-change and --lines 1-6 (excluding outOfRangeHelper on lines 8-10)
+    const refactoredSource = [
+      "export const applyCoupon = (total: number): number => {",
+      "  return total - 10;",
+      "};",
+      "",
+      "export function outOfRangeHelper(x: number): number {",
+      "  return x + 1;",
+      "}",
+    ].join("\n");
+    await fs.writeFile(couponFile, refactoredSource, "utf8");
+
+    // Update test expectation for the refactored flat discount
+    await fs.writeFile(
+      testFile,
+      [
+        "import test from 'node:test';",
+        "import assert from 'node:assert/strict';",
+        "import * as fs from 'node:fs';",
+        "const expect = (v) => ({ toBe: (e) => assert.strictEqual(v, e) });",
+        "test('applyCoupon applies flat discount', () => {",
+        "  const src = fs.readFileSync('src/billing/coupon.ts', 'utf8');",
+        "  const js = src",
+        "    .replace('export const applyCoupon = (total: number): number =>', 'const applyCoupon = (total) =>')",
+        "    .replace(/as any/g, '')",
+        "    .replace(/export function outOfRangeHelper[\\s\\S]*/, '');",
+        "  const applyCoupon = new Function(js + '; return applyCoupon;')();",
+        "  expect(applyCoupon(50)).toBe(40);",
+        "});",
+      ].join("\n"),
+      "utf8",
+    );
+
+    // Run without --mutants (default body-clearance pseudo-tested verification) and without testCmd (auto-detects from package.json)
+    const res = await verifyTargetWithMutants({
+      rootDir: tmpDir,
+      targetFile: "src/billing/coupon.ts",
+      mutants: false,
+      startLine: 1,
+      endLine: 3,
+      allowSourceChange: true,
+    });
+
+    expect(res.passed).toBe(true);
+    expect(res.totalMutants).toBe(1);
+    expect(res.killedMutants).toBe(1);
   });
 });

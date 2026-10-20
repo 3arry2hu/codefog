@@ -174,4 +174,69 @@ describe("Ticket 1: LCOV end-to-end CLI scan & --json report skeleton", () => {
     expect(humanOut).toContain("Trust Score: 60/100");
     expect(humanOut).toContain("src/billing");
   });
+
+  it("handles CLI flags (--version, --help, --fail-on gates, invalid --fail-on, and missing verify target) through runCli seam", async () => {
+    let verOut = "";
+    expect(
+      await runCli(["--version"], {
+        stdout: (s) => {
+          verOut += s;
+        },
+        stderr: () => {},
+      }),
+    ).toBe(0);
+    expect(verOut.trim()).toBe("1.0.0");
+
+    let helpOut = "";
+    expect(
+      await runCli(["--help"], {
+        stdout: (s) => {
+          helpOut += s;
+        },
+        stderr: () => {},
+      }),
+    ).toBe(0);
+    expect(helpOut).toContain("Usage:");
+    expect(helpOut).toContain("codefog verify <targetFile>");
+
+    // --fail-on returned passes (0) when there is Fog (4 lines) but 0 Fog Returned
+    expect(
+      await runCli(["--root", tmpDir, "--fail-on", "returned"], {
+        stdout: () => {},
+        stderr: () => {},
+      }),
+    ).toBe(0);
+
+    // --fail-on any-fog fails (1) because 4 lines are in Fog
+    expect(
+      await runCli(["--root", tmpDir, "--fail-on", "any-fog"], {
+        stdout: () => {},
+        stderr: () => {},
+      }),
+    ).toBe(1);
+
+    // Unknown --fail-on policy must fail (1) rather than silently passing
+    let invalidGateErr = "";
+    expect(
+      await runCli(["--root", tmpDir, "--fail-on", "unknown-policy"], {
+        stdout: () => {},
+        stderr: (s) => {
+          invalidGateErr += s;
+        },
+      }),
+    ).toBe(1);
+    expect(invalidGateErr).toContain("Invalid --fail-on policy");
+
+    // `codefog verify` without <target> fails (1) with actionable error
+    let verifyErr = "";
+    expect(
+      await runCli(["verify", "--mutants"], {
+        stdout: () => {},
+        stderr: (s) => {
+          verifyErr += s;
+        },
+      }),
+    ).toBe(1);
+    expect(verifyErr).toContain("requires a <target> file path");
+  });
 });

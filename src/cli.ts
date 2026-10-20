@@ -191,6 +191,14 @@ export async function runCli(
       }
     }
 
+    const validFailOnPolicies = new Set(["none", "returned", "regression", "any-fog"]);
+    if (!validFailOnPolicies.has(failOn)) {
+      io.stderr(
+        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, regression, any-fog, none.\n`,
+      );
+      return 1;
+    }
+
     if (positional[0]) {
       rootDir = path.resolve(positional[0]);
     }
