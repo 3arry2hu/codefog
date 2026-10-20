@@ -194,6 +194,128 @@ export function parseGoCoverProfile(
   return records;
 }
 
+async function findJavaSourceFilesInRepo(
+  dir: string,
+  rootDir: string,
+  out: string[] = [],
+): Promise<string[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (
+      entry.name === "node_modules" ||
+      entry.name === ".git" ||
+      entry.name === "target" ||
+      entry.name === "build" ||
+      entry.name === "dist"
+    ) {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await findJavaSourceFilesInRepo(full, rootDir, out);
+    } else if (entry.name.endsWith(".java")) {
+      out.push(path.relative(rootDir, full).replace(/\\/g, "/"));
+    }
+  }
+  return out;
+}
+
+export async function parseJacocoXml(
+  content: string,
+  rootDir: string,
+): Promise<Map<string, LcovFileRecord>> {
+  const records = new Map<string, LcovFileRecord>();
+  const javaFiles = await findJavaSourceFilesInRepo(rootDir, rootDir);
+
+  const pkgRe = /<package\s+name="([^"]*)"[^>]*>([\s\S]*?)<\/package>/g;
+  let pm: RegExpExecArray | null;
+
+  while ((pm = pkgRe.exec(content)) !== null) {
+    const pkgName = pm[1]!.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const pkgBody = pm[2]!;
+
+    const sfRe = /<sourcefile\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/sourcefile>/g;
+    let sfm: RegExpExecArray | null;
+
+    while ((sfm = sfRe.exec(pkgBody)) !== null) {
+      const fileName = sfm[1]!;
+      const sfBody = sfm[2]!;
+      const suffix = pkgName ? `${pkgName}/${fileName}` : fileName;
+
+      // Match against scanned repo Java files (e.g. `src/main/java/com/acme/Order.java` or `services/ledger/src/main/java/com/acme/Ledger.java`)
+      const matchedRel =
+        javaFiles.find(
+          (f) => f === suffix || f.endsWith(`/${suffix}`),
+        ) ?? `src/main/java/${suffix}`;
+
+      const record: LcovFileRecord = {
+        file: matchedRel,
+        lines: new Map<number, number>(),
+        branches: [],
+        functions: [],
+        linesFound: 0,
+        linesHit: 0,
+        branchesFound: 0,
+        branchesHit: 0,
+      };
+
+      const lineTagRe = /<line\s+([^/>]+)\/?>/g;
+      let lm: RegExpExecArray | null;
+      let branchBlock = 0;
+
+      while ((lm = lineTagRe.exec(sfBody)) !== null) {
+        const attrs = lm[1]!;
+        const getAttr = (k: string): number => {
+          const m = new RegExp(`\\b${k}="(\\d+)"`).exec(attrs);
+          return m ? Number.parseInt(m[1]!, 10) : 0;
+        };
+        const nr = getAttr("nr");
+        const ci = getAttr("ci");
+        const mb = getAttr("mb");
+        const cb = getAttr("cb");
+        if (nr <= 0) continue;
+
+        record.lines.set(nr, ci > 0 ? ci : 0);
+
+        const totalBranches = mb + cb;
+        if (totalBranches > 0) {
+          for (let b = 0; b < cb; b++) {
+            record.branches.push({
+              line: nr,
+              block: branchBlock,
+              branch: b,
+              taken: 1,
+            });
+          }
+          for (let b = 0; b < mb; b++) {
+            record.branches.push({
+              line: nr,
+              block: branchBlock,
+              branch: cb + b,
+              taken: 0,
+            });
+          }
+          branchBlock++;
+        }
+      }
+
+      record.linesFound = record.lines.size;
+      record.linesHit = Array.from(record.lines.values()).filter((v) => v > 0).length;
+      record.branchesFound = record.branches.length;
+      record.branchesHit = record.branches.filter((b) => b.taken > 0).length;
+
+      records.set(matchedRel, record);
+    }
+  }
+
+  return records;
+}
+
 async function readGoModuleName(rootDir: string): Promise<string | undefined> {
   try {
     const goMod = await fs.readFile(path.join(rootDir, "go.mod"), "utf8");
@@ -212,9 +334,11 @@ export async function loadCoverageRecords(
   const candidateRelPaths: string[] = [];
 
   if (explicitPaths) {
-    const list = Array.isArray(explicitPaths) ? explicitPaths : explicitPaths.split(",");
-    for (const p of list) {
-      if (p.trim()) candidateRelPaths.push(p.trim());
+    const rawItems = Array.isArray(explicitPaths) ? explicitPaths : [explicitPaths];
+    for (const item of rawItems) {
+      for (const p of item.split(",")) {
+        if (p.trim()) candidateRelPaths.push(p.trim());
+      }
     }
   }
 
@@ -227,6 +351,8 @@ export async function loadCoverageRecords(
     const defaults = [
       path.join(rootDir, "coverage", "lcov.info"),
       path.join(rootDir, "coverage.out"),
+      path.join(rootDir, "target", "site", "jacoco", "jacoco.xml"),
+      path.join(rootDir, "build", "reports", "jacoco", "test", "jacocoTestReport.xml"),
     ];
     for (const d of defaults) {
       try {
@@ -259,9 +385,14 @@ export async function loadCoverageRecords(
     }
 
     const trimmed = content.trimStart();
-    const parsed = trimmed.startsWith("mode:")
-      ? parseGoCoverProfile(content, rootDir, goModulePrefix)
-      : parseLcov(content, rootDir);
+    let parsed: Map<string, LcovFileRecord>;
+    if (trimmed.startsWith("mode:")) {
+      parsed = parseGoCoverProfile(content, rootDir, goModulePrefix);
+    } else if (trimmed.startsWith("<?xml") || trimmed.includes("<report")) {
+      parsed = await parseJacocoXml(content, rootDir);
+    } else {
+      parsed = parseLcov(content, rootDir);
+    }
 
     for (const [rel, rec] of parsed.entries()) {
       merged.set(rel, rec);

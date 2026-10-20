@@ -112,12 +112,126 @@ interface RawCargoMutantsReport {
   outcomes?: RawCargoMutantEntry[];
 }
 
+async function findAllJavaFiles(
+  dir: string,
+  rootDir: string,
+  out: string[] = [],
+): Promise<string[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (
+      entry.name === "node_modules" ||
+      entry.name === ".git" ||
+      entry.name === "target" ||
+      entry.name === "build" ||
+      entry.name === "dist"
+    ) {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await findAllJavaFiles(full, rootDir, out);
+    } else if (entry.name.endsWith(".java")) {
+      out.push(toPosix(path.relative(rootDir, full)));
+    }
+  }
+  return out;
+}
+
+export async function parsePitestXml(
+  rawXml: string,
+  rootDir: string,
+): Promise<ParsedStrykerReport> {
+  const byFile = new Map<string, StrykerFileSummary>();
+  let totalMutants = 0;
+  let killedMutants = 0;
+  let seq = 1;
+  const javaFiles = await findAllJavaFiles(rootDir, rootDir);
+
+  const mutRe = /<mutation\s+([^>]+)>([\s\S]*?)<\/mutation>/g;
+  let mm: RegExpExecArray | null;
+
+  while ((mm = mutRe.exec(rawXml)) !== null) {
+    const attrs = mm[1]!;
+    const body = mm[2]!;
+
+    const statusMatch = /\bstatus="([^"]+)"/.exec(attrs);
+    const statusRaw = statusMatch ? statusMatch[1]! : "SURVIVED";
+    if (statusRaw === "NON_VIABLE" || statusRaw === "RUN_ERROR") {
+      continue;
+    }
+
+    const getTag = (tag: string): string => {
+      const m = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`).exec(body);
+      return m ? m[1]!.trim() : "";
+    };
+
+    const sourceFile = getTag("sourceFile");
+    const mutatedClass = getTag("mutatedClass");
+    const mutatedMethod = getTag("mutatedMethod");
+    const lineNum = Number.parseInt(getTag("lineNumber") || "1", 10) || 1;
+    const description = getTag("description") || getTag("mutator");
+    const testsRunMatch = /\bnumberOfTestsRun="(\d+)"/.exec(attrs);
+    const testsRun = testsRunMatch ? Number.parseInt(testsRunMatch[1]!, 10) : 1;
+
+    const pkgParts = mutatedClass.split(".").slice(0, -1);
+    const suffix =
+      pkgParts.length > 0 ? `${pkgParts.join("/")}/${sourceFile}` : sourceFile;
+    const relPath =
+      javaFiles.find((f) => f === suffix || f.endsWith(`/${suffix}`)) ??
+      `src/main/java/${suffix}`;
+
+    totalMutants++;
+    const killed =
+      statusRaw === "KILLED" || statusRaw === "TIMED_OUT" || statusRaw === "MEMORY_ERROR";
+    if (killed) {
+      killedMutants++;
+    }
+
+    let fileSummary = byFile.get(relPath);
+    if (!fileSummary) {
+      fileSummary = { mutants: [] };
+      byFile.set(relPath, fileSummary);
+    }
+
+    fileSummary.mutants.push({
+      id: `pit_${seq++}`,
+      line: lineNum,
+      endLine: lineNum,
+      original: mutatedMethod,
+      mutated: description,
+      testsRun,
+      killed,
+      status: killed ? "Killed" : "Survived",
+    });
+  }
+
+  const mutationScorePct =
+    totalMutants > 0 ? Math.round((killedMutants / totalMutants) * 1000) / 10 : 0;
+
+  return {
+    totalMutants,
+    killedMutants,
+    mutationScorePct,
+    byFile,
+  };
+}
+
 export async function loadStrykerReport(
   rootDir: string,
   strykerPath: string,
 ): Promise<ParsedStrykerReport> {
   const absPath = path.resolve(rootDir, strykerPath);
   const rawContent = await fs.readFile(absPath, "utf8");
+  const trimmed = rawContent.trimStart();
+  if (trimmed.startsWith("<?xml") || trimmed.startsWith("<mutations")) {
+    return parsePitestXml(rawContent, rootDir);
+  }
   const parsed = JSON.parse(rawContent) as RawStrykerReport & RawCargoMutantsReport;
 
   const byFile = new Map<string, StrykerFileSummary>();

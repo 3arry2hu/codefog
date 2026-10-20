@@ -7,6 +7,7 @@ import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidenc
 import {
   extractPolyglotFunctionSpans,
   generateGoCandidateMutations,
+  generateJavaCandidateMutations,
   generateRustCandidateMutations,
   isCompilerErrorOutput,
   isPolyglotSourceFile,
@@ -160,6 +161,9 @@ export function generateCandidateMutations(
   if (fileName.endsWith(".rs")) {
     return generateRustCandidateMutations(sourceText, startLine, endLine);
   }
+  if (fileName.endsWith(".java")) {
+    return generateJavaCandidateMutations(sourceText, startLine, endLine);
+  }
   const sf = ts.createSourceFile(
     fileName,
     sourceText,
@@ -299,6 +303,14 @@ async function detectDefaultTestCommand(
   }
   if (targetFile.endsWith(".rs")) {
     return "cargo test";
+  }
+  if (targetFile.endsWith(".java")) {
+    try {
+      await fs.access(path.join(rootDir, "gradlew"));
+      return "./gradlew test";
+    } catch {
+      return "mvn test";
+    }
   }
   const testTargets = associatedTestFiles.length > 0 ? ` ${associatedTestFiles.join(" ")}` : "";
   try {

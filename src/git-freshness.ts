@@ -289,9 +289,9 @@ export async function analyzeFileGitFreshness(params: {
   }
 
   // If the file is a Rust source file with inline `#[cfg(test)]`, find the latest commit where the inline test block changed
-  let inlineRustTestCommits: GitCommitEntry[] | null = null;
+  let inlineRustTestCommits: CommitEntry[] | null = null;
   if (relPath.endsWith(".rs") && srcHistory.length > 0) {
-    const inlineCommits: GitCommitEntry[] = [];
+    const inlineCommits: CommitEntry[] = [];
     // Walk from oldest to newest to find commits that introduced or modified inline test blocks
     for (let i = srcHistory.length - 1; i >= 0; i--) {
       const c = srcHistory[i]!;

@@ -268,6 +268,7 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
 export function isPolyglotSourceFile(fileName: string): boolean {
   if (fileName.endsWith(".go") && !fileName.endsWith("_test.go")) return true;
   if (fileName.endsWith(".rs") && !isPolyglotTestFile(fileName)) return true;
+  if (fileName.endsWith(".java") && !isPolyglotTestFile(fileName)) return true;
   return false;
 }
 
@@ -275,6 +276,12 @@ export function isPolyglotTestFile(fileName: string): boolean {
   const norm = fileName.replace(/\\/g, "/");
   if (norm.endsWith("_test.go")) return true;
   if (norm.endsWith(".rs") && /(?:^|\/)tests\//.test(norm)) return true;
+  if (
+    norm.endsWith(".java") &&
+    (/(?:^|\/)src\/test\//.test(norm) || /(?:Test|Tests|IT)\.java$/.test(norm))
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -392,6 +399,89 @@ export function extractRustFunctionSpans(sourceText: string): PolyglotFunctionSp
     .map(({ isTest: _t, startOffset: _s, endOffset: _e, ...rest }) => rest);
 }
 
+const JAVA_KEYWORDS = new Set([
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "synchronized",
+  "return",
+  "new",
+  "throw",
+  "super",
+  "this",
+  "class",
+  "interface",
+  "enum",
+  "record",
+]);
+
+export function extractJavaFunctionSpans(sourceText: string): PolyglotFunctionSpan[] {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const lineStarts = buildLineStarts(sourceText);
+  const spans: PolyglotFunctionSpan[] = [];
+
+  // Match method declarations inside class/interface/enum bodies
+  const methodRegex =
+    /^[ \t]*(?:@[A-Za-z0-9_$.]+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|static|final|synchronized|abstract|default|native|strictfp)\s+)*(?:<[^{;]+>\s+)?([A-Za-z_][A-Za-z0-9_<>,.?[\]\s]*?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
+
+  let match: RegExpExecArray | null;
+  while ((match = methodRegex.exec(masked)) !== null) {
+    const rawReturnType = match[1]!.trim();
+    const methodName = match[2]!;
+    if (
+      JAVA_KEYWORDS.has(methodName) ||
+      JAVA_KEYWORDS.has(rawReturnType) ||
+      /\b(?:class|interface|enum|record)\b/.test(rawReturnType)
+    ) {
+      continue;
+    }
+
+    const declStartIdx = match.index;
+    const openParenIdx = declStartIdx + match[0].length - 1;
+    const closeParenIdx = findMatchingDelimiter(masked, openParenIdx, "(", ")");
+    if (closeParenIdx === -1) continue;
+
+    const cursor = closeParenIdx + 1;
+    const openBraceIdx = masked.indexOf("{", cursor);
+    const semiIdx = masked.indexOf(";", cursor);
+    if (openBraceIdx === -1 || (semiIdx !== -1 && semiIdx < openBraceIdx)) {
+      continue;
+    }
+
+    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+    if (closeBraceIdx === -1) continue;
+
+    // Locate the actual return type from `noComments` at the same offset as `match[1]`
+    const retStartInMatch = match[0].indexOf(match[1]!);
+    const returnSignature = noComments
+      .slice(declStartIdx + retStartInMatch, declStartIdx + retStartInMatch + match[1]!.length)
+      .trim();
+
+    const startLine = offsetToLine(lineStarts, declStartIdx);
+    const endLine = offsetToLine(lineStarts, closeBraceIdx);
+    const bodyMasked = masked.slice(openBraceIdx, closeBraceIdx + 1);
+    const runtimeSlice = noComments
+      .slice(declStartIdx, closeBraceIdx + 1)
+      .replace(/\s+/g, " ")
+      .trim();
+
+    spans.push({
+      name: methodName,
+      startLine,
+      endLine,
+      cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked),
+      returnSignature,
+      runtimeFingerprint: `${methodName}:${runtimeSlice}`,
+    });
+
+    methodRegex.lastIndex = closeBraceIdx + 1;
+  }
+
+  return spans;
+}
+
 export function extractPolyglotFunctionSpans(
   sourceText: string,
   fileName: string,
@@ -401,6 +491,9 @@ export function extractPolyglotFunctionSpans(
   }
   if (fileName.endsWith(".rs")) {
     return extractRustFunctionSpans(sourceText);
+  }
+  if (fileName.endsWith(".java")) {
+    return extractJavaFunctionSpans(sourceText);
   }
   return [];
 }
@@ -1377,6 +1470,402 @@ export async function analyzeRustFilesAstEvidence(
         const ev = getOrCreateEv(target.fileStem, target.name);
         ev.executedBlocks.add(blockId);
         ev.testFiles.add(toPosix(rel));
+        const sc = strongForTarget.get(k) ?? 0;
+        const wc = weakForTarget.get(k) ?? 0;
+        if (sc > 0) {
+          ev.strongAssertedBlocks.add(blockId);
+          ev.directStrongAssertions += sc;
+        } else if (wc > 0) {
+          ev.weakAssertedBlocks.add(blockId);
+          ev.directWeakAssertions += wc;
+        }
+      }
+    }
+  }
+
+  return {
+    evidenceEntries: Array.from(evidenceMap.values()),
+    callGraphEdges,
+  };
+}
+
+export function buildJavaZeroReturnBody(returnSignature: string): string {
+  const sig = returnSignature.trim();
+  if (!sig || sig === "void") return "{ return; }";
+  if (sig === "boolean") return "{ return false; }";
+  if (sig === "byte" || sig === "short" || sig === "int") return "{ return 0; }";
+  if (sig === "long") return "{ return 0L; }";
+  if (sig === "float") return "{ return 0.0f; }";
+  if (sig === "double") return "{ return 0.0d; }";
+  if (sig === "char") return "{ return '\\0'; }";
+  return "{ return null; }";
+}
+
+export function generateJavaCandidateMutations(
+  sourceText: string,
+  startLine?: number,
+  endLine?: number,
+): PolyglotCandidateMutation[] {
+  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  const lineStarts = buildLineStarts(sourceText);
+  const spans = extractJavaFunctionSpans(sourceText);
+  const candidates: PolyglotCandidateMutation[] = [];
+  let seq = 1;
+
+  function inRange(line: number): boolean {
+    if (startLine !== undefined && line < startLine) return false;
+    if (endLine !== undefined && line > endLine) return false;
+    return true;
+  }
+
+  function addMutation(
+    startOffset: number,
+    endOffset: number,
+    replacement: string,
+    line: number,
+    isBodyClearance = false,
+  ): void {
+    const original = sourceText.slice(startOffset, endOffset);
+    if (original === replacement) return;
+    candidates.push({
+      id: `mut_${seq++}`,
+      line,
+      original,
+      mutated: replacement,
+      mutatedSource:
+        sourceText.slice(0, startOffset) + replacement + sourceText.slice(endOffset),
+      isBodyClearance,
+    });
+  }
+
+  for (const span of spans) {
+    const overlapsRange =
+      (startLine === undefined || span.endLine >= startLine) &&
+      (endLine === undefined || span.startLine <= endLine);
+    if (!overlapsRange) continue;
+
+    const spanStartOffset = lineStarts[span.startLine - 1] ?? 0;
+    const openBraceIdx = masked.indexOf("{", spanStartOffset);
+    if (openBraceIdx === -1) continue;
+    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+    if (closeBraceIdx === -1) continue;
+
+    const zeroBody = buildJavaZeroReturnBody(span.returnSignature);
+    addMutation(openBraceIdx, closeBraceIdx + 1, zeroBody, span.startLine, true);
+  }
+
+  const lines = sourceText.split("\n");
+  const maskedLines = masked.split("\n");
+  let lineOffset = 0;
+
+  const opRules: Array<{ pattern: RegExp; replacements: string[] }> = [
+    { pattern: /([A-Za-z0-9_)\]]+)\s*<=\s*([A-Za-z0-9_([\]-]+)/g, replacements: ["<", ">"] },
+    { pattern: /([A-Za-z0-9_)\]]+)\s*>=\s*([A-Za-z0-9_([\]-]+)/g, replacements: [">", "<"] },
+    { pattern: /([A-Za-z0-9_)\]]+)\s*==\s*([A-Za-z0-9_([\]-]+)/g, replacements: ["!="] },
+    { pattern: /([A-Za-z0-9_)\]]+)\s*!=\s*([A-Za-z0-9_([\]-]+)/g, replacements: ["=="] },
+  ];
+
+  for (let idx = 0; idx < lines.length; idx++) {
+    const lineNum = idx + 1;
+    const rawLine = lines[idx]!;
+    const mLine = maskedLines[idx]!;
+    if (inRange(lineNum)) {
+      for (const rule of opRules) {
+        rule.pattern.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = rule.pattern.exec(mLine)) !== null) {
+          const matchStart = lineOffset + m.index;
+          const matchEnd = matchStart + m[0].length;
+          if (m.length >= 3 && m[1] && m[2]) {
+            const left = rawLine.slice(m.index, m.index + m[1].length);
+            const right = rawLine.slice(
+              m.index + m[0].length - m[2].length,
+              m.index + m[0].length,
+            );
+            for (const op of rule.replacements) {
+              addMutation(matchStart, matchEnd, `${left} ${op} ${right}`, lineNum);
+            }
+          }
+        }
+      }
+    }
+    lineOffset += rawLine.length + 1;
+  }
+
+  return candidates;
+}
+
+export interface JavaMethodAstMeta {
+  name: string;
+  fileStem: string;
+  className: string;
+  calledSymbols: string[];
+}
+
+export async function analyzeJavaFilesAstEvidence(
+  rootDir: string,
+  javaSourceFiles: string[],
+  javaTestFiles: string[],
+): Promise<{
+  evidenceEntries: Array<{
+    fileStem: string;
+    symbol: string;
+    executedBlocks: Set<string>;
+    strongAssertedBlocks: Set<string>;
+    weakAssertedBlocks: Set<string>;
+    directStrongAssertions: number;
+    directWeakAssertions: number;
+    testFiles: Set<string>;
+  }>;
+  callGraphEdges: Map<string, Set<string>>;
+}> {
+  const toPosix = (p: string) => p.replace(/\\/g, "/");
+  const stripExt = (p: string) => p.replace(/\.java$/, "");
+
+  const javaMethodsByKey = new Map<string, JavaMethodAstMeta>();
+  const javaMethodsByClassAndName = new Map<string, JavaMethodAstMeta[]>();
+  const javaMethodsByName = new Map<string, JavaMethodAstMeta[]>();
+  const callGraphEdges = new Map<string, Set<string>>();
+
+  const JAVA_IGNORE_CALLEES = new Set([
+    ...JAVA_KEYWORDS,
+    "assertEquals",
+    "assertNotEquals",
+    "assertArrayEquals",
+    "assertIterableEquals",
+    "assertLinesMatch",
+    "assertThrows",
+    "assertThrowsExactly",
+    "assertSame",
+    "assertNotSame",
+    "assertNotNull",
+    "assertNull",
+    "assertTrue",
+    "assertFalse",
+    "assertDoesNotThrow",
+    "assertThat",
+    "assertThatThrownBy",
+    "isEqualTo",
+    "isNotEqualTo",
+    "contains",
+    "containsExactly",
+    "hasSize",
+    "isNotNull",
+    "isNull",
+    "isPresent",
+    "isTrue",
+    "isFalse",
+    "verify",
+    "when",
+    "given",
+    "println",
+    "format",
+    "valueOf",
+    "toString",
+    "equals",
+    "hashCode",
+  ]);
+
+  for (const srcRel of javaSourceFiles) {
+    const fullPath = path.join(rootDir, srcRel);
+    let content = "";
+    try {
+      content = await fs.readFile(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+    const spans = extractJavaFunctionSpans(content);
+    const { noComments } = stripCommentsAndMaskStrings(content);
+    const lines = noComments.split("\n");
+    const fileStem = stripExt(toPosix(srcRel));
+    const className = path.basename(srcRel, ".java");
+
+    for (const span of spans) {
+      const bodyText = lines.slice(span.startLine - 1, span.endLine).join("\n");
+      const calledSymbols: string[] = [];
+      const callRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      let cm: RegExpExecArray | null;
+      while ((cm = callRe.exec(bodyText)) !== null) {
+        const callee = cm[1]!;
+        if (callee !== span.name && callee !== className && !JAVA_IGNORE_CALLEES.has(callee)) {
+          calledSymbols.push(callee);
+        }
+      }
+
+      const meta: JavaMethodAstMeta = {
+        name: span.name,
+        fileStem,
+        className,
+        calledSymbols,
+      };
+      const key = `${fileStem}::${span.name}`;
+      javaMethodsByKey.set(key, meta);
+
+      const clsKey = `${className}::${span.name}`;
+      const clsList = javaMethodsByClassAndName.get(clsKey) ?? [];
+      clsList.push(meta);
+      javaMethodsByClassAndName.set(clsKey, clsList);
+
+      const nameList = javaMethodsByName.get(span.name) ?? [];
+      nameList.push(meta);
+      javaMethodsByName.set(span.name, nameList);
+    }
+  }
+
+  for (const [callerKey, meta] of javaMethodsByKey.entries()) {
+    const edges = new Set<string>();
+    for (const calleeName of meta.calledSymbols) {
+      const sameCls = javaMethodsByClassAndName.get(`${meta.className}::${calleeName}`);
+      const targets = sameCls ?? javaMethodsByName.get(calleeName) ?? [];
+      for (const t of targets) {
+        edges.add(`${t.fileStem}::${t.name}`);
+      }
+    }
+    callGraphEdges.set(callerKey, edges);
+  }
+
+  const evidenceMap = new Map<
+    string,
+    {
+      fileStem: string;
+      symbol: string;
+      executedBlocks: Set<string>;
+      strongAssertedBlocks: Set<string>;
+      weakAssertedBlocks: Set<string>;
+      directStrongAssertions: number;
+      directWeakAssertions: number;
+      testFiles: Set<string>;
+    }
+  >();
+
+  function getOrCreateEv(fileStem: string, symbol: string) {
+    const key = `${fileStem}::${symbol}`;
+    let entry = evidenceMap.get(key);
+    if (!entry) {
+      entry = {
+        fileStem,
+        symbol,
+        executedBlocks: new Set(),
+        strongAssertedBlocks: new Set(),
+        weakAssertedBlocks: new Set(),
+        directStrongAssertions: 0,
+        directWeakAssertions: 0,
+        testFiles: new Set(),
+      };
+      evidenceMap.set(key, entry);
+    }
+    return entry;
+  }
+
+  for (const testRel of javaTestFiles) {
+    const fullPath = path.join(rootDir, testRel);
+    let content = "";
+    try {
+      content = await fs.readFile(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+
+    const testSpans = extractJavaFunctionSpans(content);
+    const { noComments } = stripCommentsAndMaskStrings(content);
+    const lines = noComments.split("\n");
+    let blockCounter = 0;
+
+    function resolveJavaTarget(calleeName: string): JavaMethodAstMeta[] {
+      return javaMethodsByName.get(calleeName) ?? [];
+    }
+
+    for (const testSpan of testSpans) {
+      const blockId = `${toPosix(testRel)}#${++blockCounter}`;
+      const bodyText = lines.slice(testSpan.startLine - 1, testSpan.endLine).join("\n");
+
+      const varToTargets = new Map<string, JavaMethodAstMeta[]>();
+      const calledTargetsInBlock = new Map<string, JavaMethodAstMeta>();
+      const strongForTarget = new Map<string, number>();
+      const weakForTarget = new Map<string, number>();
+
+      // 1. Track variable assignments: `Type varName = obj.method(...)` or `var varName = method(...)`
+      const assignRe =
+        /\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      let am: RegExpExecArray | null;
+      while ((am = assignRe.exec(bodyText)) !== null) {
+        const varName = am[1]!;
+        const calleeName = am[2]!;
+        const targets = resolveJavaTarget(calleeName);
+        if (targets.length === 0) continue;
+        for (const t of targets) {
+          calledTargetsInBlock.set(`${t.fileStem}::${t.name}`, t);
+        }
+        varToTargets.set(varName, targets);
+      }
+
+      // 2. Track all calls in test method
+      const callRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      let cm: RegExpExecArray | null;
+      while ((cm = callRe.exec(bodyText)) !== null) {
+        for (const t of resolveJavaTarget(cm[1]!)) {
+          calledTargetsInBlock.set(`${t.fileStem}::${t.name}`, t);
+        }
+      }
+
+      function collectTargetsInExpr(expr: string): JavaMethodAstMeta[] {
+        const found: JavaMethodAstMeta[] = [];
+        for (const [vName, targets] of varToTargets.entries()) {
+          if (new RegExp(`\\b${vName}\\b`).test(expr)) {
+            found.push(...targets);
+          }
+        }
+        const exprCallRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+        let ecm: RegExpExecArray | null;
+        while ((ecm = exprCallRe.exec(expr)) !== null) {
+          found.push(...resolveJavaTarget(ecm[1]!));
+        }
+        return found;
+      }
+
+      // 3. JUnit Strong Outcome Assertions: `assertEquals(...)`, `assertNotEquals(...)`, `assertArrayEquals(...)`, `assertThrows(...)`, `verify(...)`
+      const junitStrongRe =
+        /\b(?:assertEquals|assertNotEquals|assertArrayEquals|assertIterableEquals|assertLinesMatch|assertThrows|assertThrowsExactly|assertSame|assertNotSame|verify)\s*\(([^;]+)\)/g;
+      let jsm: RegExpExecArray | null;
+      while ((jsm = junitStrongRe.exec(bodyText)) !== null) {
+        for (const t of collectTargetsInExpr(jsm[1]!)) {
+          const k = `${t.fileStem}::${t.name}`;
+          strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
+        }
+      }
+
+      // 4. JUnit Weak Liveness Checks: `assertNotNull(...)`, `assertDoesNotThrow(...)`
+      const junitWeakRe = /\b(?:assertNotNull|assertDoesNotThrow)\s*\(([^;]+)\)/g;
+      let jwm: RegExpExecArray | null;
+      while ((jwm = junitWeakRe.exec(bodyText)) !== null) {
+        for (const t of collectTargetsInExpr(jwm[1]!)) {
+          const k = `${t.fileStem}::${t.name}`;
+          weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+        }
+      }
+
+      // 5. AssertJ chains: `assertThat(<expr>).<matcher>(...)`
+      const assertJRe = /\bassertThat\s*\(([^;]+?)\)\s*\.\s*([A-Za-z0-9_]+)\s*\(/g;
+      let ajm: RegExpExecArray | null;
+      while ((ajm = assertJRe.exec(bodyText)) !== null) {
+        const subject = ajm[1]!;
+        const matcher = ajm[2]!;
+        const targets = collectTargetsInExpr(subject);
+        const isWeak = /^(?:isNotNull|isPresent|isNotEmpty)$/.test(matcher);
+        for (const t of targets) {
+          const k = `${t.fileStem}::${t.name}`;
+          if (isWeak) {
+            weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+          } else {
+            strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
+          }
+        }
+      }
+
+      for (const [k, target] of calledTargetsInBlock.entries()) {
+        const ev = getOrCreateEv(target.fileStem, target.name);
+        ev.executedBlocks.add(blockId);
+        ev.testFiles.add(toPosix(testRel));
         const sc = strongForTarget.get(k) ?? 0;
         const wc = weakForTarget.get(k) ?? 0;
         if (sc > 0) {

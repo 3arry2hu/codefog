@@ -3,6 +3,7 @@ import * as path from "node:path";
 import ts from "typescript";
 import {
   analyzeGoFilesAstEvidence,
+  analyzeJavaFilesAstEvidence,
   analyzeRustFilesAstEvidence,
   isPolyglotSourceFile,
   isPolyglotTestFile,
@@ -70,13 +71,15 @@ const STRONG_MATCHERS = new Set([
 
 const TEST_BLOCK_CALLEES = new Set(["it", "test"]);
 
-const IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "coverage",
-  ".codefog",
-]);
+  const IGNORED_DIRS = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    "coverage",
+    ".codefog",
+    "target",
+    "build",
+  ]);
 
 function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
@@ -115,10 +118,13 @@ async function scanRepoFiles(
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       await scanRepoFiles(fullPath, rootDir, out);
-    } else if (isTestFileName(entry.name)) {
-      out.testFiles.push(toPosix(path.relative(rootDir, fullPath)));
-    } else if (isSourceFileName(entry.name)) {
-      out.sourceFiles.push(toPosix(path.relative(rootDir, fullPath)));
+    } else {
+      const relEntryPath = toPosix(path.relative(rootDir, fullPath));
+      if (isTestFileName(relEntryPath)) {
+        out.testFiles.push(relEntryPath);
+      } else if (isSourceFileName(relEntryPath)) {
+        out.sourceFiles.push(relEntryPath);
+      }
     }
   }
   return out;
@@ -528,6 +534,26 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
       for (const tf of ev.testFiles) target.testFiles.add(tf);
     }
     for (const [callerKey, edges] of rustRes.callGraphEdges.entries()) {
+      const existing = callGraph.get(callerKey) ?? new Set<string>();
+      for (const edge of edges) existing.add(edge);
+      callGraph.set(callerKey, existing);
+    }
+  }
+
+  const javaSourceFiles = sourceFiles.filter((f) => f.endsWith(".java"));
+  const javaTestFiles = testFiles.filter((f) => f.endsWith(".java"));
+  if (javaSourceFiles.length > 0 || javaTestFiles.length > 0) {
+    const javaRes = await analyzeJavaFilesAstEvidence(rootDir, javaSourceFiles, javaTestFiles);
+    for (const ev of javaRes.evidenceEntries) {
+      const target = getOrCreateInternal(ev.fileStem, ev.symbol);
+      for (const b of ev.executedBlocks) target.executedBlocks.add(b);
+      for (const sb of ev.strongAssertedBlocks) target.strongAssertedBlocks.add(sb);
+      for (const wb of ev.weakAssertedBlocks) target.weakAssertedBlocks.add(wb);
+      target.directStrongAssertions += ev.directStrongAssertions;
+      target.directWeakAssertions += ev.directWeakAssertions;
+      for (const tf of ev.testFiles) target.testFiles.add(tf);
+    }
+    for (const [callerKey, edges] of javaRes.callGraphEdges.entries()) {
       const existing = callGraph.get(callerKey) ?? new Set<string>();
       for (const edge of edges) existing.add(edge);
       callGraph.set(callerKey, existing);
