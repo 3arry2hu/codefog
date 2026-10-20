@@ -33,6 +33,9 @@ export interface Finding {
     executedByTests: number;
     assertionsOnOutcome: number;
     pseudoTested: boolean;
+    oracleContest: boolean;
+    oracleIds: string[];
+    missedBoundary: boolean;
     lastCodeChangeAt?: string;
     lastTestChangeAt?: string;
     survivingMutants: SurvivingMutant[];
@@ -102,6 +105,7 @@ export interface DiffComparison {
       checkedCoveragePct: number;
       mutationScorePct: number;
       pseudoTestedMethods: number;
+      contestedOracles: number;
     };
     files: Array<{
       path: string;
@@ -133,6 +137,7 @@ export interface CodefogReport {
       checkedCoveragePct: number;
       mutationScorePct: number;
       pseudoTestedMethods: number;
+      contestedOracles: number;
     };
     locByState: LocByState;
   };
@@ -148,5 +153,7 @@ export interface AnalyzeOptions {
   coveragePath?: string | string[];
   strykerPath?: string;
   mutationReportPath?: string;
+  expectationsPath?: string;
+  defectsPath?: string;
   diffBase?: string;
 }

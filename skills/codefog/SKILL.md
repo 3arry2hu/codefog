@@ -57,12 +57,13 @@ Unless the user specifies a custom threshold, set the optimization target to:
 1. **Zero `fog-returned`** (`locByState["fog-returned"] === 0`)
 2. **Zero `pseudoTestedMethods`** (`metrics.pseudoTestedMethods === 0`)
 3. **`Trust Score >= 85`** (or resolve all high-risk findings with `riskScore >= 5.0`)
+4. **Zero Oracle Contests** (`metrics.contestedOracles === 0`)
 
 ---
 
 ## Step 3: Continuous Optimization & Anti-Gaming Verification Loop
 
-Iterate through the highest-risk findings in priority order (`fog-returned` → `fog` → `self-proof-fog` → `weak-evidence`). For each finding:
+Iterate through the highest-risk findings in priority order (`fog-returned` → `fog` → `weak-evidence`). Skip every finding whose `agentReady` is `false`. Those are Coupled Assertions still in Self-proof Fog, or an Oracle Contest against an Independent Expectation or Historical Defect. Do not edit the outcome assertion literal to match the current return value. Stop and ask a human to confirm the expectation or defect record.
 
 ### 3.1 Strengthen Test Evidence with Outcome Assertions
 - Read the production function at `location.file` (`startLine`–`endLine`) and its associated test file.

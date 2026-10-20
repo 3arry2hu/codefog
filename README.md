@@ -14,7 +14,7 @@
 | :--- | :--- | :--- | :--- | :---: | :---: |
 | `fog-returned` | **回雾（雾回归）** | 曾被测试覆盖，但最近一次**运行时逻辑修改**晚于关联测试修改（注释/文档/纯类型修改不触发） | `#BD4900`（警示橙） | `-0.5` | `2.0` |
 | `fog` | **雾（未知区）** | 没有任何测试执行或覆盖证据的代码区域 | `#1D3656`（深石板蓝） | `0.0` | `1.4` |
-| `self-proof-fog` | **自证雾** | 生产代码与其唯一测试在同一次 Git 提交中诞生，且尚未经过独立变异测试证实 | `#6E88AA`（斜纹灰蓝） | `+0.3` | `1.2` |
+| `self-proof-fog` | **自证雾** | 生产代码与其结果断言在同一次 Git 提交中诞生，且尚未由独立预期确认。变异体全部被杀死不能单独升为已验证 | `#6E88AA`（斜纹灰蓝） | `+0.3` | `1.2` |
 | `weak-evidence` | **弱证据** | 已被测试执行，但仅有存活性检查（Liveness Check，无结果断言）、分支覆盖不全（`< 100%`）或存在存活变异体 | `#BCCCE2`（浅石板蓝） | `+0.4` | `1.0` |
 | `verified` | **已验证** | 具备实质结果断言（Outcome Assertion）、分支完整覆盖、无存活变异体且测试证据相对最新代码改动保持新鲜 | `#EBEFF4`（极浅灰背景） | `+1.0` | `0.0` |
 
@@ -177,7 +177,9 @@ AI Agent 将按照 Skill 定义的四步闭环自动执行：
 | `--html <path>` | 交互式单文件 HTML 雾图输出路径 | `.codefog/report.html` |
 | `--open` | 生成报告后在系统默认浏览器中打开 HTML 雾图 | `false` |
 | `--json` | 将完整 `CodefogReport` JSON 结构输出至标准输出 (`stdout`) | `false` |
-| `--fail-on <policy>` | CI 退出码门禁策略：`returned` \| `regression` \| `any-fog` \| `none` | `returned` |
+| `--fail-on <policy>` | CI 退出码门禁策略：`returned` \| `regression` \| `any-fog` \| `contested` \| `none` | `returned` |
+| `--expectations <path>` | 独立预期清单。默认在存在时读取 `oracles/expectations.json` | 自动探测 |
+| `--defects <path>` | 历史缺陷清单。默认在存在时读取 `oracles/defects.json` | 自动探测 |
 | `-v, --version` | 打印版本号 | - |
 | `-h, --help` | 打印帮助信息 | - |
 
@@ -185,6 +187,7 @@ AI Agent 将按照 Skill 定义的四步闭环自动执行：
 - `returned`（默认）：当仓库中存在任何 `fog-returned`（代码逻辑已改但测试未跟进）时返回退出码 `1`。
 - `regression`：当存在 `fog-returned`、在 `--diff` 下存在证据降级文件（`weakenedFiles`），或出现“行覆盖率上升但有效证据下降（`coverageUpEvidenceDown`）”时返回退出码 `1`。
 - `any-fog`：最严格门禁，只要存在任何非 `verified` 状态的代码行即返回退出码 `1`。
+- `contested`：存在预期冲突（结果断言与独立预期或历史缺陷矛盾）时返回退出码 `1`。
 - `none`：始终返回 `0`（仅生成报告，不阻断 CI）。
 
 ---
@@ -203,6 +206,7 @@ npx @barryzhu/codefog verify internal/tax/calc.go --mutants --test-cmd "go test 
 | `<targetFile>` | 待验收的目标源码文件路径（支持 `.ts`/`.js`、`.go`、`.rs`、`.java`） |
 | `--lines <start-end>` | 仅针对指定行号区间内的函数生成并执行变异验证 |
 | `--mutants` | 启用合成变异测试（含条件/算子翻转与函数体零值清空检测） |
+| `--oracle` | 对照独立预期与历史缺陷，拒绝与清单矛盾的结果断言 |
 | `--test-cmd <cmd>` | 自定义测试执行命令（未指定时按文件后缀自动选择 `vitest` / `go test` / `cargo test` / `mvn test`） |
 | `--allow-source-change` | 允许在目标生产文件相比 `HEAD` 存在未提交改动时执行验证（默认禁止通过删减生产代码分支来消除雾区） |
 
@@ -211,6 +215,7 @@ npx @barryzhu/codefog verify internal/tax/calc.go --mutants --test-cmd "go test 
 2. **基线测试通过**：变异前现有测试套件必须通过，且测试文件中必须包含实质性断言。
 3. **伪测试拦截（Body Clearance）**：将目标函数体替换为对应语言的零值返回后，测试套件**必须失败**，否则判定为 `Pseudo-tested Method`。
 4. **算子变异击杀（Operator Mutations）**：注入算术、比较与布尔翻转等变异后，计算有效变异得分（静态类型语言下无法编译的合成变异标记为 `CompileError` 并自动从分母中豁免）。
+5. **预期冲突（`--oracle`）**：结果断言与独立预期或历史缺陷矛盾时验收失败，且不得把断言字面量改成当前返回值。
 
 ---
 

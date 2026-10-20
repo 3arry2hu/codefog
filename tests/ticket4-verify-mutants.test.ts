@@ -34,7 +34,7 @@ describe("Ticket 4: Stryker mutation report ingestion & codefog verify --mutants
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("ingests --stryker report: promotes self-proof-fog to verified when all mutants killed, downgrades to weak-evidence with survivingMutants when survived", async () => {
+  it("ingests --stryker report: keeps self-proof-fog when all mutants are killed, downgrades to weak-evidence with survivingMutants when survived", async () => {
     const srcFile = path.join(tmpDir, "src", "billing", "tax.ts");
     const testFile = path.join(tmpDir, "tests", "tax.test.ts");
     const lcovFile = path.join(tmpDir, "coverage", "lcov.info");
@@ -107,7 +107,7 @@ describe("Ticket 4: Stryker mutation report ingestion & codefog verify --mutants
 
     // Write Stryker JSON report:
     // calcTax has 1 Survived mutant on line 2 (amount >= 100 -> amount > 100) and 1 Killed mutant on line 3
-    // calcDuty has 2 Killed mutants on line 9 (100% killed -> promotes from self-proof-fog to verified!)
+    // calcDuty has 2 Killed mutants on line 9. A killed mutant does not promote coupled assertions.
     const strykerJson = {
       schemaVersion: "1",
       thresholds: { high: 80, low: 60 },
@@ -163,9 +163,12 @@ describe("Ticket 4: Stryker mutation report ingestion & codefog verify --mutants
     // 3 killed out of 4 total mutants = 75%
     expect(report.summary.metrics.mutationScorePct).toBe(75);
 
-    // calcDuty (2 lines) was self-proof-fog, now promoted to verified because all its mutants were killed!
-    expect(report.summary.locByState.verified).toBe(2);
-    expect(report.summary.locByState["self-proof-fog"]).toBe(0);
+    // calcDuty (2 lines) stays self-proof-fog: mutant kills are not an independent expectation.
+    expect(report.summary.locByState.verified).toBe(0);
+    expect(report.summary.locByState["self-proof-fog"]).toBe(2);
+    const dutyFinding = report.findings.find((f) => f.location.symbol === "calcDuty");
+    expect(dutyFinding?.state).toBe("self-proof-fog");
+    expect(dutyFinding?.agentReady).toBe(false);
 
     // calcTax (4 lines) downgraded to weak-evidence with 1 surviving mutant
     expect(report.summary.locByState["weak-evidence"]).toBe(4);

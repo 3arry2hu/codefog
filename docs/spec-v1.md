@@ -37,7 +37,7 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **Fog Returned（回雾）** | `fog-returned` | `#BD4900`（实心警示橙，白字 `#FFFFFF`） | `RETURNED` 标签 | 1. **证据过期**：代码块最新非纯格式/注释/类型变更时间晚于覆盖率/变异报告生成时间；或<br>2. **验证降级**：对比基准（`--diff` 或 baseline）中曾为 `verified`，修改后降级为 `fog` / `weak-evidence` / `self-proof-fog`。 |
 | **Fog（雾）** | `fog` | `#1D3656`（深石板蓝，白字 `#FFFFFF`） | 纯色深块 | `lcov.info` 中行覆盖率为 0（从未被任何测试执行）。 |
-| **Self-proof Fog（自证雾）** | `self-proof-fog` | `#6E88AA`（中石板蓝） | 45° 斜纹填充 | 代码块被测试执行且有断言，但 Git blame 显示被测实现与其唯一关联测试断言在同一次 commit（或同一 PR 分支增量）中产生，且尚未通过变异/伪测试检验。 |
+| **Self-proof Fog（自证雾）** | `self-proof-fog` | `#6E88AA`（中石板蓝） | 45° 斜纹填充 | 代码块被测试执行且有断言，但 Git blame 显示被测实现与其结果断言在同一次 commit 中产生，且没有与之不同提交的独立预期或历史缺陷确认。变异体全部被杀死不能单独升为 `verified`。断言与这些清单矛盾时仍保持自证雾（预期冲突）。 |
 | **Weak Evidence（弱证据）** | `weak-evidence` | `#BCCCE2`（浅石板蓝） | 浅底深字 | 代码块被测试执行，但满足任一：<br>1. 关联测试无实质断言（0 断言或仅 `toBeDefined`/`toBeTruthy` 等弱断言）；<br>2. 分支覆盖率 < 100%；<br>3. 存在 `Surviving Mutant` 或属于 `Pseudo-tested Method`。 |
 | **Verified（已验证）** | `verified` | `#EBEFF4`（极浅灰背景，标签 `#8B96A5`） | 折叠/弱化 | 代码块被执行、分支覆盖完整、测试返回值/状态流入有效断言（`Checked Coverage`），或通过变异测试（无存活变异体），且证据未过期。 |
 
@@ -73,7 +73,7 @@ npx codefog [root-dir] [options]
 - `--html <path>`：生成单文件自包含交互式四层 `Fog Map`（默认 `.codefog/report.html`），配合 `--open` 自动在浏览器打开。
 - `--diff <base-ref>`：对比指定 Git 基准（如 `main`），计算五项核心指标变化量并识别增量 `Fog Returned`。
 - `--pr-comment <dir>`：配合 `--diff` 使用，输出 PR 评论用的 `.codefog/pr-diff.svg`（并排 BEFORE/AFTER Treemap）与 `.codefog/pr-comment.md`。
-- `--fail-on <policy>`：退出码策略，可选 `returned`（默认，存在 `fog-returned` 时退出码为 `1`）、`any-fog`、`regression`、`none`。
+- `--fail-on <policy>`：退出码策略，可选 `returned`（默认，存在 `fog-returned` 时退出码为 `1`）、`any-fog`、`regression`、`contested`（存在预期冲突时退出码为 `1`）、`none`。
 
 ### 3.2 定点验收命令：`npx codefog verify <target>`
 

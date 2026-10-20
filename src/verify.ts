@@ -10,6 +10,7 @@ import {
   isCompilerErrorOutput,
   isPolyglotSourceFile,
 } from "./polyglot.js";
+import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
 import type { SurvivingMutant } from "./types.js";
 
 const execAsync = promisify(exec);
@@ -22,6 +23,9 @@ export interface VerifyOptions {
   endLine?: number;
   testCmd?: string;
   allowSourceChange?: boolean;
+  oracle?: boolean;
+  expectationsPath?: string;
+  defectsPath?: string;
 }
 
 export interface VerifyResult {
@@ -354,6 +358,30 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
       violations.push(
         `Anti-gaming gate triggered: function '${fnName}' in ${relTarget} has 0 outcome assertions in tests (pseudo-tested or untested).`,
       );
+    }
+  }
+
+  if (options.oracle) {
+    const bundle = await loadOracleBundle(rootDir, {
+      expectationsPath: options.expectationsPath,
+      defectsPath: options.defectsPath,
+    });
+    const sourceCommit = await lastCommitHash(rootDir, relTarget);
+    for (const fnName of targetFns) {
+      const ev = lookupFunctionAstEvidence(astResult, relTarget, fnName);
+      const verdict = await assessSymbolOracle({
+        rootDir,
+        file: relTarget,
+        symbol: fnName,
+        testFiles: ev?.testFiles ?? [],
+        bundle,
+        sourceCommit,
+      });
+      if (verdict.contested) {
+        violations.push(
+          `Oracle contest: outcome assertion for '${fnName}' contradicts ${verdict.contestIds.join(", ")}. Do not rewrite the assertion literal to the current return value.`,
+        );
+      }
     }
   }
 
