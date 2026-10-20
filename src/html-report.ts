@@ -514,6 +514,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
           '<div style="display:flex;justify-content:space-between;align-items:center">' +
             '<strong>[' + f.id + '] ' + f.title + '</strong>' +
             (f.state === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : '<span>' + f.state + '</span>') +
+            (f.evidence && f.evidence.oracleContest ? ' <span>CONTESTED</span>' : '') +
           '</div>' +
           '<div style="font-size:12px;margin-top:6px"><strong>Location:</strong> ' + f.location.file + ':' + f.location.startLine + '-' + f.location.endLine + '</div>' +
           '<div style="font-size:12px;margin-top:4px"><strong>Risk Score:</strong> ' + f.riskScore + '/10</div>' +

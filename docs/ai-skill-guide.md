@@ -178,7 +178,7 @@ npx @barryzhu/codefog@latest install-skill --root /path/to/your/repo
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ Step 3: 持续迭代优化与反作弊闭环 (Continuous Optimization Loop)   ◄──┐   │
-│   3.1 按优先级挑取目标 (fog-returned → fog → weak-evidence → self-proof) │   │
+│   3.1 按优先级挑取 agentReady 的目标；跳过自证雾与预期冲突                  │   │
 │   3.2 编写/强化实质结果断言 (Outcome Assertions)，严禁删减生产代码分支      │   │
 │   3.3 运行 `codefog verify <file> --mutants --lines <start>-<end>` 验收 │   │
 │       ├─ 若存活变异体 > 0 或伪测试未拦截 → 继续补强测试断言               │   │

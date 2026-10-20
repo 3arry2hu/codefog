@@ -17,8 +17,24 @@ _Avoid_: Regression（回归缺陷）, Stale Code（陈旧代码）
 _Avoid_: Uncovered Code（未覆盖代码）, Dead Code（死代码）
 
 **Self-proof Fog（自证雾）**:
-业务实现与其唯一关联测试在同一次提交或同一次生成会话中诞生、尚未经过独立变异或伪测试检验的代码区域。
+业务实现与其耦合断言在同一次提交中诞生，且尚未由独立预期确认的代码区域。杀死全部变异体不能单独离开自证雾。
 _Avoid_: Self-certified（自认证）, Co-committed（同提交）
+
+**Coupled Assertion（耦合断言）**:
+与被测实现在同一次提交中写出或改写的结果断言。
+_Avoid_: Co-authored assertion, Lockstep expected value
+
+**Independent Expectation（独立预期）**:
+记录在测试之外、且提交不同于被测实现的已确认输入与结果。
+_Avoid_: Oracle, Spec, Golden file
+
+**Historical Defect（历史缺陷）**:
+已经确认过正确结果的一次过去失败，包含触发输入与该正确结果。
+_Avoid_: Bug ticket, Regression
+
+**Oracle Contest（预期冲突）**:
+结果断言与独立预期或历史缺陷的已确认结果不一致。该区域保持自证雾。
+_Avoid_: Wrong coverage（错误覆盖）, False assertion
 
 **Weak Evidence（弱证据）**:
 已被测试执行，但缺乏实质断言、分支未完全覆盖或存在存活变异体的代码区域（即“假光”）。

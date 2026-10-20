@@ -7,6 +7,7 @@ import { loadCoverageRecords, type LcovFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
 import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
+import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
 import {
   extractPolyglotFunctionSpans,
   getPolyglotAdapter,
@@ -181,6 +182,10 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     ? await loadStrykerReport(rootDir, mutationPath)
     : undefined;
   const gitMeta = await readGitMeta(rootDir);
+  const oracleBundle = await loadOracleBundle(rootDir, {
+    expectationsPath: options.expectationsPath,
+    defectsPath: options.defectsPath,
+  });
 
   let totalLinesFound = 0;
   let totalLinesHit = 0;
@@ -188,6 +193,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
   let totalBranchesHit = 0;
   let totalCheckedLines = 0;
   let totalPseudoTestedMethods = 0;
+  let totalContestedOracles = 0;
 
   const files: FileSummary[] = [];
   const findings: Finding[] = [];
@@ -259,6 +265,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       reportGeneratedAtMs: lcovMtimeMs,
     });
     const fileChurn90d = gitFreshness.churn90d;
+    const sourceCommit = await lastCommitHash(rootDir, relPath);
 
     for (const span of effectiveSpans) {
       const fnRecord = record.functions.find((f) => f.name === span.name);
@@ -314,8 +321,15 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         span.endLine,
       );
       const hasSurvivingMutants = spanMutants.survivingMutants.length > 0;
-      const allMutantsKilledInSpan =
-        spanMutants.totalInSpan > 0 && spanMutants.survivingMutants.length === 0;
+      const oracle = await assessSymbolOracle({
+        rootDir,
+        file: relPath,
+        symbol: span.name,
+        testFiles: astEvidence?.testFiles ?? [],
+        bundle: oracleBundle,
+        sourceCommit,
+      });
+      if (oracle.contested) totalContestedOracles++;
 
       let regionState: EvidenceState;
       if (hitsCount === 0) {
@@ -324,8 +338,12 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         regionState = "fog-returned";
       } else if (pseudoTested || hasIncompleteBranches || hasSurvivingMutants) {
         regionState = "weak-evidence";
-      } else if (fnFreshness?.isSelfProofFog && !allMutantsKilledInSpan) {
+      } else if (oracle.contested) {
         regionState = "self-proof-fog";
+      } else if (fnFreshness?.isSelfProofFog && !oracle.independentlyConfirmed) {
+        regionState = "self-proof-fog";
+      } else if (oracle.missedBoundary) {
+        regionState = "weak-evidence";
       } else {
         regionState = "verified";
       }
@@ -378,12 +396,19 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         if (regionState === "fog-returned") {
           reason = `Executable logic in ${span.name} changed after its associated test evidence (Fog Returned).`;
           suggestedAction = `Update or add tests for the modified runtime logic in ${span.name} (${relPath}:${span.startLine}-${span.endLine}) and re-verify.`;
+          if (oracle.contested) {
+            reason += ` Outcome assertion also contradicts ${oracle.contestIds.join(", ")} (Oracle Contest).`;
+            suggestedAction = `Do not rewrite the outcome assertion for ${span.name} to the current return value. Reconcile it with ${oracle.contestIds.join(", ")} before updating tests.`;
+          }
         } else if (regionState === "fog") {
           reason = `No test evidence executing ${span.name} (${spanLines.length} lines in fog).`;
           suggestedAction = `Add unit tests covering ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) with outcome assertions.`;
+        } else if (oracle.contested) {
+          reason = `Outcome assertion for ${span.name} contradicts ${oracle.contestIds.join(", ")} (Oracle Contest). Killing mutants cannot confirm a coupled assertion.`;
+          suggestedAction = `Do not rewrite the outcome assertion for ${span.name} to the current return value. Reconcile the implementation or the assertion with ${oracle.contestIds.join(", ")}.`;
         } else if (regionState === "self-proof-fog") {
-          reason = `${span.name} and its sole test were authored in the same commit without independent mutation verification (Self-proof Fog).`;
-          suggestedAction = `Run targeted mutation verification on ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) to confirm tests catch behavioral regressions.`;
+          reason = `${span.name} and its outcome assertion were authored in the same commit (Coupled Assertion). Mutation score cannot promote this Self-proof Fog to Verified.`;
+          suggestedAction = `Confirm an Independent Expectation for ${span.name} in a separate commit. Do not rewrite the outcome assertion to match the current return value.`;
         } else if (pseudoTested) {
           reason = `${span.name} is executed by ${executedByTests} test(s) but has 0 outcome assertions (pseudo-tested method).`;
           suggestedAction = `Add explicit outcome assertions on the return value or side effects of ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}).`;
@@ -391,6 +416,10 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           const firstMut = spanMutants.survivingMutants[0]!;
           reason = `${spanMutants.survivingMutants.length} mutant(s) survived in ${span.name} (e.g. line ${firstMut.line}: '${firstMut.original}' -> '${firstMut.mutated}').`;
           suggestedAction = `Add boundary and behavioral assertions in tests for ${span.name} (${relPath}:${span.startLine}-${span.endLine}) to kill surviving mutant(s).`;
+        } else if (oracle.missedBoundary) {
+          const expected = oracle.confirmedExpectedLiteral ?? "the confirmed outcome";
+          reason = `Historical defect ${oracle.missedIds.join(", ")} input is not asserted for ${span.name} (missed boundary).`;
+          suggestedAction = `Add an outcome assertion for ${span.name} covering ${oracle.missedIds.join(", ")} and expecting ${expected}. Do not copy the current return value.`;
         } else {
           reason = `${span.name} has incomplete branch coverage (${spanBranchPct}% branches taken).`;
           suggestedAction = `Add branch tests for ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) to cover all conditional paths with outcome assertions.`;
@@ -401,7 +430,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           title: span.name,
           state: regionState,
           riskScore: regionRisk,
-          agentReady: true,
+          agentReady: !oracle.contested && regionState !== "self-proof-fog",
           location: {
             file: relPath,
             symbol: span.name,
@@ -413,16 +442,24 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             executedByTests,
             assertionsOnOutcome,
             pseudoTested,
+            oracleContest: oracle.contested,
+            oracleIds: oracle.contested ? oracle.contestIds : oracle.missedIds,
+            missedBoundary: oracle.missedBoundary,
             ...(fnFreshness?.lastCodeChangeAt ? { lastCodeChangeAt: fnFreshness.lastCodeChangeAt } : {}),
             ...(fnFreshness?.lastTestChangeAt ? { lastTestChangeAt: fnFreshness.lastTestChangeAt } : {}),
             survivingMutants: spanMutants.survivingMutants,
           },
           suggestedAction,
           acceptanceCheck: {
-            command: `npx codefog verify ${relPath} --mutants --lines ${span.startLine}-${span.endLine}`,
+            command: `npx codefog verify ${relPath} --mutants --oracle --lines ${span.startLine}-${span.endLine}`,
             criteria: [
               `Lines ${span.startLine}-${span.endLine} in ${relPath} reach verified state`,
               `All mutants in ${span.name} are killed`,
+              ...(oracle.contested || regionState === "self-proof-fog"
+                ? [
+                    `The outcome assertion literal for ${span.name} is not rewritten to the current return value`,
+                  ]
+                : []),
             ],
           },
         });
@@ -549,6 +586,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         checkedCoveragePct: roundPct(totalCheckedLines, totalLinesFound),
         mutationScorePct: strykerReport?.mutationScorePct ?? 0,
         pseudoTestedMethods: totalPseudoTestedMethods,
+        contestedOracles: totalContestedOracles,
       },
       locByState: repoLocByState,
     },

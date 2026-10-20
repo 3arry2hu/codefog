@@ -89,7 +89,7 @@ export function formatLevel1Summary(report: CodefogReport): string {
   const lines: string[] = [
     `codefog | ${repository.name} (${repository.branch} @ ${repository.commit})`,
     `Trust Score: ${summary.trustScore}/100 | Files: ${summary.totalFiles} | LOC: ${summary.totalLoc} | Unverified (Fog): ${fogPct}%`,
-    `Metrics: Line ${summary.metrics.lineCoveragePct}% | Branch ${summary.metrics.branchCoveragePct}% | Checked ${summary.metrics.checkedCoveragePct}% | Mutation ${summary.metrics.mutationScorePct}% | Pseudo-tested: ${summary.metrics.pseudoTestedMethods}`,
+    `Metrics: Line ${summary.metrics.lineCoveragePct}% | Branch ${summary.metrics.branchCoveragePct}% | Checked ${summary.metrics.checkedCoveragePct}% | Mutation ${summary.metrics.mutationScorePct}% | Pseudo-tested: ${summary.metrics.pseudoTestedMethods} | Contested: ${summary.metrics.contestedOracles}`,
     `States: Returned=${summary.locByState["fog-returned"]} Fog=${summary.locByState.fog} Self-proof=${summary.locByState["self-proof-fog"]} Weak=${summary.locByState["weak-evidence"]} Verified=${summary.locByState.verified}`,
     "",
     "Modules by Fog:",
@@ -147,7 +147,7 @@ export async function runCli(
           "",
           "Usage:",
           "  codefog [rootDir] [options]",
-          "  codefog verify <targetFile> [--lines start-end] [--mutants] [--test-cmd <cmd>]",
+          "  codefog verify <targetFile> [--lines start-end] [--mutants] [--oracle] [--test-cmd <cmd>]",
           "  codefog install-skill [--agent <codex|claude-code|codebuddy|cursor|all>] [--global|-g]",
           "",
           "Options:",
@@ -155,12 +155,14 @@ export async function runCli(
           "  --lcov <path>         Alias for --coverage (default: auto-detects coverage/lcov.info, coverage.out, etc.)",
           "  --mutation-report <p> Path to mutation report (Stryker JSON, PITest XML, cargo-mutants JSON)",
           "  --stryker <path>      Alias for --mutation-report",
+          "  --expectations <path> Independent expectation manifest (default: oracles/expectations.json when present)",
+          "  --defects <path>      Historical defect manifest (default: oracles/defects.json when present)",
           "  --diff <baseRef>      Compare against base git ref (e.g. origin/main)",
           "  --html <path>         Output path for interactive HTML Fog Map (default: .codefog/report.html)",
           "  --pr-comment [dir]    Write PR comment Markdown and SVG artifacts",
           "  --json                Output full JSON report to stdout",
           "  --open                Open HTML Fog Map in default browser",
-          "  --fail-on <policy>    Exit gate policy: returned | regression | any-fog | none (default: returned)",
+          "  --fail-on <policy>    Exit gate policy: returned | regression | any-fog | contested | none (default: returned)",
           "  --install-skill [ag]  Install AI agent skill for codex, claude-code, codebuddy, cursor (default: all)",
           "  -g, --global          Install AI skill into user home directory (~/.cursor/skills, ~/.claude/skills, etc.)",
           "  -v, --version         Print version",
@@ -233,10 +235,22 @@ export async function runCli(
       let endLine: number | undefined;
       let testCmd: string | undefined;
       let allowSourceChange = false;
+      let oracle = false;
+      let expectationsPath: string | undefined;
+      let defectsPath: string | undefined;
 
       if (process.env.npm_command === "exec") {
         if (process.env.npm_config_mutants === "true") mutants = true;
+        if (process.env.npm_config_oracle === "true") oracle = true;
         if (process.env.npm_config_allow_source_change === "true") allowSourceChange = true;
+        const envExpectations = process.env.npm_config_expectations;
+        if (envExpectations && envExpectations !== "true" && envExpectations !== "false") {
+          expectationsPath = envExpectations;
+        }
+        const envDefects = process.env.npm_config_defects;
+        if (envDefects && envDefects !== "true" && envDefects !== "false") {
+          defectsPath = envDefects;
+        }
         const envLines = process.env.npm_config_lines;
         if (envLines && envLines !== "true" && envLines !== "false") {
           const [s, e] = envLines.split("-").map((n) => parseInt(n, 10));
@@ -254,6 +268,12 @@ export async function runCli(
         const arg = argv[i]!;
         if (arg === "--mutants") {
           mutants = true;
+        } else if (arg === "--oracle") {
+          oracle = true;
+        } else if (arg === "--expectations") {
+          expectationsPath = argv[++i];
+        } else if (arg === "--defects") {
+          defectsPath = argv[++i];
         } else if (arg === "--allow-source-change") {
           allowSourceChange = true;
         } else if (arg === "--root") {
@@ -293,6 +313,9 @@ export async function runCli(
         endLine,
         testCmd,
         allowSourceChange,
+        oracle,
+        expectationsPath,
+        defectsPath,
       });
 
       if (verifyRes.passed) {
@@ -314,6 +337,8 @@ export async function runCli(
     let jsonMode = false;
     let openBrowser = false;
     let failOn = "returned";
+    let expectationsPath: string | undefined;
+    let defectsPath: string | undefined;
 
     const positional: string[] = [];
     for (let i = 0; i < argv.length; i++) {
@@ -331,6 +356,10 @@ export async function runCli(
         mutationReportPath = argv[++i];
       } else if (arg === "--stryker") {
         strykerPath = argv[++i];
+      } else if (arg === "--expectations") {
+        expectationsPath = argv[++i];
+      } else if (arg === "--defects") {
+        defectsPath = argv[++i];
       } else if (arg === "--diff") {
         diffBase = argv[++i];
       } else if (arg === "--html") {
@@ -351,7 +380,7 @@ export async function runCli(
       }
     }
 
-    const validFailOnPolicies = new Set(["none", "returned", "regression", "any-fog"]);
+    const validFailOnPolicies = new Set(["none", "returned", "regression", "any-fog", "contested"]);
 
     // Recover options if `npm exec` / `npx` consumed `--<flag>=<val>` into `npm_config_*` env vars
     if (process.env.npm_command === "exec") {
@@ -367,6 +396,10 @@ export async function runCli(
       if (envMut && !mutationReportPath) mutationReportPath = envMut;
       const envStryker = envVal("npm_config_stryker");
       if (envStryker && !strykerPath) strykerPath = envStryker;
+      const envExpectations = envVal("npm_config_expectations");
+      if (envExpectations && !expectationsPath) expectationsPath = envExpectations;
+      const envDefects = envVal("npm_config_defects");
+      if (envDefects && !defectsPath) defectsPath = envDefects;
       const envDiff = envVal("npm_config_diff");
       if (envDiff && !diffBase) diffBase = envDiff;
       const envHtml = envVal("npm_config_html");
@@ -447,7 +480,7 @@ export async function runCli(
 
     if (!validFailOnPolicies.has(failOn)) {
       io.stderr(
-        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, regression, any-fog, none.\n`,
+        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, regression, any-fog, contested, none.\n`,
       );
       return 1;
     }
@@ -458,6 +491,8 @@ export async function runCli(
       lcovPath,
       mutationReportPath,
       strykerPath,
+      expectationsPath,
+      defectsPath,
       diffBase,
     });
 
@@ -485,6 +520,9 @@ export async function runCli(
     }
 
     if (failOn === "none") return 0;
+    if (failOn === "contested" && report.summary.metrics.contestedOracles > 0) {
+      return 1;
+    }
     if (failOn === "returned" && report.summary.locByState["fog-returned"] > 0) {
       return 1;
     }
