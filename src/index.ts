@@ -4,6 +4,7 @@ export * from "./scoring.js";
 export * from "./ast-evidence.js";
 export * from "./git-freshness.js";
 export * from "./mutation.js";
+export * from "./polyglot.js";
 export * from "./verify.js";
 export * from "./html-report.js";
 export * from "./diff-pr.js";
