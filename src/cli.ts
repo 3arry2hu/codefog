@@ -82,8 +82,10 @@ export async function runCli(
           "  codefog verify <targetFile> [--lines start-end] [--mutants] [--test-cmd <cmd>]",
           "",
           "Options:",
-          "  --lcov <path>         Path to LCOV coverage file (default: coverage/lcov.info)",
-          "  --stryker <path>      Path to Stryker mutation report JSON",
+          "  --coverage <path>     Path(s) to coverage file(s) (LCOV, Go coverprofile, JaCoCo XML; comma-separated or repeatable)",
+          "  --lcov <path>         Alias for --coverage (default: auto-detects coverage/lcov.info, coverage.out, etc.)",
+          "  --mutation-report <p> Path to mutation report (Stryker JSON, PITest XML, cargo-mutants JSON)",
+          "  --stryker <path>      Alias for --mutation-report",
           "  --diff <baseRef>      Compare against base git ref (e.g. origin/main)",
           "  --html <path>         Output path for interactive HTML Fog Map (default: .codefog/report.html)",
           "  --pr-comment [dir]    Write PR comment Markdown and SVG artifacts",
@@ -152,7 +154,9 @@ export async function runCli(
 
     let rootDir = process.cwd();
     let lcovPath: string | undefined;
+    const coveragePaths: string[] = [];
     let strykerPath: string | undefined;
+    let mutationReportPath: string | undefined;
     let diffBase: string | undefined;
     let htmlPath: string | undefined;
     let prCommentDir: string | undefined;
@@ -167,8 +171,13 @@ export async function runCli(
         jsonMode = true;
       } else if (arg === "--root") {
         rootDir = path.resolve(argv[++i] ?? ".");
+      } else if (arg === "--coverage") {
+        const val = argv[++i];
+        if (val) coveragePaths.push(val);
       } else if (arg === "--lcov") {
         lcovPath = argv[++i];
+      } else if (arg === "--mutation-report") {
+        mutationReportPath = argv[++i];
       } else if (arg === "--stryker") {
         strykerPath = argv[++i];
       } else if (arg === "--diff") {
@@ -205,7 +214,9 @@ export async function runCli(
 
     const report = await analyzeRepository({
       rootDir,
+      coveragePath: coveragePaths.length > 0 ? coveragePaths : undefined,
       lcovPath,
+      mutationReportPath,
       strykerPath,
       diffBase,
     });

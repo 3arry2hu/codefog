@@ -3,10 +3,11 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ts from "typescript";
-import { parseLcov, type LcovFileRecord } from "./lcov.js";
+import { loadCoverageRecords, type LcovFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
 import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
+import { extractPolyglotFunctionSpans, isPolyglotSourceFile } from "./polyglot.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -35,6 +36,9 @@ interface ParsedFunctionSpan {
 }
 
 function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunctionSpan[] {
+  if (isPolyglotSourceFile(fileName)) {
+    return extractPolyglotFunctionSpans(sourceText, fileName);
+  }
   const sourceFile = ts.createSourceFile(
     fileName,
     sourceText,
@@ -126,7 +130,10 @@ function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunct
 
 function deriveModulePath(filePath: string): string {
   const parts = filePath.split("/").filter(Boolean);
-  if (parts.length >= 3 && parts[0] === "src") {
+  if (
+    parts.length >= 3 &&
+    (parts[0] === "src" || parts[0] === "internal" || parts[0] === "pkg" || parts[0] === "cmd")
+  ) {
     return `${parts[0]}/${parts[1]}`;
   }
   if (parts.length >= 2) {
@@ -152,27 +159,14 @@ async function readGitMeta(rootDir: string): Promise<{ branch: string; commit: s
 
 export async function analyzeRepository(options: AnalyzeOptions): Promise<CodefogReport> {
   const rootDir = path.resolve(options.rootDir);
-  const lcovPath = options.lcovPath
-    ? path.resolve(rootDir, options.lcovPath)
-    : path.join(rootDir, "coverage", "lcov.info");
-
-  let lcovContent = "";
-  let lcovMtimeMs: number | undefined;
-  try {
-    const [content, stat] = await Promise.all([
-      fs.readFile(lcovPath, "utf8"),
-      fs.stat(lcovPath),
-    ]);
-    lcovContent = content;
-    lcovMtimeMs = stat.mtimeMs;
-  } catch {
-    throw new Error(`Could not read LCOV coverage file at ${lcovPath}`);
-  }
-
-  const lcovRecords = parseLcov(lcovContent, rootDir);
+  const { records: lcovRecords, mtimeMs: lcovMtimeMs } = await loadCoverageRecords(
+    rootDir,
+    options.coveragePath ?? options.lcovPath,
+  );
   const astResult = await analyzeTestAstEvidence(rootDir);
-  const strykerReport: ParsedStrykerReport | undefined = options.strykerPath
-    ? await loadStrykerReport(rootDir, options.strykerPath)
+  const mutationPath = options.mutationReportPath ?? options.strykerPath;
+  const strykerReport: ParsedStrykerReport | undefined = mutationPath
+    ? await loadStrykerReport(rootDir, mutationPath)
     : undefined;
   const gitMeta = await readGitMeta(rootDir);
 

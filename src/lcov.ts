@@ -1,3 +1,6 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
 export interface LcovBranchEntry {
   line: number;
   block: number;
@@ -22,11 +25,18 @@ export interface LcovFileRecord {
   branchesHit: number;
 }
 
-export function normalizeRepoRelativePath(filePath: string, rootDir: string): string {
+export function normalizeRepoRelativePath(
+  filePath: string,
+  rootDir: string,
+  goModulePrefix?: string,
+): string {
   const normalized = filePath.replace(/\\/g, "/");
   const normalizedRoot = rootDir.replace(/\\/g, "/").replace(/\/+$/, "");
   if (normalized.startsWith(normalizedRoot + "/")) {
     return normalized.slice(normalizedRoot.length + 1);
+  }
+  if (goModulePrefix && normalized.startsWith(goModulePrefix + "/")) {
+    return normalized.slice(goModulePrefix.length + 1);
   }
   return normalized.replace(/^\.\//, "");
 }
@@ -122,4 +132,141 @@ export function parseLcov(content: string, rootDir: string): Map<string, LcovFil
   }
 
   return records;
+}
+
+export function parseGoCoverProfile(
+  content: string,
+  rootDir: string,
+  goModulePrefix?: string,
+): Map<string, LcovFileRecord> {
+  const records = new Map<string, LcovFileRecord>();
+  const lineRe = /^(.+):(\d+)\.(\d+),(\d+)\.(\d+)\s+(\d+)\s+(\d+)$/;
+  let branchSeq = 0;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("mode:")) continue;
+
+    const m = lineRe.exec(line);
+    if (!m) continue;
+
+    const rawFile = m[1]!;
+    const startLine = Number.parseInt(m[2]!, 10);
+    const endLine = Number.parseInt(m[4]!, 10);
+    const count = Number.parseInt(m[7]!, 10);
+
+    const rel = normalizeRepoRelativePath(rawFile, rootDir, goModulePrefix);
+    let current = records.get(rel);
+    if (!current) {
+      current = {
+        file: rel,
+        lines: new Map<number, number>(),
+        branches: [],
+        functions: [],
+        linesFound: 0,
+        linesHit: 0,
+        branchesFound: 0,
+        branchesHit: 0,
+      };
+      records.set(rel, current);
+    }
+
+    for (let ln = startLine; ln <= endLine; ln++) {
+      const prev = current.lines.get(ln) ?? 0;
+      current.lines.set(ln, Math.max(prev, count));
+    }
+
+    current.branches.push({
+      line: startLine,
+      block: branchSeq,
+      branch: branchSeq++,
+      taken: count,
+    });
+  }
+
+  for (const rec of records.values()) {
+    rec.linesFound = rec.lines.size;
+    rec.linesHit = Array.from(rec.lines.values()).filter((v) => v > 0).length;
+    rec.branchesFound = rec.branches.length;
+    rec.branchesHit = rec.branches.filter((b) => b.taken > 0).length;
+  }
+
+  return records;
+}
+
+async function readGoModuleName(rootDir: string): Promise<string | undefined> {
+  try {
+    const goMod = await fs.readFile(path.join(rootDir, "go.mod"), "utf8");
+    const m = /^\s*module\s+(\S+)/m.exec(goMod);
+    return m?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+export async function loadCoverageRecords(
+  rootDir: string,
+  explicitPaths?: string | string[],
+): Promise<{ records: Map<string, LcovFileRecord>; mtimeMs?: number }> {
+  const goModulePrefix = await readGoModuleName(rootDir);
+  const candidateRelPaths: string[] = [];
+
+  if (explicitPaths) {
+    const list = Array.isArray(explicitPaths) ? explicitPaths : explicitPaths.split(",");
+    for (const p of list) {
+      if (p.trim()) candidateRelPaths.push(p.trim());
+    }
+  }
+
+  const resolvedPaths: string[] = [];
+  if (candidateRelPaths.length > 0) {
+    for (const p of candidateRelPaths) {
+      resolvedPaths.push(path.resolve(rootDir, p));
+    }
+  } else {
+    const defaults = [
+      path.join(rootDir, "coverage", "lcov.info"),
+      path.join(rootDir, "coverage.out"),
+    ];
+    for (const d of defaults) {
+      try {
+        await fs.access(d);
+        resolvedPaths.push(d);
+      } catch {
+        // continue checking other default coverage paths
+      }
+    }
+    if (resolvedPaths.length === 0) {
+      throw new Error(
+        `Could not read LCOV coverage file at ${path.join(rootDir, "coverage", "lcov.info")}`,
+      );
+    }
+  }
+
+  const merged = new Map<string, LcovFileRecord>();
+  let latestMtimeMs: number | undefined;
+
+  for (const absPath of resolvedPaths) {
+    let content = "";
+    try {
+      content = await fs.readFile(absPath, "utf8");
+      const stat = await fs.stat(absPath);
+      if (latestMtimeMs === undefined || stat.mtimeMs > latestMtimeMs) {
+        latestMtimeMs = stat.mtimeMs;
+      }
+    } catch {
+      throw new Error(`Could not read LCOV coverage file at ${absPath}`);
+    }
+
+    const trimmed = content.trimStart();
+    const parsed = trimmed.startsWith("mode:")
+      ? parseGoCoverProfile(content, rootDir, goModulePrefix)
+      : parseLcov(content, rootDir);
+
+    for (const [rel, rec] of parsed.entries()) {
+      merged.set(rel, rec);
+    }
+  }
+
+  return { records: merged, mtimeMs: latestMtimeMs };
 }

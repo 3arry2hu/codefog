@@ -1,6 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import ts from "typescript";
+import {
+  analyzeGoFilesAstEvidence,
+  isPolyglotSourceFile,
+  isPolyglotTestFile,
+} from "./polyglot.js";
 
 export interface FunctionAstEvidence {
   symbol: string;
@@ -77,15 +82,18 @@ function toPosix(p: string): string {
 }
 
 function stripCodeExtension(p: string): string {
-  return p.replace(/\.(tsx?|jsx?|mjs|cjs)$/, "");
+  return p.replace(/\.(tsx?|jsx?|mjs|cjs|go|rs|java)$/, "");
 }
 
 function isTestFileName(name: string): boolean {
-  return /\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(name);
+  return /\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(name) || isPolyglotTestFile(name);
 }
 
 function isSourceFileName(name: string): boolean {
-  return /\.(ts|tsx|js|jsx|mjs)$/.test(name) && !name.endsWith(".d.ts") && !isTestFileName(name);
+  return (
+    (/\.(ts|tsx|js|jsx|mjs)$/.test(name) && !name.endsWith(".d.ts") && !isTestFileName(name)) ||
+    isPolyglotSourceFile(name)
+  );
 }
 
 async function scanRepoFiles(
@@ -332,6 +340,9 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
   }
 
   for (const testFileRel of testFiles) {
+    if (isPolyglotTestFile(testFileRel)) {
+      continue;
+    }
     const fullPath = path.join(rootDir, testFileRel);
     let content = "";
     try {
@@ -482,7 +493,30 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
   // Build static call graph across source files and propagate test & assertion evidence
   const callGraph = new Map<string, Set<string>>();
 
+  const goSourceFiles = sourceFiles.filter((f) => f.endsWith(".go"));
+  const goTestFiles = testFiles.filter((f) => f.endsWith("_test.go"));
+  if (goSourceFiles.length > 0 || goTestFiles.length > 0) {
+    const goRes = await analyzeGoFilesAstEvidence(rootDir, goSourceFiles, goTestFiles);
+    for (const ev of goRes.evidenceEntries) {
+      const target = getOrCreateInternal(ev.fileStem, ev.symbol);
+      for (const b of ev.executedBlocks) target.executedBlocks.add(b);
+      for (const sb of ev.strongAssertedBlocks) target.strongAssertedBlocks.add(sb);
+      for (const wb of ev.weakAssertedBlocks) target.weakAssertedBlocks.add(wb);
+      target.directStrongAssertions += ev.directStrongAssertions;
+      target.directWeakAssertions += ev.directWeakAssertions;
+      for (const tf of ev.testFiles) target.testFiles.add(tf);
+    }
+    for (const [callerKey, edges] of goRes.callGraphEdges.entries()) {
+      const existing = callGraph.get(callerKey) ?? new Set<string>();
+      for (const edge of edges) existing.add(edge);
+      callGraph.set(callerKey, existing);
+    }
+  }
+
   for (const srcFileRel of sourceFiles) {
+    if (isPolyglotSourceFile(srcFileRel)) {
+      continue;
+    }
     const fullPath = path.join(rootDir, srcFileRel);
     let content = "";
     try {

@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ts from "typescript";
+import { extractPolyglotRuntimeFingerprints, isPolyglotSourceFile } from "./polyglot.js";
+import { extractPolyglotRuntimeFingerprints, isPolyglotSourceFile } from "./polyglot.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +31,9 @@ export function extractRuntimeFunctionFingerprints(
   sourceText: string,
   fileName = "file.ts",
 ): Map<string, string> {
+  if (isPolyglotSourceFile(fileName)) {
+    return extractPolyglotRuntimeFingerprints(sourceText, fileName);
+  }
   const sf = ts.createSourceFile(
     fileName,
     sourceText,
