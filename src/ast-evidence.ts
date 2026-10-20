@@ -2,9 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import ts from "typescript";
 import {
-  analyzeGoFilesAstEvidence,
-  analyzeJavaFilesAstEvidence,
-  analyzeRustFilesAstEvidence,
+  POLYGLOT_LANGUAGE_ADAPTERS,
   isPolyglotSourceFile,
   isPolyglotTestFile,
 } from "./polyglot.js";
@@ -500,60 +498,22 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
   // Build static call graph across source files and propagate test & assertion evidence
   const callGraph = new Map<string, Set<string>>();
 
-  const goSourceFiles = sourceFiles.filter((f) => f.endsWith(".go"));
-  const goTestFiles = testFiles.filter((f) => f.endsWith("_test.go"));
-  if (goSourceFiles.length > 0 || goTestFiles.length > 0) {
-    const goRes = await analyzeGoFilesAstEvidence(rootDir, goSourceFiles, goTestFiles);
-    for (const ev of goRes.evidenceEntries) {
-      const target = getOrCreateInternal(ev.fileStem, ev.symbol);
-      for (const b of ev.executedBlocks) target.executedBlocks.add(b);
-      for (const sb of ev.strongAssertedBlocks) target.strongAssertedBlocks.add(sb);
-      for (const wb of ev.weakAssertedBlocks) target.weakAssertedBlocks.add(wb);
-      target.directStrongAssertions += ev.directStrongAssertions;
-      target.directWeakAssertions += ev.directWeakAssertions;
-      for (const tf of ev.testFiles) target.testFiles.add(tf);
-    }
-    for (const [callerKey, edges] of goRes.callGraphEdges.entries()) {
-      const existing = callGraph.get(callerKey) ?? new Set<string>();
-      for (const edge of edges) existing.add(edge);
-      callGraph.set(callerKey, existing);
-    }
-  }
+  for (const adapter of POLYGLOT_LANGUAGE_ADAPTERS) {
+    const langSourceFiles = sourceFiles.filter((f) => adapter.isSourceFile(f));
+    const langTestFiles = testFiles.filter((f) => adapter.isTestFile(f));
+    if (langSourceFiles.length === 0 && langTestFiles.length === 0) continue;
 
-  const rustSourceFiles = sourceFiles.filter((f) => f.endsWith(".rs"));
-  const rustTestFiles = testFiles.filter((f) => f.endsWith(".rs"));
-  if (rustSourceFiles.length > 0 || rustTestFiles.length > 0) {
-    const rustRes = await analyzeRustFilesAstEvidence(rootDir, rustSourceFiles, rustTestFiles);
-    for (const ev of rustRes.evidenceEntries) {
+    const polyRes = await adapter.analyzeAstEvidence(rootDir, langSourceFiles, langTestFiles);
+    for (const ev of polyRes.evidenceEntries) {
       const target = getOrCreateInternal(ev.fileStem, ev.symbol);
       for (const b of ev.executedBlocks) target.executedBlocks.add(b);
-      for (const sb of ev.strongAssertedBlocks) target.strongAssertedBlocks.add(sb);
-      for (const wb of ev.weakAssertedBlocks) target.weakAssertedBlocks.add(wb);
-      target.directStrongAssertions += ev.directStrongAssertions;
-      target.directWeakAssertions += ev.directWeakAssertions;
+      for (const ob of ev.outcomeAssertedBlocks) target.strongAssertedBlocks.add(ob);
+      for (const lb of ev.livenessCheckedBlocks) target.weakAssertedBlocks.add(lb);
+      target.directStrongAssertions += ev.directOutcomeAssertions;
+      target.directWeakAssertions += ev.directLivenessChecks;
       for (const tf of ev.testFiles) target.testFiles.add(tf);
     }
-    for (const [callerKey, edges] of rustRes.callGraphEdges.entries()) {
-      const existing = callGraph.get(callerKey) ?? new Set<string>();
-      for (const edge of edges) existing.add(edge);
-      callGraph.set(callerKey, existing);
-    }
-  }
-
-  const javaSourceFiles = sourceFiles.filter((f) => f.endsWith(".java"));
-  const javaTestFiles = testFiles.filter((f) => f.endsWith(".java"));
-  if (javaSourceFiles.length > 0 || javaTestFiles.length > 0) {
-    const javaRes = await analyzeJavaFilesAstEvidence(rootDir, javaSourceFiles, javaTestFiles);
-    for (const ev of javaRes.evidenceEntries) {
-      const target = getOrCreateInternal(ev.fileStem, ev.symbol);
-      for (const b of ev.executedBlocks) target.executedBlocks.add(b);
-      for (const sb of ev.strongAssertedBlocks) target.strongAssertedBlocks.add(sb);
-      for (const wb of ev.weakAssertedBlocks) target.weakAssertedBlocks.add(wb);
-      target.directStrongAssertions += ev.directStrongAssertions;
-      target.directWeakAssertions += ev.directWeakAssertions;
-      for (const tf of ev.testFiles) target.testFiles.add(tf);
-    }
-    for (const [callerKey, edges] of javaRes.callGraphEdges.entries()) {
+    for (const [callerKey, edges] of polyRes.callGraphEdges.entries()) {
       const existing = callGraph.get(callerKey) ?? new Set<string>();
       for (const edge of edges) existing.add(edge);
       callGraph.set(callerKey, existing);

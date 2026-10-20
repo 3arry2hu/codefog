@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { findFilesByExtensionInRepo } from "./polyglot.js";
 
 export interface LcovBranchEntry {
   line: number;
@@ -194,43 +195,12 @@ export function parseGoCoverProfile(
   return records;
 }
 
-async function findJavaSourceFilesInRepo(
-  dir: string,
-  rootDir: string,
-  out: string[] = [],
-): Promise<string[]> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (
-      entry.name === "node_modules" ||
-      entry.name === ".git" ||
-      entry.name === "target" ||
-      entry.name === "build" ||
-      entry.name === "dist"
-    ) {
-      continue;
-    }
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await findJavaSourceFilesInRepo(full, rootDir, out);
-    } else if (entry.name.endsWith(".java")) {
-      out.push(path.relative(rootDir, full).replace(/\\/g, "/"));
-    }
-  }
-  return out;
-}
-
 export async function parseJacocoXml(
   content: string,
   rootDir: string,
 ): Promise<Map<string, LcovFileRecord>> {
   const records = new Map<string, LcovFileRecord>();
-  const javaFiles = await findJavaSourceFilesInRepo(rootDir, rootDir);
+  const javaFiles = await findFilesByExtensionInRepo(rootDir, rootDir, ".java");
 
   const pkgRe = /<package\s+name="([^"]*)"[^>]*>([\s\S]*?)<\/package>/g;
   let pm: RegExpExecArray | null;

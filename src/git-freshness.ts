@@ -4,6 +4,7 @@ import ts from "typescript";
 import {
   extractPolyglotRuntimeFingerprints,
   extractRustInlineTestFingerprint,
+  getPolyglotAdapter,
   isPolyglotSourceFile,
 } from "./polyglot.js";
 
@@ -288,11 +289,11 @@ export async function analyzeFileGitFreshness(params: {
     return fp;
   }
 
-  // If the file is a Rust source file with inline `#[cfg(test)]`, find the latest commit where the inline test block changed
-  let inlineRustTestCommits: CommitEntry[] | null = null;
-  if (relPath.endsWith(".rs") && srcHistory.length > 0) {
+  // If the file's LanguageAdapter supports same-file inline test blocks (e.g. Rust `#[cfg(test)]`), find the commits where the inline test blocks changed
+  const polyAdapter = getPolyglotAdapter(relPath);
+  let inlineTestCommits: CommitEntry[] | null = null;
+  if (polyAdapter?.extractInlineTestBlockFingerprints && srcHistory.length > 0) {
     const inlineCommits: CommitEntry[] = [];
-    // Walk from oldest to newest to find commits that introduced or modified inline test blocks
     for (let i = srcHistory.length - 1; i >= 0; i--) {
       const c = srcHistory[i]!;
       const curText = await getSourceTextAtCommit(c.sha);
@@ -310,7 +311,7 @@ export async function analyzeFileGitFreshness(params: {
       }
     }
     if (inlineCommits.length > 0) {
-      inlineRustTestCommits = inlineCommits;
+      inlineTestCommits = inlineCommits;
     }
   }
 
@@ -319,14 +320,14 @@ export async function analyzeFileGitFreshness(params: {
   for (const span of functionSpans) {
     const fnName = span.name;
     const testFiles = associatedTestFiles.get(fnName) ?? [];
-    const usesSameFileInlineRustTests =
-      relPath.endsWith(".rs") &&
+    const usesSameFileInlineTests =
+      Boolean(polyAdapter?.extractInlineTestBlockFingerprints) &&
       testFiles.length === 1 &&
       testFiles[0] === relPath &&
-      inlineRustTestCommits !== null;
+      inlineTestCommits !== null;
 
-    const testHistory = usesSameFileInlineRustTests
-      ? inlineRustTestCommits!
+    const testHistory = usesSameFileInlineTests
+      ? inlineTestCommits!
       : await getCommitHistory(rootDir, testFiles);
     const latestTest = testHistory[0];
 

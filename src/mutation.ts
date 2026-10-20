@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { findFilesByExtensionInRepo } from "./polyglot.js";
 import type { SurvivingMutant } from "./types.js";
 
 export interface StrykerMutantRecord {
@@ -112,37 +113,6 @@ interface RawCargoMutantsReport {
   outcomes?: RawCargoMutantEntry[];
 }
 
-async function findAllJavaFiles(
-  dir: string,
-  rootDir: string,
-  out: string[] = [],
-): Promise<string[]> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (
-      entry.name === "node_modules" ||
-      entry.name === ".git" ||
-      entry.name === "target" ||
-      entry.name === "build" ||
-      entry.name === "dist"
-    ) {
-      continue;
-    }
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await findAllJavaFiles(full, rootDir, out);
-    } else if (entry.name.endsWith(".java")) {
-      out.push(toPosix(path.relative(rootDir, full)));
-    }
-  }
-  return out;
-}
-
 export async function parsePitestXml(
   rawXml: string,
   rootDir: string,
@@ -151,7 +121,7 @@ export async function parsePitestXml(
   let totalMutants = 0;
   let killedMutants = 0;
   let seq = 1;
-  const javaFiles = await findAllJavaFiles(rootDir, rootDir);
+  const javaFiles = await findFilesByExtensionInRepo(rootDir, rootDir, ".java");
 
   const mutRe = /<mutation\s+([^>]+)>([\s\S]*?)<\/mutation>/g;
   let mm: RegExpExecArray | null;

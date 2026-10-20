@@ -7,7 +7,11 @@ import { loadCoverageRecords, type LcovFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
 import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
-import { extractPolyglotFunctionSpans, isPolyglotSourceFile } from "./polyglot.js";
+import {
+  extractPolyglotFunctionSpans,
+  getPolyglotAdapter,
+  isPolyglotSourceFile,
+} from "./polyglot.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -128,11 +132,19 @@ function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunct
   return spans.sort((a, b) => a.startLine - b.startLine);
 }
 
-function deriveModulePath(filePath: string): string {
+export function deriveModulePath(filePath: string): string {
   const parts = filePath.split("/").filter(Boolean);
+  if (parts.length >= 4 && parts[0] === "src" && parts[1] === "main" && parts[2] === "java") {
+    return "src/main/java";
+  }
   if (
     parts.length >= 3 &&
-    (parts[0] === "src" || parts[0] === "internal" || parts[0] === "pkg" || parts[0] === "cmd")
+    (parts[0] === "src" ||
+      parts[0] === "internal" ||
+      parts[0] === "pkg" ||
+      parts[0] === "cmd" ||
+      parts[0] === "crates" ||
+      parts[0] === "services")
   ) {
     return `${parts[0]}/${parts[1]}`;
   }
@@ -198,14 +210,9 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           cyclomaticComplexity: 1,
         }));
 
-    if (relPath.endsWith(".rs") && spans.length > 0) {
-      // Exclude inline `#[cfg(test)]` DA lines outside production function spans from production metrics
-      for (const ln of Array.from(record.lines.keys())) {
-        const inProdSpan = spans.some((s) => ln >= s.startLine && ln <= s.endLine);
-        if (!inProdSpan) {
-          record.lines.delete(ln);
-        }
-      }
+    const adapter = getPolyglotAdapter(relPath);
+    if (adapter?.filterProductionLines && spans.length > 0) {
+      adapter.filterProductionLines(record.lines, spans as any);
       record.linesFound = record.lines.size;
       record.linesHit = Array.from(record.lines.values()).filter((v) => v > 0).length;
     }

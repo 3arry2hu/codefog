@@ -6,9 +6,7 @@ import ts from "typescript";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import {
   extractPolyglotFunctionSpans,
-  generateGoCandidateMutations,
-  generateJavaCandidateMutations,
-  generateRustCandidateMutations,
+  getPolyglotAdapter,
   isCompilerErrorOutput,
   isPolyglotSourceFile,
 } from "./polyglot.js";
@@ -155,14 +153,9 @@ export function generateCandidateMutations(
   startLine?: number,
   endLine?: number,
 ): CandidateMutation[] {
-  if (fileName.endsWith(".go")) {
-    return generateGoCandidateMutations(sourceText, startLine, endLine);
-  }
-  if (fileName.endsWith(".rs")) {
-    return generateRustCandidateMutations(sourceText, startLine, endLine);
-  }
-  if (fileName.endsWith(".java")) {
-    return generateJavaCandidateMutations(sourceText, startLine, endLine);
+  const polyAdapter = getPolyglotAdapter(fileName);
+  if (polyAdapter) {
+    return polyAdapter.generateCandidateMutations(sourceText, startLine, endLine);
   }
   const sf = ts.createSourceFile(
     fileName,
@@ -298,19 +291,9 @@ async function detectDefaultTestCommand(
   associatedTestFiles: string[],
   targetFile = "",
 ): Promise<string> {
-  if (targetFile.endsWith(".go")) {
-    return "go test ./...";
-  }
-  if (targetFile.endsWith(".rs")) {
-    return "cargo test";
-  }
-  if (targetFile.endsWith(".java")) {
-    try {
-      await fs.access(path.join(rootDir, "gradlew"));
-      return "./gradlew test";
-    } catch {
-      return "mvn test";
-    }
+  const polyAdapter = getPolyglotAdapter(targetFile);
+  if (polyAdapter) {
+    return polyAdapter.defaultTestCommand(rootDir, associatedTestFiles);
   }
   const testTargets = associatedTestFiles.length > 0 ? ` ${associatedTestFiles.join(" ")}` : "";
   try {

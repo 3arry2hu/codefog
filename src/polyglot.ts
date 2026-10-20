@@ -1,6 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+export type SupportedLanguageId = "ts" | "go" | "rust" | "java";
+
 export interface PolyglotFunctionSpan {
   name: string;
   startLine: number;
@@ -17,6 +19,46 @@ export interface PolyglotCandidateMutation {
   mutated: string;
   mutatedSource: string;
   isBodyClearance?: boolean;
+}
+
+export interface PolyglotAstEvidenceEntry {
+  fileStem: string;
+  symbol: string;
+  executedBlocks: Set<string>;
+  outcomeAssertedBlocks: Set<string>;
+  livenessCheckedBlocks: Set<string>;
+  directOutcomeAssertions: number;
+  directLivenessChecks: number;
+  testFiles: Set<string>;
+}
+
+export interface PolyglotRepoAstEvidence {
+  evidenceEntries: PolyglotAstEvidenceEntry[];
+  callGraphEdges: Map<string, Set<string>>;
+}
+
+export interface LanguageAdapter {
+  readonly id: SupportedLanguageId;
+  isSourceFile(filePath: string): boolean;
+  isTestFile(filePath: string): boolean;
+  extractFunctionSpans(sourceText: string, filePath: string): PolyglotFunctionSpan[];
+  extractRuntimeFingerprints(sourceText: string, filePath: string): Map<string, string>;
+  generateCandidateMutations(
+    sourceText: string,
+    startLine?: number,
+    endLine?: number,
+  ): PolyglotCandidateMutation[];
+  defaultTestCommand(rootDir: string, associatedTestFiles: string[]): Promise<string>;
+  analyzeAstEvidence(
+    rootDir: string,
+    sourceFiles: string[],
+    testFiles: string[],
+  ): Promise<PolyglotRepoAstEvidence>;
+  filterProductionLines?(
+    lines: Map<number, number>,
+    spans: PolyglotFunctionSpan[],
+  ): void;
+  extractInlineTestBlockFingerprints?(sourceText: string): Map<string, string>;
 }
 
 /**
@@ -182,23 +224,172 @@ function offsetToLine(lineStarts: number[], offset: number): number {
   return high + 1;
 }
 
-function countComplexityInMaskedSlice(maskedSlice: string): number {
+function countComplexityInMaskedSlice(
+  maskedSlice: string,
+  lang: "go" | "rust" | "java" = "go",
+): number {
   let complexity = 1;
-  const branchKeywords = /\b(if|for|while|case|catch|match)\b/g;
+  const branchKeywords =
+    lang === "rust"
+      ? /\b(if|for|while|loop)\b/g
+      : /\b(if|for|while|case|catch)\b/g;
   const logicalOps = /(&&|\|\|)/g;
   const m1 = maskedSlice.match(branchKeywords);
   if (m1) complexity += m1.length;
   const m2 = maskedSlice.match(logicalOps);
   if (m2) complexity += m2.length;
+  if (lang === "rust") {
+    const matchArms = maskedSlice.match(/=>/g);
+    if (matchArms && matchArms.length > 1) {
+      complexity += matchArms.length - 1;
+    }
+    const tryOps = maskedSlice.match(/\?[;,)\s]/g);
+    if (tryOps) {
+      complexity += tryOps.length;
+    }
+  }
   return complexity;
 }
+
+function createEvidenceAccumulator(): {
+  evidenceMap: Map<string, PolyglotAstEvidenceEntry>;
+  getOrCreateEv: (fileStem: string, symbol: string) => PolyglotAstEvidenceEntry;
+} {
+  const evidenceMap = new Map<string, PolyglotAstEvidenceEntry>();
+  function getOrCreateEv(fileStem: string, symbol: string): PolyglotAstEvidenceEntry {
+    const key = `${fileStem}::${symbol}`;
+    let entry = evidenceMap.get(key);
+    if (!entry) {
+      entry = {
+        fileStem,
+        symbol,
+        executedBlocks: new Set(),
+        outcomeAssertedBlocks: new Set(),
+        livenessCheckedBlocks: new Set(),
+        directOutcomeAssertions: 0,
+        directLivenessChecks: 0,
+        testFiles: new Set(),
+      };
+      evidenceMap.set(key, entry);
+    }
+    return entry;
+  }
+  return { evidenceMap, getOrCreateEv };
+}
+
+function collectOperatorMutations(params: {
+  sourceText: string;
+  noComments: string;
+  startLine?: number;
+  endLine?: number;
+  skipOffset?: (offset: number) => boolean;
+  addMutation: (
+    startOffset: number,
+    endOffset: number,
+    replacement: string,
+    line: number,
+  ) => void;
+}): void {
+  const { sourceText, noComments, startLine, endLine, skipOffset, addMutation } = params;
+  const rawLines = sourceText.split("\n");
+  const cleanLines = noComments.split("\n");
+  let lineOffset = 0;
+
+  const opRules: Array<{ pattern: RegExp; replacements: string[] }> = [
+    {
+      pattern: /([A-Za-z0-9_)\]."']+)\s*<=\s*([A-Za-z0-9_([\]\-"'`]+)/g,
+      replacements: ["<", ">"],
+    },
+    {
+      pattern: /([A-Za-z0-9_)\]."']+)\s*>=\s*([A-Za-z0-9_([\]\-"'`]+)/g,
+      replacements: [">", "<"],
+    },
+    {
+      pattern: /([A-Za-z0-9_)\]."']+)\s*==\s*([A-Za-z0-9_([\]\-"'`]+)/g,
+      replacements: ["!="],
+    },
+    {
+      pattern: /([A-Za-z0-9_)\]."']+)\s*!=\s*([A-Za-z0-9_([\]\-"'`]+)/g,
+      replacements: ["=="],
+    },
+  ];
+
+  for (let idx = 0; idx < rawLines.length; idx++) {
+    const lineNum = idx + 1;
+    const rawLine = rawLines[idx]!;
+    const cLine = cleanLines[idx]!;
+    const inRange =
+      (startLine === undefined || lineNum >= startLine) &&
+      (endLine === undefined || lineNum <= endLine);
+
+    if (inRange && (!skipOffset || !skipOffset(lineOffset))) {
+      for (const rule of opRules) {
+        rule.pattern.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = rule.pattern.exec(cLine)) !== null) {
+          const matchStart = lineOffset + m.index;
+          if (skipOffset && skipOffset(matchStart)) continue;
+          const matchEnd = matchStart + m[0].length;
+          if (m.length >= 3 && m[1] && m[2]) {
+            const left = rawLine.slice(m.index, m.index + m[1].length);
+            const right = rawLine.slice(
+              m.index + m[0].length - m[2].length,
+              m.index + m[0].length,
+            );
+            for (const op of rule.replacements) {
+              addMutation(matchStart, matchEnd, `${left} ${op} ${right}`, lineNum);
+            }
+          }
+        }
+      }
+    }
+    lineOffset += rawLine.length + 1;
+  }
+}
+
+export async function findFilesByExtensionInRepo(
+  dir: string,
+  rootDir: string,
+  ext: string,
+  out: string[] = [],
+): Promise<string[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (
+      entry.name === "node_modules" ||
+      entry.name === ".git" ||
+      entry.name === "target" ||
+      entry.name === "build" ||
+      entry.name === "dist" ||
+      entry.name === "coverage" ||
+      entry.name === ".codefog"
+    ) {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await findFilesByExtensionInRepo(full, rootDir, ext, out);
+    } else if (entry.name.endsWith(ext)) {
+      out.push(path.relative(rootDir, full).replace(/\\/g, "/"));
+    }
+  }
+  return out;
+}
+
+// ============================================================================
+// Go LanguageAdapter
+// ============================================================================
 
 export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan[] {
   const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
   const lineStarts = buildLineStarts(sourceText);
   const spans: PolyglotFunctionSpan[] = [];
 
-  // Match top-level `func` declarations at start of line
   const funcRegex = /^[ \t]*func\b/gm;
   let match: RegExpExecArray | null;
 
@@ -206,7 +397,6 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
     const funcStartIdx = match.index;
     let cursor = funcStartIdx + match[0].length;
 
-    // Optional receiver: (r *Recv)
     while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
     if (masked[cursor] === "(") {
       const closeRecv = findMatchingDelimiter(masked, cursor, "(", ")");
@@ -220,7 +410,6 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
     const fnName = nameMatch[0];
     cursor += fnName.length;
 
-    // Optional generic type params: [T any]
     while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
     if (masked[cursor] === "[") {
       const closeGen = findMatchingDelimiter(masked, cursor, "[", "]");
@@ -228,14 +417,12 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
       cursor = closeGen + 1;
     }
 
-    // Parameter list: (...)
     while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
     if (masked[cursor] !== "(") continue;
     const closeParams = findMatchingDelimiter(masked, cursor, "(", ")");
     if (closeParams === -1) continue;
     cursor = closeParams + 1;
 
-    // Find opening brace `{` of function body
     const openBraceIdx = masked.indexOf("{", cursor);
     if (openBraceIdx === -1) continue;
     const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
@@ -254,7 +441,7 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
       name: fnName,
       startLine,
       endLine,
-      cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked),
+      cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked, "go"),
       returnSignature,
       runtimeFingerprint: `${fnName}:${runtimeSlice}`,
     });
@@ -265,25 +452,531 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
   return spans;
 }
 
-export function isPolyglotSourceFile(fileName: string): boolean {
-  if (fileName.endsWith(".go") && !fileName.endsWith("_test.go")) return true;
-  if (fileName.endsWith(".rs") && !isPolyglotTestFile(fileName)) return true;
-  if (fileName.endsWith(".java") && !isPolyglotTestFile(fileName)) return true;
-  return false;
+function isGoErrorOnlyReturn(returnSignature: string): boolean {
+  const sig = returnSignature.trim().replace(/^\(|\)$/g, "").trim();
+  if (!sig) return false;
+  const parts = sig
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length !== 1) return false;
+  const sole = parts[0]!;
+  return sole === "error" || sole.endsWith(" error");
 }
 
-export function isPolyglotTestFile(fileName: string): boolean {
-  const norm = fileName.replace(/\\/g, "/");
-  if (norm.endsWith("_test.go")) return true;
-  if (norm.endsWith(".rs") && /(?:^|\/)tests\//.test(norm)) return true;
+function goZeroValueForType(rawType: string): { expr: string; prelude?: string } {
+  const tokens = rawType.trim().split(/\s+/);
+  const t = tokens[tokens.length - 1] ?? "";
+  if (t === "bool") return { expr: "false" };
+  if (t === "string") return { expr: '""' };
   if (
-    norm.endsWith(".java") &&
-    (/(?:^|\/)src\/test\//.test(norm) || /(?:Test|Tests|IT)\.java$/.test(norm))
+    t === "error" ||
+    t === "any" ||
+    t.startsWith("*") ||
+    t.startsWith("[]") ||
+    t.startsWith("map[") ||
+    t.startsWith("chan ") ||
+    t.startsWith("func(") ||
+    t.startsWith("interface{")
   ) {
-    return true;
+    return { expr: "nil" };
   }
-  return false;
+  if (/^(u?int(8|16|32|64|ptr)?|byte|rune|float(32|64)|complex(64|128))$/.test(t)) {
+    return { expr: "0" };
+  }
+  return { expr: "_cfZero", prelude: `var _cfZero ${t}; ` };
 }
+
+export function buildGoZeroReturnBody(returnSignature: string): string {
+  const sig = returnSignature.trim();
+  if (!sig) return "{ return }";
+
+  const unwrapped = sig.startsWith("(") && sig.endsWith(")") ? sig.slice(1, -1).trim() : sig;
+  if (!unwrapped) return "{ return }";
+
+  const parts = unwrapped
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const preludes: string[] = [];
+  const exprs: string[] = [];
+  parts.forEach((p, idx) => {
+    const z = goZeroValueForType(p);
+    if (z.prelude) {
+      const varName = `_cfZero${idx}`;
+      preludes.push(z.prelude.replace("_cfZero", varName));
+      exprs.push(varName);
+    } else {
+      exprs.push(z.expr);
+    }
+  });
+
+  return `{ ${preludes.join("")}return ${exprs.join(", ")} }`;
+}
+
+export function generateGoCandidateMutations(
+  sourceText: string,
+  startLine?: number,
+  endLine?: number,
+): PolyglotCandidateMutation[] {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const lineStarts = buildLineStarts(sourceText);
+  const candidates: PolyglotCandidateMutation[] = [];
+  let seq = 1;
+
+  function addMutation(
+    startOffset: number,
+    endOffset: number,
+    replacement: string,
+    line: number,
+    isBodyClearance = false,
+  ): void {
+    const original = sourceText.slice(startOffset, endOffset);
+    if (original === replacement) return;
+    candidates.push({
+      id: `mut_${seq++}`,
+      line,
+      original,
+      mutated: replacement,
+      mutatedSource:
+        sourceText.slice(0, startOffset) + replacement + sourceText.slice(endOffset),
+      isBodyClearance,
+    });
+  }
+
+  const funcRegex = /^[ \t]*func\b/gm;
+  let match: RegExpExecArray | null;
+  while ((match = funcRegex.exec(masked)) !== null) {
+    const funcStartIdx = match.index;
+    let cursor = funcStartIdx + match[0].length;
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+    if (masked[cursor] === "(") {
+      const closeRecv = findMatchingDelimiter(masked, cursor, "(", ")");
+      if (closeRecv === -1) continue;
+      cursor = closeRecv + 1;
+    }
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+    const nameMatch = /^[A-Za-z_][A-Za-z0-9_]*/.exec(masked.slice(cursor));
+    if (!nameMatch) continue;
+    cursor += nameMatch[0].length;
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+    if (masked[cursor] === "[") {
+      const closeGen = findMatchingDelimiter(masked, cursor, "[", "]");
+      if (closeGen === -1) continue;
+      cursor = closeGen + 1;
+    }
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+    if (masked[cursor] !== "(") continue;
+    const closeParams = findMatchingDelimiter(masked, cursor, "(", ")");
+    if (closeParams === -1) continue;
+    cursor = closeParams + 1;
+
+    const openBraceIdx = masked.indexOf("{", cursor);
+    if (openBraceIdx === -1) continue;
+    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+    if (closeBraceIdx === -1) continue;
+
+    const fnStartLine = offsetToLine(lineStarts, funcStartIdx);
+    const fnEndLine = offsetToLine(lineStarts, closeBraceIdx);
+    const overlapsRange =
+      (startLine === undefined || fnEndLine >= startLine) &&
+      (endLine === undefined || fnStartLine <= endLine);
+
+    if (overlapsRange) {
+      const returnSignature = noComments.slice(cursor, openBraceIdx).trim();
+      const zeroBody = buildGoZeroReturnBody(returnSignature);
+      const bodyLine = offsetToLine(lineStarts, openBraceIdx);
+      addMutation(openBraceIdx, closeBraceIdx + 1, zeroBody, bodyLine, true);
+    }
+
+    funcRegex.lastIndex = closeBraceIdx + 1;
+  }
+
+  collectOperatorMutations({
+    sourceText,
+    noComments,
+    startLine,
+    endLine,
+    addMutation: (s, e, rep, ln) => addMutation(s, e, rep, ln, false),
+  });
+
+  return candidates;
+}
+
+export interface GoFunctionAstMeta {
+  name: string;
+  fileStem: string;
+  pkgDir: string;
+  returnsErrorOnly: boolean;
+  calledSymbols: string[];
+}
+
+function parseGoImports(content: string, goModulePrefix?: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const addImport = (alias: string | undefined, pkgPath: string) => {
+    let relPkg = pkgPath;
+    if (goModulePrefix && pkgPath.startsWith(goModulePrefix + "/")) {
+      relPkg = pkgPath.slice(goModulePrefix.length + 1);
+    }
+    const parts = relPkg.split("/");
+    const effectiveAlias = alias && alias !== "." && alias !== "_" ? alias : parts[parts.length - 1]!;
+    map.set(effectiveAlias, relPkg);
+  };
+
+  const singleRe = /^\s*import\s+(?:([A-Za-z_]\w*)\s+)?"([^"]+)"/gm;
+  let sm: RegExpExecArray | null;
+  while ((sm = singleRe.exec(content)) !== null) {
+    addImport(sm[1], sm[2]!);
+  }
+
+  const blockRe = /\bimport\s*\(([\s\S]*?)\)/g;
+  let bm: RegExpExecArray | null;
+  while ((bm = blockRe.exec(content)) !== null) {
+    const lineRe = /^\s*(?:([A-Za-z_]\w*)\s+)?"([^"]+)"/gm;
+    let lm: RegExpExecArray | null;
+    while ((lm = lineRe.exec(bm[1]!)) !== null) {
+      addImport(lm[1], lm[2]!);
+    }
+  }
+  return map;
+}
+
+export async function analyzeGoFilesAstEvidence(
+  rootDir: string,
+  goSourceFiles: string[],
+  goTestFiles: string[],
+): Promise<PolyglotRepoAstEvidence> {
+  const toPosix = (p: string) => p.replace(/\\/g, "/");
+  const stripExt = (p: string) => p.replace(/\.go$/, "");
+
+  let goModulePrefix: string | undefined;
+  try {
+    const goMod = await fs.readFile(path.join(rootDir, "go.mod"), "utf8");
+    const m = /^\s*module\s+(\S+)/m.exec(goMod);
+    goModulePrefix = m?.[1];
+  } catch {
+    // optional go.mod
+  }
+
+  const goFunctionsByKey = new Map<string, GoFunctionAstMeta>();
+  const goFunctionsByPkgAndName = new Map<string, GoFunctionAstMeta[]>();
+  const goFunctionsByName = new Map<string, GoFunctionAstMeta[]>();
+  const callGraphEdges = new Map<string, Set<string>>();
+
+  for (const srcRel of goSourceFiles) {
+    const fullPath = path.join(rootDir, srcRel);
+    let content = "";
+    try {
+      content = await fs.readFile(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+    const spans = extractGoFunctionSpans(content);
+    const { noComments } = stripCommentsAndMaskStrings(content);
+    const lines = noComments.split("\n");
+    const fileStem = stripExt(toPosix(srcRel));
+    const pkgDir = toPosix(path.dirname(srcRel));
+
+    for (const span of spans) {
+      const bodyText = lines.slice(span.startLine - 1, span.endLine).join("\n");
+      const calledSymbols: string[] = [];
+      const callRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      let cm: RegExpExecArray | null;
+      while ((cm = callRe.exec(bodyText)) !== null) {
+        const callee = cm[1]!;
+        if (
+          callee !== span.name &&
+          !/^(if|for|switch|return|func|make|len|cap|append|new|panic)$/.test(callee)
+        ) {
+          calledSymbols.push(callee);
+        }
+      }
+
+      const meta: GoFunctionAstMeta = {
+        name: span.name,
+        fileStem,
+        pkgDir,
+        returnsErrorOnly: isGoErrorOnlyReturn(span.returnSignature),
+        calledSymbols,
+      };
+      const key = `${fileStem}::${span.name}`;
+      goFunctionsByKey.set(key, meta);
+
+      const pkgKey = `${pkgDir}::${span.name}`;
+      const pkgList = goFunctionsByPkgAndName.get(pkgKey) ?? [];
+      pkgList.push(meta);
+      goFunctionsByPkgAndName.set(pkgKey, pkgList);
+
+      const nameList = goFunctionsByName.get(span.name) ?? [];
+      nameList.push(meta);
+      goFunctionsByName.set(span.name, nameList);
+    }
+  }
+
+  for (const [callerKey, meta] of goFunctionsByKey.entries()) {
+    const edges = new Set<string>();
+    for (const calleeName of meta.calledSymbols) {
+      const samePkg = goFunctionsByPkgAndName.get(`${meta.pkgDir}::${calleeName}`);
+      const targets = samePkg ?? goFunctionsByName.get(calleeName) ?? [];
+      for (const t of targets) {
+        edges.add(`${t.fileStem}::${t.name}`);
+      }
+    }
+    callGraphEdges.set(callerKey, edges);
+  }
+
+  const { evidenceMap, getOrCreateEv } = createEvidenceAccumulator();
+
+  for (const testRel of goTestFiles) {
+    const fullPath = path.join(rootDir, testRel);
+    let content = "";
+    try {
+      content = await fs.readFile(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+
+    const testPkgDir = toPosix(path.dirname(testRel));
+    const imports = parseGoImports(content, goModulePrefix);
+    const testSpans = extractGoFunctionSpans(content);
+    const { noComments } = stripCommentsAndMaskStrings(content);
+    const allLines = noComments.split("\n");
+    let blockCounter = 0;
+
+    for (const testSpan of testSpans) {
+      if (!testSpan.name.startsWith("Test")) continue;
+      const blockId = `${testRel}#${++blockCounter}`;
+      const bodyLines = allLines.slice(testSpan.startLine - 1, testSpan.endLine);
+      const bodyText = bodyLines.join("\n");
+
+      const valueVarToTargets = new Map<string, GoFunctionAstMeta[]>();
+      const errVarToTargets = new Map<string, GoFunctionAstMeta[]>();
+      const calledTargetsInBlock = new Map<string, GoFunctionAstMeta>();
+      const outcomeForTarget = new Map<string, number>();
+      const livenessForTarget = new Map<string, number>();
+
+      function resolveGoTarget(calleeName: string, pkgAlias?: string): GoFunctionAstMeta[] {
+        if (pkgAlias && imports.has(pkgAlias)) {
+          const importedPkgDir = imports.get(pkgAlias)!;
+          const fromImp = goFunctionsByPkgAndName.get(`${importedPkgDir}::${calleeName}`);
+          if (fromImp) return fromImp;
+        }
+        return (
+          goFunctionsByPkgAndName.get(`${testPkgDir}::${calleeName}`) ??
+          goFunctionsByName.get(calleeName) ??
+          []
+        );
+      }
+
+      // 1. Scan assignments
+      const assignRe =
+        /([A-Za-z0-9_, \t]+?)\s*(?::=|=)\s*(?:([A-Za-z0-9_]+)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)\n]*)\)/g;
+      let am: RegExpExecArray | null;
+      while ((am = assignRe.exec(bodyText)) !== null) {
+        const lhsRaw = am[1]!.trim().replace(/^\b(if|var)\b\s*/, "").trim();
+        const pkgAlias = am[2];
+        const calleeName = am[3]!;
+        const callArgs = am[4] ?? "";
+
+        // Handle `diff := cmp.Diff(want, got)` where `got` is a value variable
+        if (pkgAlias === "cmp" && calleeName === "Diff") {
+          const lhsVars = lhsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+          const diffVar = lhsVars[0];
+          if (diffVar && diffVar !== "_") {
+            for (const [valVar, targets] of valueVarToTargets.entries()) {
+              if (new RegExp(`\\b${valVar}\\b`).test(callArgs)) {
+                valueVarToTargets.set(diffVar, [
+                  ...(valueVarToTargets.get(diffVar) ?? []),
+                  ...targets,
+                ]);
+              }
+            }
+          }
+          continue;
+        }
+
+        const targets = resolveGoTarget(calleeName, pkgAlias);
+        if (targets.length === 0) continue;
+
+        for (const t of targets) {
+          calledTargetsInBlock.set(`${t.fileStem}::${t.name}`, t);
+        }
+
+        const lhsVars = lhsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+        if (lhsVars.length === 1) {
+          const v = lhsVars[0]!;
+          if (v !== "_") {
+            const errorOnlyTargets = targets.filter((t) => t.returnsErrorOnly);
+            const valueTargets = targets.filter((t) => !t.returnsErrorOnly);
+            if (errorOnlyTargets.length > 0) {
+              valueVarToTargets.set(v, [
+                ...(valueVarToTargets.get(v) ?? []),
+                ...errorOnlyTargets,
+              ]);
+            }
+            if (valueTargets.length > 0) {
+              valueVarToTargets.set(v, [
+                ...(valueVarToTargets.get(v) ?? []),
+                ...valueTargets,
+              ]);
+            }
+          }
+        } else if (lhsVars.length >= 2) {
+          for (let i = 0; i < lhsVars.length - 1; i++) {
+            const v = lhsVars[i]!;
+            if (v !== "_") {
+              valueVarToTargets.set(v, [...(valueVarToTargets.get(v) ?? []), ...targets]);
+            }
+          }
+          const lastVar = lhsVars[lhsVars.length - 1]!;
+          if (lastVar !== "_") {
+            errVarToTargets.set(lastVar, [
+              ...(errVarToTargets.get(lastVar) ?? []),
+              ...targets,
+            ]);
+          }
+        }
+      }
+
+      // 2. Also scan direct calls not in assignments
+      const callRe = /(?:([A-Za-z0-9_]+)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      let cm: RegExpExecArray | null;
+      while ((cm = callRe.exec(bodyText)) !== null) {
+        const targets = resolveGoTarget(cm[2]!, cm[1]);
+        for (const t of targets) {
+          calledTargetsInBlock.set(`${t.fileStem}::${t.name}`, t);
+        }
+      }
+
+      // 3. Scan `if <cond> { ... t.Error/t.Fatal/t.Fail ... }`
+      const ifFailRe =
+        /\bif\s+([^{]+)\{[^}]*\b(?:t\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow))\b/gs;
+      let im: RegExpExecArray | null;
+      while ((im = ifFailRe.exec(bodyText)) !== null) {
+        const rawCond = im[1]!;
+        const semiIdx = rawCond.indexOf(";");
+        const condExpr = semiIdx !== -1 ? rawCond.slice(semiIdx + 1) : rawCond;
+
+        let inlineVars: Set<string> | null = null;
+        if (semiIdx !== -1) {
+          const initPart = rawCond.slice(0, semiIdx);
+          const initAssignMatch = /^([A-Za-z0-9_, \t]+?)\s*(?::=|=)/.exec(initPart.trim());
+          if (initAssignMatch?.[1]) {
+            inlineVars = new Set(
+              initAssignMatch[1]
+                .split(",")
+                .map((s) => s.trim())
+                .filter((s) => s && s !== "_"),
+            );
+          }
+        }
+
+        for (const [valVar, targets] of valueVarToTargets.entries()) {
+          if (inlineVars && !inlineVars.has(valVar)) continue;
+          const varRe = new RegExp(`\\b${valVar}\\b`);
+          if (varRe.test(condExpr)) {
+            const strippedNilOnly = condExpr
+              .replace(new RegExp(`\\b${valVar}\\b\\s*[!=]=\\s*nil\\b`, "g"), "")
+              .replace(new RegExp(`\\bnil\\s*[!=]=\\s*\\b${valVar}\\b`, "g"), "")
+              .replace(/&&|\|\||\s+/g, "");
+            const isNilOnlyCheck = strippedNilOnly.length === 0;
+            for (const t of targets) {
+              const k = `${t.fileStem}::${t.name}`;
+              if (isNilOnlyCheck && !t.returnsErrorOnly) {
+                livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
+              } else {
+                outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+              }
+            }
+          }
+        }
+
+        let dcm: RegExpExecArray | null;
+        callRe.lastIndex = 0;
+        while ((dcm = callRe.exec(condExpr)) !== null) {
+          const targets = resolveGoTarget(dcm[2]!, dcm[1]);
+          for (const t of targets) {
+            const k = `${t.fileStem}::${t.name}`;
+            outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+          }
+        }
+
+        for (const [errVar, targets] of errVarToTargets.entries()) {
+          if (inlineVars && !inlineVars.has(errVar)) continue;
+          const varRe = new RegExp(`\\b${errVar}\\b`);
+          if (varRe.test(condExpr)) {
+            for (const t of targets) {
+              const k = `${t.fileStem}::${t.name}`;
+              livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
+            }
+          }
+        }
+      }
+
+      // 4. Scan testify outcome assertions vs liveness checks
+      const testifyOutcomeRe =
+        /\b(?:assert|require)\.(?:Equal|EqualValues|Exactly|ElementsMatch|True|False|NoError|Error|ErrorIs|Zero)\s*\(([^)]+)\)/g;
+      let tm: RegExpExecArray | null;
+      while ((tm = testifyOutcomeRe.exec(bodyText)) !== null) {
+        const argsText = tm[1]!;
+        for (const [valVar, targets] of valueVarToTargets.entries()) {
+          if (new RegExp(`\\b${valVar}\\b`).test(argsText)) {
+            for (const t of targets) {
+              const k = `${t.fileStem}::${t.name}`;
+              outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+            }
+          }
+        }
+        callRe.lastIndex = 0;
+        let dcm: RegExpExecArray | null;
+        while ((dcm = callRe.exec(argsText)) !== null) {
+          for (const t of resolveGoTarget(dcm[2]!, dcm[1])) {
+            const k = `${t.fileStem}::${t.name}`;
+            outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+          }
+        }
+      }
+
+      const testifyLivenessRe = /\b(?:assert|require)\.(?:NotNil|NotEmpty)\s*\(([^)]+)\)/g;
+      while ((tm = testifyLivenessRe.exec(bodyText)) !== null) {
+        const argsText = tm[1]!;
+        for (const [valVar, targets] of valueVarToTargets.entries()) {
+          if (new RegExp(`\\b${valVar}\\b`).test(argsText)) {
+            for (const t of targets) {
+              const k = `${t.fileStem}::${t.name}`;
+              livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
+            }
+          }
+        }
+      }
+
+      for (const [k, target] of calledTargetsInBlock.entries()) {
+        const ev = getOrCreateEv(target.fileStem, target.name);
+        ev.executedBlocks.add(blockId);
+        ev.testFiles.add(toPosix(testRel));
+        const oc = outcomeForTarget.get(k) ?? 0;
+        const lc = livenessForTarget.get(k) ?? 0;
+        if (oc > 0) {
+          ev.outcomeAssertedBlocks.add(blockId);
+          ev.directOutcomeAssertions += oc;
+        } else if (lc > 0) {
+          ev.livenessCheckedBlocks.add(blockId);
+          ev.directLivenessChecks += lc;
+        }
+      }
+    }
+  }
+
+  return {
+    evidenceEntries: Array.from(evidenceMap.values()),
+    callGraphEdges,
+  };
+}
+
+// ============================================================================
+// Rust LanguageAdapter
+// ============================================================================
 
 export function findRustInlineTestByteRanges(
   masked: string,
@@ -347,7 +1040,6 @@ function parseAllRustFunctions(
     const openBraceIdx = masked.indexOf("{", cursor);
     const semiIdx = masked.indexOf(";", cursor);
     if (openBraceIdx === -1 || (semiIdx !== -1 && semiIdx < openBraceIdx)) {
-      // Trait method signature without body
       continue;
     }
 
@@ -379,7 +1071,7 @@ function parseAllRustFunctions(
       name: fnName,
       startLine,
       endLine,
-      cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked),
+      cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked, "rust"),
       returnSignature,
       runtimeFingerprint: `${fnName}:${runtimeSlice}`,
       isTest: insideTestRange,
@@ -397,684 +1089,6 @@ export function extractRustFunctionSpans(sourceText: string): PolyglotFunctionSp
   return parseAllRustFunctions(sourceText)
     .filter((f) => !f.isTest)
     .map(({ isTest: _t, startOffset: _s, endOffset: _e, ...rest }) => rest);
-}
-
-const JAVA_KEYWORDS = new Set([
-  "if",
-  "for",
-  "while",
-  "switch",
-  "catch",
-  "synchronized",
-  "return",
-  "new",
-  "throw",
-  "super",
-  "this",
-  "class",
-  "interface",
-  "enum",
-  "record",
-]);
-
-export function extractJavaFunctionSpans(sourceText: string): PolyglotFunctionSpan[] {
-  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
-  const lineStarts = buildLineStarts(sourceText);
-  const spans: PolyglotFunctionSpan[] = [];
-
-  // Match method declarations inside class/interface/enum bodies
-  const methodRegex =
-    /^[ \t]*(?:@[A-Za-z0-9_$.]+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|static|final|synchronized|abstract|default|native|strictfp)\s+)*(?:<[^{;]+>\s+)?([A-Za-z_][A-Za-z0-9_<>,.?[\]\s]*?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
-
-  let match: RegExpExecArray | null;
-  while ((match = methodRegex.exec(masked)) !== null) {
-    const rawReturnType = match[1]!.trim();
-    const methodName = match[2]!;
-    if (
-      JAVA_KEYWORDS.has(methodName) ||
-      JAVA_KEYWORDS.has(rawReturnType) ||
-      /\b(?:class|interface|enum|record)\b/.test(rawReturnType)
-    ) {
-      continue;
-    }
-
-    const declStartIdx = match.index;
-    const openParenIdx = declStartIdx + match[0].length - 1;
-    const closeParenIdx = findMatchingDelimiter(masked, openParenIdx, "(", ")");
-    if (closeParenIdx === -1) continue;
-
-    const cursor = closeParenIdx + 1;
-    const openBraceIdx = masked.indexOf("{", cursor);
-    const semiIdx = masked.indexOf(";", cursor);
-    if (openBraceIdx === -1 || (semiIdx !== -1 && semiIdx < openBraceIdx)) {
-      continue;
-    }
-
-    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
-    if (closeBraceIdx === -1) continue;
-
-    // Locate the actual return type from `noComments` at the same offset as `match[1]`
-    const retStartInMatch = match[0].indexOf(match[1]!);
-    const returnSignature = noComments
-      .slice(declStartIdx + retStartInMatch, declStartIdx + retStartInMatch + match[1]!.length)
-      .trim();
-
-    const startLine = offsetToLine(lineStarts, declStartIdx);
-    const endLine = offsetToLine(lineStarts, closeBraceIdx);
-    const bodyMasked = masked.slice(openBraceIdx, closeBraceIdx + 1);
-    const runtimeSlice = noComments
-      .slice(declStartIdx, closeBraceIdx + 1)
-      .replace(/\s+/g, " ")
-      .trim();
-
-    spans.push({
-      name: methodName,
-      startLine,
-      endLine,
-      cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked),
-      returnSignature,
-      runtimeFingerprint: `${methodName}:${runtimeSlice}`,
-    });
-
-    methodRegex.lastIndex = closeBraceIdx + 1;
-  }
-
-  return spans;
-}
-
-export function extractPolyglotFunctionSpans(
-  sourceText: string,
-  fileName: string,
-): PolyglotFunctionSpan[] {
-  if (fileName.endsWith(".go")) {
-    return extractGoFunctionSpans(sourceText);
-  }
-  if (fileName.endsWith(".rs")) {
-    return extractRustFunctionSpans(sourceText);
-  }
-  if (fileName.endsWith(".java")) {
-    return extractJavaFunctionSpans(sourceText);
-  }
-  return [];
-}
-
-export function extractPolyglotRuntimeFingerprints(
-  sourceText: string,
-  fileName: string,
-): Map<string, string> {
-  const spans = extractPolyglotFunctionSpans(sourceText, fileName);
-  const map = new Map<string, string>();
-  for (const s of spans) {
-    map.set(s.name, s.runtimeFingerprint);
-  }
-  return map;
-}
-
-function isGoErrorOnlyReturn(returnSignature: string): boolean {
-  const sig = returnSignature.trim().replace(/^\(|\)$/g, "").trim();
-  if (!sig) return false;
-  // Splitting by comma for tuple returns like `int, error` or `val int, err error`
-  const parts = sig
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean);
-  if (parts.length !== 1) return false;
-  const sole = parts[0]!;
-  return sole === "error" || sole.endsWith(" error");
-}
-
-function goZeroValueForType(rawType: string): { expr: string; prelude?: string } {
-  const tokens = rawType.trim().split(/\s+/);
-  const t = tokens[tokens.length - 1] ?? "";
-  if (t === "bool") return { expr: "false" };
-  if (t === "string") return { expr: '""' };
-  if (
-    t === "error" ||
-    t === "any" ||
-    t.startsWith("*") ||
-    t.startsWith("[]") ||
-    t.startsWith("map[") ||
-    t.startsWith("chan ") ||
-    t.startsWith("func(") ||
-    t.startsWith("interface{")
-  ) {
-    return { expr: "nil" };
-  }
-  if (
-    /^(u?int(8|16|32|64|ptr)?|byte|rune|float(32|64)|complex(64|128))$/.test(t)
-  ) {
-    return { expr: "0" };
-  }
-  return { expr: "_cfZero", prelude: `var _cfZero ${t}; ` };
-}
-
-export function buildGoZeroReturnBody(returnSignature: string): string {
-  const sig = returnSignature.trim();
-  if (!sig) return "{ return }";
-
-  const unwrapped = sig.startsWith("(") && sig.endsWith(")") ? sig.slice(1, -1).trim() : sig;
-  if (!unwrapped) return "{ return }";
-
-  const parts = unwrapped
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean);
-
-  const preludes: string[] = [];
-  const exprs: string[] = [];
-  parts.forEach((p, idx) => {
-    const z = goZeroValueForType(p);
-    if (z.prelude) {
-      const varName = `_cfZero${idx}`;
-      preludes.push(z.prelude.replace("_cfZero", varName));
-      exprs.push(varName);
-    } else {
-      exprs.push(z.expr);
-    }
-  });
-
-  return `{ ${preludes.join("")}return ${exprs.join(", ")} }`;
-}
-
-export function generateGoCandidateMutations(
-  sourceText: string,
-  startLine?: number,
-  endLine?: number,
-): PolyglotCandidateMutation[] {
-  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
-  const lineStarts = buildLineStarts(sourceText);
-  const candidates: PolyglotCandidateMutation[] = [];
-  let seq = 1;
-
-  function inRange(line: number): boolean {
-    if (startLine !== undefined && line < startLine) return false;
-    if (endLine !== undefined && line > endLine) return false;
-    return true;
-  }
-
-  function addMutation(
-    startOffset: number,
-    endOffset: number,
-    replacement: string,
-    line: number,
-    isBodyClearance = false,
-  ): void {
-    const original = sourceText.slice(startOffset, endOffset);
-    if (original === replacement) return;
-    candidates.push({
-      id: `mut_${seq++}`,
-      line,
-      original,
-      mutated: replacement,
-      mutatedSource:
-        sourceText.slice(0, startOffset) + replacement + sourceText.slice(endOffset),
-      isBodyClearance,
-    });
-  }
-
-  // 1. Function body clearance mutations (Pseudo-tested method detector)
-  const funcRegex = /^[ \t]*func\b/gm;
-  let match: RegExpExecArray | null;
-  while ((match = funcRegex.exec(masked)) !== null) {
-    const funcStartIdx = match.index;
-    let cursor = funcStartIdx + match[0].length;
-    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
-    if (masked[cursor] === "(") {
-      const closeRecv = findMatchingDelimiter(masked, cursor, "(", ")");
-      if (closeRecv === -1) continue;
-      cursor = closeRecv + 1;
-    }
-    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
-    const nameMatch = /^[A-Za-z_][A-Za-z0-9_]*/.exec(masked.slice(cursor));
-    if (!nameMatch) continue;
-    cursor += nameMatch[0].length;
-    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
-    if (masked[cursor] === "[") {
-      const closeGen = findMatchingDelimiter(masked, cursor, "[", "]");
-      if (closeGen === -1) continue;
-      cursor = closeGen + 1;
-    }
-    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
-    if (masked[cursor] !== "(") continue;
-    const closeParams = findMatchingDelimiter(masked, cursor, "(", ")");
-    if (closeParams === -1) continue;
-    cursor = closeParams + 1;
-
-    const openBraceIdx = masked.indexOf("{", cursor);
-    if (openBraceIdx === -1) continue;
-    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
-    if (closeBraceIdx === -1) continue;
-
-    const fnStartLine = offsetToLine(lineStarts, funcStartIdx);
-    const fnEndLine = offsetToLine(lineStarts, closeBraceIdx);
-    const overlapsRange =
-      (startLine === undefined || fnEndLine >= startLine) &&
-      (endLine === undefined || fnStartLine <= endLine);
-
-    if (overlapsRange) {
-      const returnSignature = noComments.slice(cursor, openBraceIdx).trim();
-      const zeroBody = buildGoZeroReturnBody(returnSignature);
-      const bodyLine = offsetToLine(lineStarts, openBraceIdx);
-      addMutation(openBraceIdx, closeBraceIdx + 1, zeroBody, bodyLine, true);
-    }
-
-    funcRegex.lastIndex = closeBraceIdx + 1;
-  }
-
-  // 2. Operator & boolean mutations on non-comment lines
-  const lines = sourceText.split("\n");
-  const maskedLines = masked.split("\n");
-  let lineOffset = 0;
-
-  const opRules: Array<{ pattern: RegExp; replacements: string[] }> = [
-    { pattern: /([A-Za-z0-9_)\]]+)\s*<=\s*([A-Za-z0-9_([\]]+)/g, replacements: ["<", ">"] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*>=\s*([A-Za-z0-9_([\]]+)/g, replacements: [">", "<"] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*==\s*([A-Za-z0-9_([\]]+)/g, replacements: ["!="] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*!=\s*([A-Za-z0-9_([\]]+)/g, replacements: ["=="] },
-  ];
-
-  for (let idx = 0; idx < lines.length; idx++) {
-    const lineNum = idx + 1;
-    const rawLine = lines[idx]!;
-    const mLine = maskedLines[idx]!;
-    if (inRange(lineNum)) {
-      for (const rule of opRules) {
-        rule.pattern.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = rule.pattern.exec(mLine)) !== null) {
-          const matchStart = lineOffset + m.index;
-          const matchEnd = matchStart + m[0].length;
-          if (m.length >= 3 && m[1] && m[2]) {
-            const left = rawLine.slice(m.index, m.index + m[1].length);
-            const right = rawLine.slice(
-              m.index + m[0].length - m[2].length,
-              m.index + m[0].length,
-            );
-            for (const op of rule.replacements) {
-              addMutation(matchStart, matchEnd, `${left} ${op} ${right}`, lineNum);
-            }
-          } else {
-            for (const rep of rule.replacements) {
-              addMutation(matchStart, matchEnd, rep, lineNum);
-            }
-          }
-        }
-      }
-    }
-    lineOffset += rawLine.length + 1;
-  }
-
-  return candidates;
-}
-
-export function isCompilerErrorOutput(output: string): boolean {
-  return (
-    /cannot use .* in return statement/i.test(output) ||
-    /not enough arguments to return/i.test(output) ||
-    /too many arguments to return/i.test(output) ||
-    /syntax error:/i.test(output) ||
-    /undefined:/i.test(output) ||
-    /error\[E\d+\]:/i.test(output) ||
-    /error: incompatible types/i.test(output) ||
-    /error: missing return statement/i.test(output)
-  );
-}
-
-export interface GoFunctionAstMeta {
-  name: string;
-  fileStem: string;
-  pkgDir: string;
-  returnsErrorOnly: boolean;
-  calledSymbols: string[];
-}
-
-export async function analyzeGoFilesAstEvidence(
-  rootDir: string,
-  goSourceFiles: string[],
-  goTestFiles: string[],
-): Promise<{
-  evidenceEntries: Array<{
-    fileStem: string;
-    symbol: string;
-    executedBlocks: Set<string>;
-    strongAssertedBlocks: Set<string>;
-    weakAssertedBlocks: Set<string>;
-    directStrongAssertions: number;
-    directWeakAssertions: number;
-    testFiles: Set<string>;
-  }>;
-  callGraphEdges: Map<string, Set<string>>;
-}> {
-  const toPosix = (p: string) => p.replace(/\\/g, "/");
-  const stripExt = (p: string) => p.replace(/\.go$/, "");
-
-  const goFunctionsByKey = new Map<string, GoFunctionAstMeta>();
-  const goFunctionsByPkgAndName = new Map<string, GoFunctionAstMeta[]>();
-  const goFunctionsByName = new Map<string, GoFunctionAstMeta[]>();
-  const callGraphEdges = new Map<string, Set<string>>();
-
-  for (const srcRel of goSourceFiles) {
-    const fullPath = path.join(rootDir, srcRel);
-    let content = "";
-    try {
-      content = await fs.readFile(fullPath, "utf8");
-    } catch {
-      continue;
-    }
-    const spans = extractGoFunctionSpans(content);
-    const { noComments } = stripCommentsAndMaskStrings(content);
-    const lines = noComments.split("\n");
-    const fileStem = stripExt(toPosix(srcRel));
-    const pkgDir = toPosix(path.dirname(srcRel));
-
-    for (const span of spans) {
-      const bodyText = lines.slice(span.startLine - 1, span.endLine).join("\n");
-      const calledSymbols: string[] = [];
-      const callRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
-      let cm: RegExpExecArray | null;
-      while ((cm = callRe.exec(bodyText)) !== null) {
-        const callee = cm[1]!;
-        if (callee !== span.name && !/^(if|for|switch|return|func|make|len|cap|append|new|panic)$/.test(callee)) {
-          calledSymbols.push(callee);
-        }
-      }
-
-      const meta: GoFunctionAstMeta = {
-        name: span.name,
-        fileStem,
-        pkgDir,
-        returnsErrorOnly: isGoErrorOnlyReturn(span.returnSignature),
-        calledSymbols,
-      };
-      const key = `${fileStem}::${span.name}`;
-      goFunctionsByKey.set(key, meta);
-
-      const pkgKey = `${pkgDir}::${span.name}`;
-      const pkgList = goFunctionsByPkgAndName.get(pkgKey) ?? [];
-      pkgList.push(meta);
-      goFunctionsByPkgAndName.set(pkgKey, pkgList);
-
-      const nameList = goFunctionsByName.get(span.name) ?? [];
-      nameList.push(meta);
-      goFunctionsByName.set(span.name, nameList);
-    }
-  }
-
-  for (const [callerKey, meta] of goFunctionsByKey.entries()) {
-    const edges = new Set<string>();
-    for (const calleeName of meta.calledSymbols) {
-      const samePkg = goFunctionsByPkgAndName.get(`${meta.pkgDir}::${calleeName}`);
-      const targets = samePkg ?? goFunctionsByName.get(calleeName) ?? [];
-      for (const t of targets) {
-        edges.add(`${t.fileStem}::${t.name}`);
-      }
-    }
-    callGraphEdges.set(callerKey, edges);
-  }
-
-  const evidenceMap = new Map<
-    string,
-    {
-      fileStem: string;
-      symbol: string;
-      executedBlocks: Set<string>;
-      strongAssertedBlocks: Set<string>;
-      weakAssertedBlocks: Set<string>;
-      directStrongAssertions: number;
-      directWeakAssertions: number;
-      testFiles: Set<string>;
-    }
-  >();
-
-  function getOrCreateEv(fileStem: string, symbol: string) {
-    const key = `${fileStem}::${symbol}`;
-    let entry = evidenceMap.get(key);
-    if (!entry) {
-      entry = {
-        fileStem,
-        symbol,
-        executedBlocks: new Set(),
-        strongAssertedBlocks: new Set(),
-        weakAssertedBlocks: new Set(),
-        directStrongAssertions: 0,
-        directWeakAssertions: 0,
-        testFiles: new Set(),
-      };
-      evidenceMap.set(key, entry);
-    }
-    return entry;
-  }
-
-  for (const testRel of goTestFiles) {
-    const fullPath = path.join(rootDir, testRel);
-    let content = "";
-    try {
-      content = await fs.readFile(fullPath, "utf8");
-    } catch {
-      continue;
-    }
-
-    const testPkgDir = toPosix(path.dirname(testRel));
-    const testSpans = extractGoFunctionSpans(content);
-    const { noComments } = stripCommentsAndMaskStrings(content);
-    const allLines = noComments.split("\n");
-    let blockCounter = 0;
-
-    for (const testSpan of testSpans) {
-      if (!testSpan.name.startsWith("Test")) continue;
-      const blockId = `${testRel}#${++blockCounter}`;
-      const bodyLines = allLines.slice(testSpan.startLine - 1, testSpan.endLine);
-      const bodyText = bodyLines.join("\n");
-
-      // Track value variables vs error-only variables assigned from production calls
-      const valueVarToTargets = new Map<string, GoFunctionAstMeta[]>();
-      const errVarToTargets = new Map<string, GoFunctionAstMeta[]>();
-      const calledTargetsInBlock = new Map<string, GoFunctionAstMeta>();
-      const strongForTarget = new Map<string, number>();
-      const weakForTarget = new Map<string, number>();
-
-      function resolveGoTarget(calleeName: string): GoFunctionAstMeta[] {
-        return (
-          goFunctionsByPkgAndName.get(`${testPkgDir}::${calleeName}`) ??
-          goFunctionsByName.get(calleeName) ??
-          []
-        );
-      }
-
-      // 1. Scan assignments:
-      // e.g. `if err := ValidateCurrency("USD"); ...`
-      // or `_, err := svc.Charge(100)`
-      // or `ok, err := CanRefund(10)`
-      // or `res := Calc(10)`
-      const assignRe =
-        /([A-Za-z0-9_, \t]+?)\s*(?::=|=)\s*(?:[A-Za-z0-9_]+\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
-      let am: RegExpExecArray | null;
-      while ((am = assignRe.exec(bodyText)) !== null) {
-        const lhsRaw = am[1]!.trim().replace(/^\b(if|var)\b\s*/, "").trim();
-        const calleeName = am[2]!;
-        const targets = resolveGoTarget(calleeName);
-        if (targets.length === 0) continue;
-
-        for (const t of targets) {
-          calledTargetsInBlock.set(`${t.fileStem}::${t.name}`, t);
-        }
-
-        const lhsVars = lhsRaw.split(",").map((s) => s.trim()).filter(Boolean);
-        if (lhsVars.length === 1) {
-          const v = lhsVars[0]!;
-          if (v !== "_") {
-            // If function returns error-only, single variable is an error variable whose check IS an outcome assertion!
-            const errorOnlyTargets = targets.filter((t) => t.returnsErrorOnly);
-            const valueTargets = targets.filter((t) => !t.returnsErrorOnly);
-            if (errorOnlyTargets.length > 0) {
-              valueVarToTargets.set(v, [
-                ...(valueVarToTargets.get(v) ?? []),
-                ...errorOnlyTargets,
-              ]);
-            }
-            if (valueTargets.length > 0) {
-              valueVarToTargets.set(v, [
-                ...(valueVarToTargets.get(v) ?? []),
-                ...valueTargets,
-              ]);
-            }
-          }
-        } else if (lhsVars.length >= 2) {
-          // Multi-return `(val, err)` in Go: first slot(s) are value outcomes, last slot is error
-          for (let i = 0; i < lhsVars.length - 1; i++) {
-            const v = lhsVars[i]!;
-            if (v !== "_") {
-              valueVarToTargets.set(v, [...(valueVarToTargets.get(v) ?? []), ...targets]);
-            }
-          }
-          const lastVar = lhsVars[lhsVars.length - 1]!;
-          if (lastVar !== "_") {
-            errVarToTargets.set(lastVar, [
-              ...(errVarToTargets.get(lastVar) ?? []),
-              ...targets,
-            ]);
-          }
-        }
-      }
-
-      // 2. Also scan direct calls not in assignments
-      const callRe = /(?:[A-Za-z0-9_]+\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
-      let cm: RegExpExecArray | null;
-      while ((cm = callRe.exec(bodyText)) !== null) {
-        const calleeName = cm[1]!;
-        const targets = resolveGoTarget(calleeName);
-        for (const t of targets) {
-          calledTargetsInBlock.set(`${t.fileStem}::${t.name}`, t);
-        }
-      }
-
-      const ifFailRe =
-        /\bif\s+([^{]+)\{[^}]*\b(?:t\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow))\b/gs;
-      let im: RegExpExecArray | null;
-      while ((im = ifFailRe.exec(bodyText)) !== null) {
-        const rawCond = im[1]!;
-        const semiIdx = rawCond.indexOf(";");
-        const condExpr = semiIdx !== -1 ? rawCond.slice(semiIdx + 1) : rawCond;
-
-        // If the `if` statement has an inline initializer `if lhs := fn(...); condExpr`,
-        // scope variable checking to variables assigned in that inline initializer (or direct calls in condExpr).
-        let inlineVars: Set<string> | null = null;
-        if (semiIdx !== -1) {
-          const initPart = rawCond.slice(0, semiIdx);
-          const initAssignMatch = /^([A-Za-z0-9_, \t]+?)\s*(?::=|=)/.exec(initPart.trim());
-          if (initAssignMatch?.[1]) {
-            inlineVars = new Set(
-              initAssignMatch[1]
-                .split(",")
-                .map((s) => s.trim())
-                .filter((s) => s && s !== "_"),
-            );
-          }
-        }
-
-        // Check if any valueVar is referenced in condExpr
-        for (const [valVar, targets] of valueVarToTargets.entries()) {
-          if (inlineVars && !inlineVars.has(valVar)) continue;
-          const varRe = new RegExp(`\\b${valVar}\\b`);
-          if (varRe.test(condExpr)) {
-            const strippedNilOnly = condExpr
-              .replace(new RegExp(`\\b${valVar}\\b\\s*[!=]=\\s*nil\\b`, "g"), "")
-              .replace(new RegExp(`\\bnil\\s*[!=]=\\s*\\b${valVar}\\b`, "g"), "")
-              .replace(/&&|\|\||\s+/g, "");
-            const isNilOnlyCheck = strippedNilOnly.length === 0;
-            for (const t of targets) {
-              const k = `${t.fileStem}::${t.name}`;
-              if (isNilOnlyCheck && !t.returnsErrorOnly) {
-                weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
-              } else {
-                strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
-              }
-            }
-          }
-        }
-
-        // Check if any direct function call is inside condExpr
-        let dcm: RegExpExecArray | null;
-        callRe.lastIndex = 0;
-        while ((dcm = callRe.exec(condExpr)) !== null) {
-          const targets = resolveGoTarget(dcm[1]!);
-          for (const t of targets) {
-            const k = `${t.fileStem}::${t.name}`;
-            strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
-          }
-        }
-
-        // Check if an error variable from a `(T, error)` function is checked in condExpr
-        for (const [errVar, targets] of errVarToTargets.entries()) {
-          if (inlineVars && !inlineVars.has(errVar)) continue;
-          const varRe = new RegExp(`\\b${errVar}\\b`);
-          if (varRe.test(condExpr)) {
-            for (const t of targets) {
-              const k = `${t.fileStem}::${t.name}`;
-              weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
-            }
-          }
-        }
-      }
-
-      // 4. Scan testify `assert.*` / `require.*` calls
-      const testifyStrongRe =
-        /\b(?:assert|require)\.(?:Equal|EqualValues|Exactly|ElementsMatch|True|False|NoError|Error|ErrorIs|Zero)\s*\(([^)]+)\)/g;
-      let tm: RegExpExecArray | null;
-      while ((tm = testifyStrongRe.exec(bodyText)) !== null) {
-        const argsText = tm[1]!;
-        for (const [valVar, targets] of valueVarToTargets.entries()) {
-          if (new RegExp(`\\b${valVar}\\b`).test(argsText)) {
-            for (const t of targets) {
-              const k = `${t.fileStem}::${t.name}`;
-              strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
-            }
-          }
-        }
-        callRe.lastIndex = 0;
-        let dcm: RegExpExecArray | null;
-        while ((dcm = callRe.exec(argsText)) !== null) {
-          for (const t of resolveGoTarget(dcm[1]!)) {
-            const k = `${t.fileStem}::${t.name}`;
-            strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
-          }
-        }
-      }
-
-      const testifyWeakRe = /\b(?:assert|require)\.(?:NotNil|NotEmpty)\s*\(([^)]+)\)/g;
-      while ((tm = testifyWeakRe.exec(bodyText)) !== null) {
-        const argsText = tm[1]!;
-        for (const [valVar, targets] of valueVarToTargets.entries()) {
-          if (new RegExp(`\\b${valVar}\\b`).test(argsText)) {
-            for (const t of targets) {
-              const k = `${t.fileStem}::${t.name}`;
-              weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
-            }
-          }
-        }
-      }
-
-      for (const [k, target] of calledTargetsInBlock.entries()) {
-        const ev = getOrCreateEv(target.fileStem, target.name);
-        ev.executedBlocks.add(blockId);
-        ev.testFiles.add(toPosix(testRel));
-        const sc = strongForTarget.get(k) ?? 0;
-        const wc = weakForTarget.get(k) ?? 0;
-        if (sc > 0) {
-          ev.strongAssertedBlocks.add(blockId);
-          ev.directStrongAssertions += sc;
-        } else if (wc > 0) {
-          ev.weakAssertedBlocks.add(blockId);
-          ev.directWeakAssertions += wc;
-        }
-      }
-    }
-  }
-
-  return {
-    evidenceEntries: Array.from(evidenceMap.values()),
-    callGraphEdges,
-  };
 }
 
 export function buildRustZeroReturnBody(returnSignature: string): string {
@@ -1105,17 +1119,11 @@ export function generateRustCandidateMutations(
   startLine?: number,
   endLine?: number,
 ): PolyglotCandidateMutation[] {
-  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
   const inlineTestRanges = findRustInlineTestByteRanges(masked);
   const prodFns = parseAllRustFunctions(sourceText).filter((f) => !f.isTest);
   const candidates: PolyglotCandidateMutation[] = [];
   let seq = 1;
-
-  function inRange(line: number): boolean {
-    if (startLine !== undefined && line < startLine) return false;
-    if (endLine !== undefined && line > endLine) return false;
-    return true;
-  }
 
   function isOffsetInInlineTest(offset: number): boolean {
     return inlineTestRanges.some((r) => offset >= r.start && offset < r.end);
@@ -1152,44 +1160,14 @@ export function generateRustCandidateMutations(
     addMutation(openBraceIdx, fn.endOffset, zeroBody, fn.startLine, true);
   }
 
-  const lines = sourceText.split("\n");
-  const maskedLines = masked.split("\n");
-  let lineOffset = 0;
-
-  const opRules: Array<{ pattern: RegExp; replacements: string[] }> = [
-    { pattern: /([A-Za-z0-9_)\]]+)\s*<=\s*([A-Za-z0-9_([\]]+)/g, replacements: ["<", ">"] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*>=\s*([A-Za-z0-9_([\]]+)/g, replacements: [">", "<"] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*==\s*([A-Za-z0-9_([\]]+)/g, replacements: ["!="] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*!=\s*([A-Za-z0-9_([\]]+)/g, replacements: ["=="] },
-  ];
-
-  for (let idx = 0; idx < lines.length; idx++) {
-    const lineNum = idx + 1;
-    const rawLine = lines[idx]!;
-    const mLine = maskedLines[idx]!;
-    if (inRange(lineNum) && !isOffsetInInlineTest(lineOffset)) {
-      for (const rule of opRules) {
-        rule.pattern.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = rule.pattern.exec(mLine)) !== null) {
-          const matchStart = lineOffset + m.index;
-          if (isOffsetInInlineTest(matchStart)) continue;
-          const matchEnd = matchStart + m[0].length;
-          if (m.length >= 3 && m[1] && m[2]) {
-            const left = rawLine.slice(m.index, m.index + m[1].length);
-            const right = rawLine.slice(
-              m.index + m[0].length - m[2].length,
-              m.index + m[0].length,
-            );
-            for (const op of rule.replacements) {
-              addMutation(matchStart, matchEnd, `${left} ${op} ${right}`, lineNum);
-            }
-          }
-        }
-      }
-    }
-    lineOffset += rawLine.length + 1;
-  }
+  collectOperatorMutations({
+    sourceText,
+    noComments,
+    startLine,
+    endLine,
+    skipOffset: isOffsetInInlineTest,
+    addMutation: (s, e, rep, ln) => addMutation(s, e, rep, ln, false),
+  });
 
   return candidates;
 }
@@ -1204,19 +1182,7 @@ export async function analyzeRustFilesAstEvidence(
   rootDir: string,
   rustSourceFiles: string[],
   rustTestFiles: string[],
-): Promise<{
-  evidenceEntries: Array<{
-    fileStem: string;
-    symbol: string;
-    executedBlocks: Set<string>;
-    strongAssertedBlocks: Set<string>;
-    weakAssertedBlocks: Set<string>;
-    directStrongAssertions: number;
-    directWeakAssertions: number;
-    testFiles: Set<string>;
-  }>;
-  callGraphEdges: Map<string, Set<string>>;
-}> {
+): Promise<PolyglotRepoAstEvidence> {
   const toPosix = (p: string) => p.replace(/\\/g, "/");
   const stripExt = (p: string) => p.replace(/\.rs$/, "");
 
@@ -1320,38 +1286,7 @@ export async function analyzeRustFilesAstEvidence(
     callGraphEdges.set(callerKey, edges);
   }
 
-  const evidenceMap = new Map<
-    string,
-    {
-      fileStem: string;
-      symbol: string;
-      executedBlocks: Set<string>;
-      strongAssertedBlocks: Set<string>;
-      weakAssertedBlocks: Set<string>;
-      directStrongAssertions: number;
-      directWeakAssertions: number;
-      testFiles: Set<string>;
-    }
-  >();
-
-  function getOrCreateEv(fileStem: string, symbol: string) {
-    const key = `${fileStem}::${symbol}`;
-    let entry = evidenceMap.get(key);
-    if (!entry) {
-      entry = {
-        fileStem,
-        symbol,
-        executedBlocks: new Set(),
-        strongAssertedBlocks: new Set(),
-        weakAssertedBlocks: new Set(),
-        directStrongAssertions: 0,
-        directWeakAssertions: 0,
-        testFiles: new Set(),
-      };
-      evidenceMap.set(key, entry);
-    }
-    return entry;
-  }
+  const { evidenceMap, getOrCreateEv } = createEvidenceAccumulator();
 
   for (const [rel, parsed] of parsedByFile.entries()) {
     const fileStem = stripExt(toPosix(rel));
@@ -1372,8 +1307,8 @@ export async function analyzeRustFilesAstEvidence(
 
       const varToTargets = new Map<string, RustFunctionAstMeta[]>();
       const calledTargetsInBlock = new Map<string, RustFunctionAstMeta>();
-      const strongForTarget = new Map<string, number>();
-      const weakForTarget = new Map<string, number>();
+      const outcomeForTarget = new Map<string, number>();
+      const livenessForTarget = new Map<string, number>();
 
       // 1. Track `let [mut] <var> = ... <callee>(...)`
       const letRe =
@@ -1397,13 +1332,17 @@ export async function analyzeRustFilesAstEvidence(
           if (/\.\s*(?:unwrap|expect)\s*\(/.test(rhs)) {
             for (const t of rhsTargets) {
               const k = `${t.fileStem}::${t.name}`;
-              weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+              livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
             }
           }
-        } else if (varName === "_" && rhsTargets.length > 0 && /\.\s*(?:unwrap|expect)\s*\(/.test(rhs)) {
+        } else if (
+          varName === "_" &&
+          rhsTargets.length > 0 &&
+          /\.\s*(?:unwrap|expect)\s*\(/.test(rhs)
+        ) {
           for (const t of rhsTargets) {
             const k = `${t.fileStem}::${t.name}`;
-            weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
           }
         }
       }
@@ -1433,18 +1372,19 @@ export async function analyzeRustFilesAstEvidence(
         return found;
       }
 
-      // 3. Strong assertions: `assert_eq!(...)`, `assert_ne!(...)`, `matches!(...)`
-      const strongMacroRe = /\b(?:assert_eq|assert_ne|debug_assert_eq|debug_assert_ne|assert_matches)!\s*\(([^;]+)\)/g;
+      // 3. Outcome assertions: `assert_eq!(...)`, `assert_ne!(...)`, `assert_matches!(...)`
+      const outcomeMacroRe =
+        /\b(?:assert_eq|assert_ne|debug_assert_eq|debug_assert_ne|assert_matches)!\s*\(([^;]+)\)/g;
       let sm: RegExpExecArray | null;
-      while ((sm = strongMacroRe.exec(bodyText)) !== null) {
+      while ((sm = outcomeMacroRe.exec(bodyText)) !== null) {
         const expr = sm[1]!;
         for (const t of collectTargetsInExpr(expr)) {
           const k = `${t.fileStem}::${t.name}`;
-          strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
+          outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
         }
       }
 
-      // 4. `assert!(<cond>)`: check if `<cond>` is purely `.is_ok()` / `.is_some()` / `.is_err()` / `.is_none()` (Liveness Check) vs concrete comparison (Outcome Assertion)
+      // 4. `assert!(<cond>)`: check if `<cond>` is purely `.is_ok()` / `.is_some()` (Liveness Check) vs concrete comparison (Outcome Assertion)
       const assertMacroRe = /\b(?:assert|debug_assert)!\s*\(([^;]+)\)/g;
       let am: RegExpExecArray | null;
       while ((am = assertMacroRe.exec(bodyText)) !== null) {
@@ -1459,9 +1399,9 @@ export async function analyzeRustFilesAstEvidence(
         for (const t of targets) {
           const k = `${t.fileStem}::${t.name}`;
           if (isPureLiveness) {
-            weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
           } else {
-            strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
+            outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
           }
         }
       }
@@ -1470,14 +1410,14 @@ export async function analyzeRustFilesAstEvidence(
         const ev = getOrCreateEv(target.fileStem, target.name);
         ev.executedBlocks.add(blockId);
         ev.testFiles.add(toPosix(rel));
-        const sc = strongForTarget.get(k) ?? 0;
-        const wc = weakForTarget.get(k) ?? 0;
-        if (sc > 0) {
-          ev.strongAssertedBlocks.add(blockId);
-          ev.directStrongAssertions += sc;
-        } else if (wc > 0) {
-          ev.weakAssertedBlocks.add(blockId);
-          ev.directWeakAssertions += wc;
+        const oc = outcomeForTarget.get(k) ?? 0;
+        const lc = livenessForTarget.get(k) ?? 0;
+        if (oc > 0) {
+          ev.outcomeAssertedBlocks.add(blockId);
+          ev.directOutcomeAssertions += oc;
+        } else if (lc > 0) {
+          ev.livenessCheckedBlocks.add(blockId);
+          ev.directLivenessChecks += lc;
         }
       }
     }
@@ -1487,6 +1427,91 @@ export async function analyzeRustFilesAstEvidence(
     evidenceEntries: Array.from(evidenceMap.values()),
     callGraphEdges,
   };
+}
+
+// ============================================================================
+// Java LanguageAdapter
+// ============================================================================
+
+const JAVA_KEYWORDS = new Set([
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "synchronized",
+  "return",
+  "new",
+  "throw",
+  "super",
+  "this",
+  "class",
+  "interface",
+  "enum",
+  "record",
+]);
+
+export function extractJavaFunctionSpans(sourceText: string): PolyglotFunctionSpan[] {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const lineStarts = buildLineStarts(sourceText);
+  const spans: PolyglotFunctionSpan[] = [];
+
+  const methodRegex =
+    /^[ \t]*(?:@[A-Za-z0-9_$.]+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|static|final|synchronized|abstract|default|native|strictfp)\s+)*(?:<[^{;]+>\s+)?([A-Za-z_][A-Za-z0-9_<>,.?[\]\s]*?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
+
+  let match: RegExpExecArray | null;
+  while ((match = methodRegex.exec(masked)) !== null) {
+    const rawReturnType = match[1]!.trim();
+    const methodName = match[2]!;
+    if (
+      JAVA_KEYWORDS.has(methodName) ||
+      JAVA_KEYWORDS.has(rawReturnType) ||
+      /\b(?:class|interface|enum|record)\b/.test(rawReturnType)
+    ) {
+      continue;
+    }
+
+    const declStartIdx = match.index;
+    const openParenIdx = declStartIdx + match[0].length - 1;
+    const closeParenIdx = findMatchingDelimiter(masked, openParenIdx, "(", ")");
+    if (closeParenIdx === -1) continue;
+
+    const cursor = closeParenIdx + 1;
+    const openBraceIdx = masked.indexOf("{", cursor);
+    const semiIdx = masked.indexOf(";", cursor);
+    if (openBraceIdx === -1 || (semiIdx !== -1 && semiIdx < openBraceIdx)) {
+      continue;
+    }
+
+    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+    if (closeBraceIdx === -1) continue;
+
+    const retStartInMatch = match[0].indexOf(match[1]!);
+    const returnSignature = noComments
+      .slice(declStartIdx + retStartInMatch, declStartIdx + retStartInMatch + match[1]!.length)
+      .trim();
+
+    const startLine = offsetToLine(lineStarts, declStartIdx);
+    const endLine = offsetToLine(lineStarts, closeBraceIdx);
+    const bodyMasked = masked.slice(openBraceIdx, closeBraceIdx + 1);
+    const runtimeSlice = noComments
+      .slice(declStartIdx, closeBraceIdx + 1)
+      .replace(/\s+/g, " ")
+      .trim();
+
+    spans.push({
+      name: methodName,
+      startLine,
+      endLine,
+      cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked, "java"),
+      returnSignature,
+      runtimeFingerprint: `${methodName}:${runtimeSlice}`,
+    });
+
+    methodRegex.lastIndex = closeBraceIdx + 1;
+  }
+
+  return spans;
 }
 
 export function buildJavaZeroReturnBody(returnSignature: string): string {
@@ -1506,17 +1531,11 @@ export function generateJavaCandidateMutations(
   startLine?: number,
   endLine?: number,
 ): PolyglotCandidateMutation[] {
-  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
   const lineStarts = buildLineStarts(sourceText);
   const spans = extractJavaFunctionSpans(sourceText);
   const candidates: PolyglotCandidateMutation[] = [];
   let seq = 1;
-
-  function inRange(line: number): boolean {
-    if (startLine !== undefined && line < startLine) return false;
-    if (endLine !== undefined && line > endLine) return false;
-    return true;
-  }
 
   function addMutation(
     startOffset: number,
@@ -1554,43 +1573,13 @@ export function generateJavaCandidateMutations(
     addMutation(openBraceIdx, closeBraceIdx + 1, zeroBody, span.startLine, true);
   }
 
-  const lines = sourceText.split("\n");
-  const maskedLines = masked.split("\n");
-  let lineOffset = 0;
-
-  const opRules: Array<{ pattern: RegExp; replacements: string[] }> = [
-    { pattern: /([A-Za-z0-9_)\]]+)\s*<=\s*([A-Za-z0-9_([\]-]+)/g, replacements: ["<", ">"] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*>=\s*([A-Za-z0-9_([\]-]+)/g, replacements: [">", "<"] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*==\s*([A-Za-z0-9_([\]-]+)/g, replacements: ["!="] },
-    { pattern: /([A-Za-z0-9_)\]]+)\s*!=\s*([A-Za-z0-9_([\]-]+)/g, replacements: ["=="] },
-  ];
-
-  for (let idx = 0; idx < lines.length; idx++) {
-    const lineNum = idx + 1;
-    const rawLine = lines[idx]!;
-    const mLine = maskedLines[idx]!;
-    if (inRange(lineNum)) {
-      for (const rule of opRules) {
-        rule.pattern.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = rule.pattern.exec(mLine)) !== null) {
-          const matchStart = lineOffset + m.index;
-          const matchEnd = matchStart + m[0].length;
-          if (m.length >= 3 && m[1] && m[2]) {
-            const left = rawLine.slice(m.index, m.index + m[1].length);
-            const right = rawLine.slice(
-              m.index + m[0].length - m[2].length,
-              m.index + m[0].length,
-            );
-            for (const op of rule.replacements) {
-              addMutation(matchStart, matchEnd, `${left} ${op} ${right}`, lineNum);
-            }
-          }
-        }
-      }
-    }
-    lineOffset += rawLine.length + 1;
-  }
+  collectOperatorMutations({
+    sourceText,
+    noComments,
+    startLine,
+    endLine,
+    addMutation: (s, e, rep, ln) => addMutation(s, e, rep, ln, false),
+  });
 
   return candidates;
 }
@@ -1598,32 +1587,41 @@ export function generateJavaCandidateMutations(
 export interface JavaMethodAstMeta {
   name: string;
   fileStem: string;
+  packageName: string;
   className: string;
   calledSymbols: string[];
+}
+
+function parseJavaPackageAndImports(content: string): {
+  packageName: string;
+  importedClasses: Set<string>;
+} {
+  const pkgMatch = /^\s*package\s+([A-Za-z0-9_.]+)\s*;/m.exec(content);
+  const packageName = pkgMatch?.[1] ?? "";
+  const importedClasses = new Set<string>();
+  const impRe = /^\s*import\s+(?:static\s+)?([A-Za-z0-9_.*]+)\s*;/gm;
+  let im: RegExpExecArray | null;
+  while ((im = impRe.exec(content)) !== null) {
+    const segs = im[1]!.split(".");
+    const last = segs[segs.length - 1];
+    if (last && last !== "*") {
+      importedClasses.add(last);
+    }
+  }
+  return { packageName, importedClasses };
 }
 
 export async function analyzeJavaFilesAstEvidence(
   rootDir: string,
   javaSourceFiles: string[],
   javaTestFiles: string[],
-): Promise<{
-  evidenceEntries: Array<{
-    fileStem: string;
-    symbol: string;
-    executedBlocks: Set<string>;
-    strongAssertedBlocks: Set<string>;
-    weakAssertedBlocks: Set<string>;
-    directStrongAssertions: number;
-    directWeakAssertions: number;
-    testFiles: Set<string>;
-  }>;
-  callGraphEdges: Map<string, Set<string>>;
-}> {
+): Promise<PolyglotRepoAstEvidence> {
   const toPosix = (p: string) => p.replace(/\\/g, "/");
   const stripExt = (p: string) => p.replace(/\.java$/, "");
 
   const javaMethodsByKey = new Map<string, JavaMethodAstMeta>();
   const javaMethodsByClassAndName = new Map<string, JavaMethodAstMeta[]>();
+  const javaMethodsByPkgAndName = new Map<string, JavaMethodAstMeta[]>();
   const javaMethodsByName = new Map<string, JavaMethodAstMeta[]>();
   const callGraphEdges = new Map<string, Set<string>>();
 
@@ -1655,7 +1653,6 @@ export async function analyzeJavaFilesAstEvidence(
     "isPresent",
     "isTrue",
     "isFalse",
-    "verify",
     "when",
     "given",
     "println",
@@ -1674,6 +1671,7 @@ export async function analyzeJavaFilesAstEvidence(
     } catch {
       continue;
     }
+    const { packageName } = parseJavaPackageAndImports(content);
     const spans = extractJavaFunctionSpans(content);
     const { noComments } = stripCommentsAndMaskStrings(content);
     const lines = noComments.split("\n");
@@ -1695,6 +1693,7 @@ export async function analyzeJavaFilesAstEvidence(
       const meta: JavaMethodAstMeta = {
         name: span.name,
         fileStem,
+        packageName,
         className,
         calledSymbols,
       };
@@ -1706,6 +1705,11 @@ export async function analyzeJavaFilesAstEvidence(
       clsList.push(meta);
       javaMethodsByClassAndName.set(clsKey, clsList);
 
+      const pkgKey = `${packageName}::${span.name}`;
+      const pkgList = javaMethodsByPkgAndName.get(pkgKey) ?? [];
+      pkgList.push(meta);
+      javaMethodsByPkgAndName.set(pkgKey, pkgList);
+
       const nameList = javaMethodsByName.get(span.name) ?? [];
       nameList.push(meta);
       javaMethodsByName.set(span.name, nameList);
@@ -1716,7 +1720,8 @@ export async function analyzeJavaFilesAstEvidence(
     const edges = new Set<string>();
     for (const calleeName of meta.calledSymbols) {
       const sameCls = javaMethodsByClassAndName.get(`${meta.className}::${calleeName}`);
-      const targets = sameCls ?? javaMethodsByName.get(calleeName) ?? [];
+      const samePkg = javaMethodsByPkgAndName.get(`${meta.packageName}::${calleeName}`);
+      const targets = sameCls ?? samePkg ?? javaMethodsByName.get(calleeName) ?? [];
       for (const t of targets) {
         edges.add(`${t.fileStem}::${t.name}`);
       }
@@ -1724,38 +1729,7 @@ export async function analyzeJavaFilesAstEvidence(
     callGraphEdges.set(callerKey, edges);
   }
 
-  const evidenceMap = new Map<
-    string,
-    {
-      fileStem: string;
-      symbol: string;
-      executedBlocks: Set<string>;
-      strongAssertedBlocks: Set<string>;
-      weakAssertedBlocks: Set<string>;
-      directStrongAssertions: number;
-      directWeakAssertions: number;
-      testFiles: Set<string>;
-    }
-  >();
-
-  function getOrCreateEv(fileStem: string, symbol: string) {
-    const key = `${fileStem}::${symbol}`;
-    let entry = evidenceMap.get(key);
-    if (!entry) {
-      entry = {
-        fileStem,
-        symbol,
-        executedBlocks: new Set(),
-        strongAssertedBlocks: new Set(),
-        weakAssertedBlocks: new Set(),
-        directStrongAssertions: 0,
-        directWeakAssertions: 0,
-        testFiles: new Set(),
-      };
-      evidenceMap.set(key, entry);
-    }
-    return entry;
-  }
+  const { evidenceMap, getOrCreateEv } = createEvidenceAccumulator();
 
   for (const testRel of javaTestFiles) {
     const fullPath = path.join(rootDir, testRel);
@@ -1766,12 +1740,19 @@ export async function analyzeJavaFilesAstEvidence(
       continue;
     }
 
+    const { packageName: testPkg, importedClasses } = parseJavaPackageAndImports(content);
     const testSpans = extractJavaFunctionSpans(content);
     const { noComments } = stripCommentsAndMaskStrings(content);
     const lines = noComments.split("\n");
     let blockCounter = 0;
 
     function resolveJavaTarget(calleeName: string): JavaMethodAstMeta[] {
+      const samePkg = javaMethodsByPkgAndName.get(`${testPkg}::${calleeName}`);
+      if (samePkg && samePkg.length > 0) return samePkg;
+      for (const cls of importedClasses) {
+        const fromImp = javaMethodsByClassAndName.get(`${cls}::${calleeName}`);
+        if (fromImp && fromImp.length > 0) return fromImp;
+      }
       return javaMethodsByName.get(calleeName) ?? [];
     }
 
@@ -1781,10 +1762,10 @@ export async function analyzeJavaFilesAstEvidence(
 
       const varToTargets = new Map<string, JavaMethodAstMeta[]>();
       const calledTargetsInBlock = new Map<string, JavaMethodAstMeta>();
-      const strongForTarget = new Map<string, number>();
-      const weakForTarget = new Map<string, number>();
+      const outcomeForTarget = new Map<string, number>();
+      const livenessForTarget = new Map<string, number>();
 
-      // 1. Track variable assignments: `Type varName = obj.method(...)` or `var varName = method(...)`
+      // 1. Track variable assignments: `Type varName = obj.method(...)`
       const assignRe =
         /\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
       let am: RegExpExecArray | null;
@@ -1823,24 +1804,31 @@ export async function analyzeJavaFilesAstEvidence(
         return found;
       }
 
-      // 3. JUnit Strong Outcome Assertions: `assertEquals(...)`, `assertNotEquals(...)`, `assertArrayEquals(...)`, `assertThrows(...)`, `verify(...)`
-      const junitStrongRe =
-        /\b(?:assertEquals|assertNotEquals|assertArrayEquals|assertIterableEquals|assertLinesMatch|assertThrows|assertThrowsExactly|assertSame|assertNotSame|verify)\s*\(([^;]+)\)/g;
-      let jsm: RegExpExecArray | null;
-      while ((jsm = junitStrongRe.exec(bodyText)) !== null) {
-        for (const t of collectTargetsInExpr(jsm[1]!)) {
+      // 3. JUnit Outcome Assertions: `assertEquals(...)`, `assertNotEquals(...)`, `assertArrayEquals(...)`, `assertThrows(...)`, `assertTrue(...)`, `assertFalse(...)`
+      const junitOutcomeRe =
+        /\b(?:assertEquals|assertNotEquals|assertArrayEquals|assertIterableEquals|assertLinesMatch|assertThrows|assertThrowsExactly|assertSame|assertNotSame|assertTrue|assertFalse)\s*\(([^;]+)\)/g;
+      let jom: RegExpExecArray | null;
+      while ((jom = junitOutcomeRe.exec(bodyText)) !== null) {
+        const expr = jom[1]!;
+        const isNullCheckOnly =
+          /\b(?:!=|==)\s*null\b/.test(expr) && !/(?:==|!=)\s*[^n\s]/.test(expr);
+        for (const t of collectTargetsInExpr(expr)) {
           const k = `${t.fileStem}::${t.name}`;
-          strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
+          if (isNullCheckOnly) {
+            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
+          } else {
+            outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+          }
         }
       }
 
-      // 4. JUnit Weak Liveness Checks: `assertNotNull(...)`, `assertDoesNotThrow(...)`
-      const junitWeakRe = /\b(?:assertNotNull|assertDoesNotThrow)\s*\(([^;]+)\)/g;
-      let jwm: RegExpExecArray | null;
-      while ((jwm = junitWeakRe.exec(bodyText)) !== null) {
-        for (const t of collectTargetsInExpr(jwm[1]!)) {
+      // 4. JUnit Liveness Checks: `assertNotNull(...)`, `assertDoesNotThrow(...)`
+      const junitLivenessRe = /\b(?:assertNotNull|assertDoesNotThrow)\s*\(([^;]+)\)/g;
+      let jlm: RegExpExecArray | null;
+      while ((jlm = junitLivenessRe.exec(bodyText)) !== null) {
+        for (const t of collectTargetsInExpr(jlm[1]!)) {
           const k = `${t.fileStem}::${t.name}`;
-          weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+          livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
         }
       }
 
@@ -1851,13 +1839,13 @@ export async function analyzeJavaFilesAstEvidence(
         const subject = ajm[1]!;
         const matcher = ajm[2]!;
         const targets = collectTargetsInExpr(subject);
-        const isWeak = /^(?:isNotNull|isPresent|isNotEmpty)$/.test(matcher);
+        const isLiveness = /^(?:isNotNull|isPresent|isNotEmpty)$/.test(matcher);
         for (const t of targets) {
           const k = `${t.fileStem}::${t.name}`;
-          if (isWeak) {
-            weakForTarget.set(k, (weakForTarget.get(k) ?? 0) + 1);
+          if (isLiveness) {
+            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
           } else {
-            strongForTarget.set(k, (strongForTarget.get(k) ?? 0) + 1);
+            outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
           }
         }
       }
@@ -1866,14 +1854,14 @@ export async function analyzeJavaFilesAstEvidence(
         const ev = getOrCreateEv(target.fileStem, target.name);
         ev.executedBlocks.add(blockId);
         ev.testFiles.add(toPosix(testRel));
-        const sc = strongForTarget.get(k) ?? 0;
-        const wc = weakForTarget.get(k) ?? 0;
-        if (sc > 0) {
-          ev.strongAssertedBlocks.add(blockId);
-          ev.directStrongAssertions += sc;
-        } else if (wc > 0) {
-          ev.weakAssertedBlocks.add(blockId);
-          ev.directWeakAssertions += wc;
+        const oc = outcomeForTarget.get(k) ?? 0;
+        const lc = livenessForTarget.get(k) ?? 0;
+        if (oc > 0) {
+          ev.outcomeAssertedBlocks.add(blockId);
+          ev.directOutcomeAssertions += oc;
+        } else if (lc > 0) {
+          ev.livenessCheckedBlocks.add(blockId);
+          ev.directLivenessChecks += lc;
         }
       }
     }
@@ -1883,4 +1871,135 @@ export async function analyzeJavaFilesAstEvidence(
     evidenceEntries: Array.from(evidenceMap.values()),
     callGraphEdges,
   };
+}
+
+// ============================================================================
+// Unified LanguageAdapter Registry & Seam Dispatchers
+// ============================================================================
+
+export const goLanguageAdapter: LanguageAdapter = {
+  id: "go",
+  isSourceFile: (f) => f.endsWith(".go") && !f.endsWith("_test.go"),
+  isTestFile: (f) => f.endsWith("_test.go"),
+  extractFunctionSpans: (src) => extractGoFunctionSpans(src),
+  extractRuntimeFingerprints: (src) => {
+    const map = new Map<string, string>();
+    for (const s of extractGoFunctionSpans(src)) map.set(s.name, s.runtimeFingerprint);
+    return map;
+  },
+  generateCandidateMutations: (src, start, end) => generateGoCandidateMutations(src, start, end),
+  defaultTestCommand: async () => "go test ./...",
+  analyzeAstEvidence: (rootDir, srcFiles, testFiles) =>
+    analyzeGoFilesAstEvidence(rootDir, srcFiles, testFiles),
+};
+
+export const rustLanguageAdapter: LanguageAdapter = {
+  id: "rust",
+  isSourceFile: (f) => f.endsWith(".rs") && !/(?:^|\/)tests\//.test(f.replace(/\\/g, "/")),
+  isTestFile: (f) => f.endsWith(".rs") && /(?:^|\/)tests\//.test(f.replace(/\\/g, "/")),
+  extractFunctionSpans: (src) => extractRustFunctionSpans(src),
+  extractRuntimeFingerprints: (src) => {
+    const map = new Map<string, string>();
+    for (const s of extractRustFunctionSpans(src)) map.set(s.name, s.runtimeFingerprint);
+    return map;
+  },
+  generateCandidateMutations: (src, start, end) => generateRustCandidateMutations(src, start, end),
+  defaultTestCommand: async () => "cargo test",
+  analyzeAstEvidence: (rootDir, srcFiles, testFiles) =>
+    analyzeRustFilesAstEvidence(rootDir, srcFiles, testFiles),
+  filterProductionLines: (lines, spans) => {
+    if (spans.length === 0) return;
+    for (const ln of Array.from(lines.keys())) {
+      if (!spans.some((s) => ln >= s.startLine && ln <= s.endLine)) {
+        lines.delete(ln);
+      }
+    }
+  },
+  extractInlineTestBlockFingerprints: (src) => {
+    const map = new Map<string, string>();
+    for (const f of parseAllRustFunctions(src)) {
+      if (f.isTest) {
+        map.set(f.name, f.runtimeFingerprint);
+      }
+    }
+    return map;
+  },
+};
+
+export const javaLanguageAdapter: LanguageAdapter = {
+  id: "java",
+  isSourceFile: (f) => f.endsWith(".java") && !javaLanguageAdapter.isTestFile(f),
+  isTestFile: (f) => {
+    const norm = f.replace(/\\/g, "/");
+    return (
+      norm.endsWith(".java") &&
+      (/(?:^|\/)src\/test\//.test(norm) || /(?:Test|Tests|IT)\.java$/.test(norm))
+    );
+  },
+  extractFunctionSpans: (src) => extractJavaFunctionSpans(src),
+  extractRuntimeFingerprints: (src) => {
+    const map = new Map<string, string>();
+    for (const s of extractJavaFunctionSpans(src)) map.set(s.name, s.runtimeFingerprint);
+    return map;
+  },
+  generateCandidateMutations: (src, start, end) => generateJavaCandidateMutations(src, start, end),
+  defaultTestCommand: async (rootDir) => {
+    try {
+      await fs.access(path.join(rootDir, "gradlew"));
+      return "./gradlew test";
+    } catch {
+      return "mvn test";
+    }
+  },
+  analyzeAstEvidence: (rootDir, srcFiles, testFiles) =>
+    analyzeJavaFilesAstEvidence(rootDir, srcFiles, testFiles),
+};
+
+export const POLYGLOT_LANGUAGE_ADAPTERS: readonly LanguageAdapter[] = [
+  goLanguageAdapter,
+  rustLanguageAdapter,
+  javaLanguageAdapter,
+];
+
+export function getPolyglotAdapter(filePath: string): LanguageAdapter | undefined {
+  return POLYGLOT_LANGUAGE_ADAPTERS.find(
+    (a) => a.isSourceFile(filePath) || a.isTestFile(filePath),
+  );
+}
+
+export function isPolyglotSourceFile(fileName: string): boolean {
+  return POLYGLOT_LANGUAGE_ADAPTERS.some((a) => a.isSourceFile(fileName));
+}
+
+export function isPolyglotTestFile(fileName: string): boolean {
+  return POLYGLOT_LANGUAGE_ADAPTERS.some((a) => a.isTestFile(fileName));
+}
+
+export function extractPolyglotFunctionSpans(
+  sourceText: string,
+  fileName: string,
+): PolyglotFunctionSpan[] {
+  return getPolyglotAdapter(fileName)?.extractFunctionSpans(sourceText, fileName) ?? [];
+}
+
+export function extractPolyglotRuntimeFingerprints(
+  sourceText: string,
+  fileName: string,
+): Map<string, string> {
+  return (
+    getPolyglotAdapter(fileName)?.extractRuntimeFingerprints(sourceText, fileName) ?? new Map()
+  );
+}
+
+export function isCompilerErrorOutput(output: string): boolean {
+  return (
+    /cannot use .* in return statement/i.test(output) ||
+    /not enough arguments to return/i.test(output) ||
+    /too many arguments to return/i.test(output) ||
+    /syntax error:/i.test(output) ||
+    /undefined:/i.test(output) ||
+    /error\[E\d+\]:/i.test(output) ||
+    /error: incompatible types/i.test(output) ||
+    /error: missing return statement/i.test(output)
+  );
 }
