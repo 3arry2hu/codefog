@@ -68,6 +68,35 @@ export async function runCli(
   },
 ): Promise<number> {
   try {
+    if (argv.includes("--version") || argv.includes("-v")) {
+      io.stdout("1.0.0\n");
+      return 0;
+    }
+    if (argv.includes("--help") || argv.includes("-h")) {
+      io.stdout(
+        [
+          "codefog - Fog-first trust and risk map for TypeScript/JavaScript repositories",
+          "",
+          "Usage:",
+          "  codefog [rootDir] [options]",
+          "  codefog verify <targetFile> [--lines start-end] [--mutants] [--test-cmd <cmd>]",
+          "",
+          "Options:",
+          "  --lcov <path>         Path to LCOV coverage file (default: coverage/lcov.info)",
+          "  --stryker <path>      Path to Stryker mutation report JSON",
+          "  --diff <baseRef>      Compare against base git ref (e.g. origin/main)",
+          "  --html <path>         Output path for interactive HTML Fog Map (default: .codefog/report.html)",
+          "  --pr-comment [dir]    Write PR comment Markdown and SVG artifacts",
+          "  --json                Output full JSON report to stdout",
+          "  --open                Open HTML Fog Map in default browser",
+          "  --fail-on <policy>    Exit gate policy: returned | regression | any-fog | none (default: returned)",
+          "  -v, --version         Print version",
+          "  -h, --help            Print help",
+          "",
+        ].join("\n"),
+      );
+      return 0;
+    }
     if (argv[0] === "verify") {
       let rootDir = process.cwd();
       let targetFile = "";
