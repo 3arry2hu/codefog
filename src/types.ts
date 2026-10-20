@@ -145,6 +145,8 @@ export interface CodefogReport {
 export interface AnalyzeOptions {
   rootDir: string;
   lcovPath?: string;
+  coveragePath?: string | string[];
   strykerPath?: string;
+  mutationReportPath?: string;
   diffBase?: string;
 }

@@ -46,13 +46,6 @@ export async function analyzeBaselineAtRef(
       await fs.writeFile(fullPath, content, "utf8");
     }
 
-    const baseLcovPath = path.join(tmpBase, "coverage", "lcov.info");
-    try {
-      await fs.access(baseLcovPath);
-    } catch {
-      return null;
-    }
-
     return await analyzeRepository({ rootDir: tmpBase });
   } catch {
     return null;

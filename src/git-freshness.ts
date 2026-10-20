@@ -1,6 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ts from "typescript";
+import {
+  extractPolyglotRuntimeFingerprints,
+  extractRustInlineTestFingerprint,
+  getPolyglotAdapter,
+  isPolyglotSourceFile,
+} from "./polyglot.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +35,9 @@ export function extractRuntimeFunctionFingerprints(
   sourceText: string,
   fileName = "file.ts",
 ): Map<string, string> {
+  if (isPolyglotSourceFile(fileName)) {
+    return extractPolyglotRuntimeFingerprints(sourceText, fileName);
+  }
   const sf = ts.createSourceFile(
     fileName,
     sourceText,
@@ -257,12 +266,22 @@ export async function analyzeFileGitFreshness(params: {
   const oldestSrc = srcHistory[srcHistory.length - 1]!;
   const currentFingerprints = extractRuntimeFunctionFingerprints(currentSourceText, relPath);
   const baselineFingerprintCache = new Map<string, Map<string, string>>();
+  const sourceTextAtCommitCache = new Map<string, string | null>();
+
+  async function getSourceTextAtCommit(sha: string): Promise<string | null> {
+    if (sourceTextAtCommitCache.has(sha)) {
+      return sourceTextAtCommitCache.get(sha)!;
+    }
+    const text = await runGit(rootDir, ["show", `${sha}:${relPath}`]);
+    sourceTextAtCommitCache.set(sha, text);
+    return text;
+  }
 
   async function getFingerprintsAtCommit(sha: string): Promise<Map<string, string>> {
     if (baselineFingerprintCache.has(sha)) {
       return baselineFingerprintCache.get(sha)!;
     }
-    const historicalText = await runGit(rootDir, ["show", `${sha}:${relPath}`]);
+    const historicalText = await getSourceTextAtCommit(sha);
     const fp = historicalText
       ? extractRuntimeFunctionFingerprints(historicalText, relPath)
       : new Map<string, string>();
@@ -270,12 +289,46 @@ export async function analyzeFileGitFreshness(params: {
     return fp;
   }
 
+  // If the file's LanguageAdapter supports same-file inline test blocks (e.g. Rust `#[cfg(test)]`), find the commits where the inline test blocks changed
+  const polyAdapter = getPolyglotAdapter(relPath);
+  let inlineTestCommits: CommitEntry[] | null = null;
+  if (polyAdapter?.extractInlineTestBlockFingerprints && srcHistory.length > 0) {
+    const inlineCommits: CommitEntry[] = [];
+    for (let i = srcHistory.length - 1; i >= 0; i--) {
+      const c = srcHistory[i]!;
+      const curText = await getSourceTextAtCommit(c.sha);
+      const curTestFp = curText ? extractRustInlineTestFingerprint(curText) : "";
+      if (!curTestFp) continue;
+      if (i === srcHistory.length - 1) {
+        inlineCommits.unshift(c);
+      } else {
+        const prevCommit = srcHistory[i + 1]!;
+        const prevText = await getSourceTextAtCommit(prevCommit.sha);
+        const prevTestFp = prevText ? extractRustInlineTestFingerprint(prevText) : "";
+        if (curTestFp !== prevTestFp) {
+          inlineCommits.unshift(c);
+        }
+      }
+    }
+    if (inlineCommits.length > 0) {
+      inlineTestCommits = inlineCommits;
+    }
+  }
+
   const functions = new Map<string, FunctionFreshnessInfo>();
 
   for (const span of functionSpans) {
     const fnName = span.name;
     const testFiles = associatedTestFiles.get(fnName) ?? [];
-    const testHistory = await getCommitHistory(rootDir, testFiles);
+    const usesSameFileInlineTests =
+      Boolean(polyAdapter?.extractInlineTestBlockFingerprints) &&
+      testFiles.length === 1 &&
+      testFiles[0] === relPath &&
+      inlineTestCommits !== null;
+
+    const testHistory = usesSameFileInlineTests
+      ? inlineTestCommits!
+      : await getCommitHistory(rootDir, testFiles);
     const latestTest = testHistory[0];
 
     let isFogReturned = false;

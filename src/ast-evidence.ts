@@ -1,6 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import ts from "typescript";
+import {
+  POLYGLOT_LANGUAGE_ADAPTERS,
+  isPolyglotSourceFile,
+  isPolyglotTestFile,
+} from "./polyglot.js";
 
 export interface FunctionAstEvidence {
   symbol: string;
@@ -64,28 +69,33 @@ const STRONG_MATCHERS = new Set([
 
 const TEST_BLOCK_CALLEES = new Set(["it", "test"]);
 
-const IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "coverage",
-  ".codefog",
-]);
+  const IGNORED_DIRS = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    "coverage",
+    ".codefog",
+    "target",
+    "build",
+  ]);
 
 function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
 function stripCodeExtension(p: string): string {
-  return p.replace(/\.(tsx?|jsx?|mjs|cjs)$/, "");
+  return p.replace(/\.(tsx?|jsx?|mjs|cjs|go|rs|java)$/, "");
 }
 
 function isTestFileName(name: string): boolean {
-  return /\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(name);
+  return /\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(name) || isPolyglotTestFile(name);
 }
 
 function isSourceFileName(name: string): boolean {
-  return /\.(ts|tsx|js|jsx|mjs)$/.test(name) && !name.endsWith(".d.ts") && !isTestFileName(name);
+  return (
+    (/\.(ts|tsx|js|jsx|mjs)$/.test(name) && !name.endsWith(".d.ts") && !isTestFileName(name)) ||
+    isPolyglotSourceFile(name)
+  );
 }
 
 async function scanRepoFiles(
@@ -106,10 +116,13 @@ async function scanRepoFiles(
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       await scanRepoFiles(fullPath, rootDir, out);
-    } else if (isTestFileName(entry.name)) {
-      out.testFiles.push(toPosix(path.relative(rootDir, fullPath)));
-    } else if (isSourceFileName(entry.name)) {
-      out.sourceFiles.push(toPosix(path.relative(rootDir, fullPath)));
+    } else {
+      const relEntryPath = toPosix(path.relative(rootDir, fullPath));
+      if (isTestFileName(relEntryPath)) {
+        out.testFiles.push(relEntryPath);
+      } else if (isSourceFileName(relEntryPath)) {
+        out.sourceFiles.push(relEntryPath);
+      }
     }
   }
   return out;
@@ -332,6 +345,9 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
   }
 
   for (const testFileRel of testFiles) {
+    if (isPolyglotTestFile(testFileRel)) {
+      continue;
+    }
     const fullPath = path.join(rootDir, testFileRel);
     let content = "";
     try {
@@ -482,7 +498,32 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
   // Build static call graph across source files and propagate test & assertion evidence
   const callGraph = new Map<string, Set<string>>();
 
+  for (const adapter of POLYGLOT_LANGUAGE_ADAPTERS) {
+    const langSourceFiles = sourceFiles.filter((f) => adapter.isSourceFile(f));
+    const langTestFiles = testFiles.filter((f) => adapter.isTestFile(f));
+    if (langSourceFiles.length === 0 && langTestFiles.length === 0) continue;
+
+    const polyRes = await adapter.analyzeAstEvidence(rootDir, langSourceFiles, langTestFiles);
+    for (const ev of polyRes.evidenceEntries) {
+      const target = getOrCreateInternal(ev.fileStem, ev.symbol);
+      for (const b of ev.executedBlocks) target.executedBlocks.add(b);
+      for (const ob of ev.outcomeAssertedBlocks) target.strongAssertedBlocks.add(ob);
+      for (const lb of ev.livenessCheckedBlocks) target.weakAssertedBlocks.add(lb);
+      target.directStrongAssertions += ev.directOutcomeAssertions;
+      target.directWeakAssertions += ev.directLivenessChecks;
+      for (const tf of ev.testFiles) target.testFiles.add(tf);
+    }
+    for (const [callerKey, edges] of polyRes.callGraphEdges.entries()) {
+      const existing = callGraph.get(callerKey) ?? new Set<string>();
+      for (const edge of edges) existing.add(edge);
+      callGraph.set(callerKey, existing);
+    }
+  }
+
   for (const srcFileRel of sourceFiles) {
+    if (isPolyglotSourceFile(srcFileRel)) {
+      continue;
+    }
     const fullPath = path.join(rootDir, srcFileRel);
     let content = "";
     try {
@@ -633,8 +674,17 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
     }
   }
 
+  let inlineTestCount = 0;
+  for (const internal of internalMap.values()) {
+    for (const tf of internal.testFiles) {
+      if (!testFiles.includes(tf)) {
+        inlineTestCount++;
+      }
+    }
+  }
+
   return {
-    testFileCount: testFiles.length,
+    testFileCount: testFiles.length + inlineTestCount,
     byFileAndSymbol,
     bySymbol,
   };

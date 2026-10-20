@@ -1,3 +1,7 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { findFilesByExtensionInRepo } from "./polyglot.js";
+
 export interface LcovBranchEntry {
   line: number;
   block: number;
@@ -22,11 +26,18 @@ export interface LcovFileRecord {
   branchesHit: number;
 }
 
-export function normalizeRepoRelativePath(filePath: string, rootDir: string): string {
+export function normalizeRepoRelativePath(
+  filePath: string,
+  rootDir: string,
+  goModulePrefix?: string,
+): string {
   const normalized = filePath.replace(/\\/g, "/");
   const normalizedRoot = rootDir.replace(/\\/g, "/").replace(/\/+$/, "");
   if (normalized.startsWith(normalizedRoot + "/")) {
     return normalized.slice(normalizedRoot.length + 1);
+  }
+  if (goModulePrefix && normalized.startsWith(goModulePrefix + "/")) {
+    return normalized.slice(goModulePrefix.length + 1);
   }
   return normalized.replace(/^\.\//, "");
 }
@@ -122,4 +133,241 @@ export function parseLcov(content: string, rootDir: string): Map<string, LcovFil
   }
 
   return records;
+}
+
+export function parseGoCoverProfile(
+  content: string,
+  rootDir: string,
+  goModulePrefix?: string,
+): Map<string, LcovFileRecord> {
+  const records = new Map<string, LcovFileRecord>();
+  const lineRe = /^(.+):(\d+)\.(\d+),(\d+)\.(\d+)\s+(\d+)\s+(\d+)$/;
+  let branchSeq = 0;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("mode:")) continue;
+
+    const m = lineRe.exec(line);
+    if (!m) continue;
+
+    const rawFile = m[1]!;
+    const startLine = Number.parseInt(m[2]!, 10);
+    const endLine = Number.parseInt(m[4]!, 10);
+    const count = Number.parseInt(m[7]!, 10);
+
+    const rel = normalizeRepoRelativePath(rawFile, rootDir, goModulePrefix);
+    let current = records.get(rel);
+    if (!current) {
+      current = {
+        file: rel,
+        lines: new Map<number, number>(),
+        branches: [],
+        functions: [],
+        linesFound: 0,
+        linesHit: 0,
+        branchesFound: 0,
+        branchesHit: 0,
+      };
+      records.set(rel, current);
+    }
+
+    for (let ln = startLine; ln <= endLine; ln++) {
+      const prev = current.lines.get(ln) ?? 0;
+      current.lines.set(ln, Math.max(prev, count));
+    }
+
+    current.branches.push({
+      line: startLine,
+      block: branchSeq,
+      branch: branchSeq++,
+      taken: count,
+    });
+  }
+
+  for (const rec of records.values()) {
+    rec.linesFound = rec.lines.size;
+    rec.linesHit = Array.from(rec.lines.values()).filter((v) => v > 0).length;
+    rec.branchesFound = rec.branches.length;
+    rec.branchesHit = rec.branches.filter((b) => b.taken > 0).length;
+  }
+
+  return records;
+}
+
+export async function parseJacocoXml(
+  content: string,
+  rootDir: string,
+): Promise<Map<string, LcovFileRecord>> {
+  const records = new Map<string, LcovFileRecord>();
+  const javaFiles = await findFilesByExtensionInRepo(rootDir, rootDir, ".java");
+
+  const pkgRe = /<package\s+name="([^"]*)"[^>]*>([\s\S]*?)<\/package>/g;
+  let pm: RegExpExecArray | null;
+
+  while ((pm = pkgRe.exec(content)) !== null) {
+    const pkgName = pm[1]!.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const pkgBody = pm[2]!;
+
+    const sfRe = /<sourcefile\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/sourcefile>/g;
+    let sfm: RegExpExecArray | null;
+
+    while ((sfm = sfRe.exec(pkgBody)) !== null) {
+      const fileName = sfm[1]!;
+      const sfBody = sfm[2]!;
+      const suffix = pkgName ? `${pkgName}/${fileName}` : fileName;
+
+      // Match against scanned repo Java files (e.g. `src/main/java/com/acme/Order.java` or `services/ledger/src/main/java/com/acme/Ledger.java`)
+      const matchedRel =
+        javaFiles.find(
+          (f) => f === suffix || f.endsWith(`/${suffix}`),
+        ) ?? `src/main/java/${suffix}`;
+
+      const record: LcovFileRecord = {
+        file: matchedRel,
+        lines: new Map<number, number>(),
+        branches: [],
+        functions: [],
+        linesFound: 0,
+        linesHit: 0,
+        branchesFound: 0,
+        branchesHit: 0,
+      };
+
+      const lineTagRe = /<line\s+([^/>]+)\/?>/g;
+      let lm: RegExpExecArray | null;
+      let branchBlock = 0;
+
+      while ((lm = lineTagRe.exec(sfBody)) !== null) {
+        const attrs = lm[1]!;
+        const getAttr = (k: string): number => {
+          const m = new RegExp(`\\b${k}="(\\d+)"`).exec(attrs);
+          return m ? Number.parseInt(m[1]!, 10) : 0;
+        };
+        const nr = getAttr("nr");
+        const ci = getAttr("ci");
+        const mb = getAttr("mb");
+        const cb = getAttr("cb");
+        if (nr <= 0) continue;
+
+        record.lines.set(nr, ci > 0 ? ci : 0);
+
+        const totalBranches = mb + cb;
+        if (totalBranches > 0) {
+          for (let b = 0; b < cb; b++) {
+            record.branches.push({
+              line: nr,
+              block: branchBlock,
+              branch: b,
+              taken: 1,
+            });
+          }
+          for (let b = 0; b < mb; b++) {
+            record.branches.push({
+              line: nr,
+              block: branchBlock,
+              branch: cb + b,
+              taken: 0,
+            });
+          }
+          branchBlock++;
+        }
+      }
+
+      record.linesFound = record.lines.size;
+      record.linesHit = Array.from(record.lines.values()).filter((v) => v > 0).length;
+      record.branchesFound = record.branches.length;
+      record.branchesHit = record.branches.filter((b) => b.taken > 0).length;
+
+      records.set(matchedRel, record);
+    }
+  }
+
+  return records;
+}
+
+async function readGoModuleName(rootDir: string): Promise<string | undefined> {
+  try {
+    const goMod = await fs.readFile(path.join(rootDir, "go.mod"), "utf8");
+    const m = /^\s*module\s+(\S+)/m.exec(goMod);
+    return m?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+export async function loadCoverageRecords(
+  rootDir: string,
+  explicitPaths?: string | string[],
+): Promise<{ records: Map<string, LcovFileRecord>; mtimeMs?: number }> {
+  const goModulePrefix = await readGoModuleName(rootDir);
+  const candidateRelPaths: string[] = [];
+
+  if (explicitPaths) {
+    const rawItems = Array.isArray(explicitPaths) ? explicitPaths : [explicitPaths];
+    for (const item of rawItems) {
+      for (const p of item.split(",")) {
+        if (p.trim()) candidateRelPaths.push(p.trim());
+      }
+    }
+  }
+
+  const resolvedPaths: string[] = [];
+  if (candidateRelPaths.length > 0) {
+    for (const p of candidateRelPaths) {
+      resolvedPaths.push(path.resolve(rootDir, p));
+    }
+  } else {
+    const defaults = [
+      path.join(rootDir, "coverage", "lcov.info"),
+      path.join(rootDir, "coverage.out"),
+      path.join(rootDir, "target", "site", "jacoco", "jacoco.xml"),
+      path.join(rootDir, "build", "reports", "jacoco", "test", "jacocoTestReport.xml"),
+    ];
+    for (const d of defaults) {
+      try {
+        await fs.access(d);
+        resolvedPaths.push(d);
+      } catch {
+        // continue checking other default coverage paths
+      }
+    }
+    if (resolvedPaths.length === 0) {
+      throw new Error(
+        `Could not read LCOV coverage file at ${path.join(rootDir, "coverage", "lcov.info")}`,
+      );
+    }
+  }
+
+  const merged = new Map<string, LcovFileRecord>();
+  let latestMtimeMs: number | undefined;
+
+  for (const absPath of resolvedPaths) {
+    let content = "";
+    try {
+      content = await fs.readFile(absPath, "utf8");
+      const stat = await fs.stat(absPath);
+      if (latestMtimeMs === undefined || stat.mtimeMs > latestMtimeMs) {
+        latestMtimeMs = stat.mtimeMs;
+      }
+    } catch {
+      throw new Error(`Could not read LCOV coverage file at ${absPath}`);
+    }
+
+    const trimmed = content.trimStart();
+    let parsed: Map<string, LcovFileRecord>;
+    if (trimmed.startsWith("mode:")) {
+      parsed = parseGoCoverProfile(content, rootDir, goModulePrefix);
+    } else if (trimmed.startsWith("<?xml") || trimmed.includes("<report")) {
+      parsed = await parseJacocoXml(content, rootDir);
+    } else {
+      parsed = parseLcov(content, rootDir);
+    }
+
+    for (const [rel, rec] of parsed.entries()) {
+      merged.set(rel, rec);
+    }
+  }
+
+  return { records: merged, mtimeMs: latestMtimeMs };
 }

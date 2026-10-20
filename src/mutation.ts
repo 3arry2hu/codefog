@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { findFilesByExtensionInRepo } from "./polyglot.js";
 import type { SurvivingMutant } from "./types.js";
 
 export interface StrykerMutantRecord {
@@ -91,17 +92,166 @@ function extractOriginalSnippet(
     .trim();
 }
 
+interface RawCargoMutantEntry {
+  scenario?: {
+    Mutant?: {
+      package?: string;
+      file?: string;
+      function?: { function_name?: string; return_type?: string };
+      span?: {
+        start?: { line?: number; column?: number };
+        end?: { line?: number; column?: number };
+      };
+      replacement?: string;
+      genre?: string;
+    };
+  };
+  summary?: string;
+}
+
+interface RawCargoMutantsReport {
+  outcomes?: RawCargoMutantEntry[];
+}
+
+export async function parsePitestXml(
+  rawXml: string,
+  rootDir: string,
+): Promise<ParsedStrykerReport> {
+  const byFile = new Map<string, StrykerFileSummary>();
+  let totalMutants = 0;
+  let killedMutants = 0;
+  let seq = 1;
+  const javaFiles = await findFilesByExtensionInRepo(rootDir, rootDir, ".java");
+
+  const mutRe = /<mutation\s+([^>]+)>([\s\S]*?)<\/mutation>/g;
+  let mm: RegExpExecArray | null;
+
+  while ((mm = mutRe.exec(rawXml)) !== null) {
+    const attrs = mm[1]!;
+    const body = mm[2]!;
+
+    const statusMatch = /\bstatus="([^"]+)"/.exec(attrs);
+    const statusRaw = statusMatch ? statusMatch[1]! : "SURVIVED";
+    if (statusRaw === "NON_VIABLE" || statusRaw === "RUN_ERROR") {
+      continue;
+    }
+
+    const getTag = (tag: string): string => {
+      const m = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`).exec(body);
+      return m ? m[1]!.trim() : "";
+    };
+
+    const sourceFile = getTag("sourceFile");
+    const mutatedClass = getTag("mutatedClass");
+    const mutatedMethod = getTag("mutatedMethod");
+    const lineNum = Number.parseInt(getTag("lineNumber") || "1", 10) || 1;
+    const description = getTag("description") || getTag("mutator");
+    const testsRunMatch = /\bnumberOfTestsRun="(\d+)"/.exec(attrs);
+    const testsRun = testsRunMatch ? Number.parseInt(testsRunMatch[1]!, 10) : 1;
+
+    const pkgParts = mutatedClass.split(".").slice(0, -1);
+    const suffix =
+      pkgParts.length > 0 ? `${pkgParts.join("/")}/${sourceFile}` : sourceFile;
+    const relPath =
+      javaFiles.find((f) => f === suffix || f.endsWith(`/${suffix}`)) ??
+      `src/main/java/${suffix}`;
+
+    totalMutants++;
+    const killed =
+      statusRaw === "KILLED" || statusRaw === "TIMED_OUT" || statusRaw === "MEMORY_ERROR";
+    if (killed) {
+      killedMutants++;
+    }
+
+    let fileSummary = byFile.get(relPath);
+    if (!fileSummary) {
+      fileSummary = { mutants: [] };
+      byFile.set(relPath, fileSummary);
+    }
+
+    fileSummary.mutants.push({
+      id: `pit_${seq++}`,
+      line: lineNum,
+      endLine: lineNum,
+      original: mutatedMethod,
+      mutated: description,
+      testsRun,
+      killed,
+      status: killed ? "Killed" : "Survived",
+    });
+  }
+
+  const mutationScorePct =
+    totalMutants > 0 ? Math.round((killedMutants / totalMutants) * 1000) / 10 : 0;
+
+  return {
+    totalMutants,
+    killedMutants,
+    mutationScorePct,
+    byFile,
+  };
+}
+
 export async function loadStrykerReport(
   rootDir: string,
   strykerPath: string,
 ): Promise<ParsedStrykerReport> {
   const absPath = path.resolve(rootDir, strykerPath);
   const rawContent = await fs.readFile(absPath, "utf8");
-  const parsed = JSON.parse(rawContent) as RawStrykerReport;
+  const trimmed = rawContent.trimStart();
+  if (trimmed.startsWith("<?xml") || trimmed.startsWith("<mutations")) {
+    return parsePitestXml(rawContent, rootDir);
+  }
+  const parsed = JSON.parse(rawContent) as RawStrykerReport & RawCargoMutantsReport;
 
   const byFile = new Map<string, StrykerFileSummary>();
   let totalMutants = 0;
   let killedMutants = 0;
+
+  if (Array.isArray(parsed.outcomes)) {
+    let seq = 1;
+    for (const outcome of parsed.outcomes) {
+      const mut = outcome.scenario?.Mutant;
+      if (!mut?.file) continue;
+      const summary = outcome.summary ?? "Missed";
+      if (summary === "Unviable" || summary === "Ignored") {
+        continue;
+      }
+      totalMutants++;
+      const killed = summary === "Caught" || summary === "Timeout";
+      if (killed) {
+        killedMutants++;
+      }
+      const relPath = normalizeRelPath(mut.file, rootDir);
+      const startLine = mut.span?.start?.line ?? 1;
+      const endLine = mut.span?.end?.line ?? startLine;
+      let fileSummary = byFile.get(relPath);
+      if (!fileSummary) {
+        fileSummary = { mutants: [] };
+        byFile.set(relPath, fileSummary);
+      }
+      fileSummary.mutants.push({
+        id: `cargo_mut_${seq++}`,
+        line: startLine,
+        endLine,
+        original: mut.function?.function_name ?? "",
+        mutated: mut.replacement ?? "",
+        testsRun: 1,
+        killed,
+        status: killed ? "Killed" : "Survived",
+      });
+    }
+
+    const mutationScorePct =
+      totalMutants > 0 ? Math.round((killedMutants / totalMutants) * 1000) / 10 : 0;
+
+    return {
+      totalMutants,
+      killedMutants,
+      mutationScorePct,
+      byFile,
+    };
+  }
 
   for (const [fileKey, fileData] of Object.entries(parsed.files ?? {})) {
     const relPath = normalizeRelPath(fileKey, rootDir);

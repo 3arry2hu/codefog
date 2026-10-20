@@ -4,6 +4,12 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import ts from "typescript";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
+import {
+  extractPolyglotFunctionSpans,
+  getPolyglotAdapter,
+  isCompilerErrorOutput,
+  isPolyglotSourceFile,
+} from "./polyglot.js";
 import type { SurvivingMutant } from "./types.js";
 
 const execAsync = promisify(exec);
@@ -34,9 +40,14 @@ interface CandidateMutation {
   original: string;
   mutated: string;
   mutatedSource: string;
+  isBodyClearance?: boolean;
 }
 
 function countControlFlowBranches(sourceText: string, fileName: string): number {
+  if (isPolyglotSourceFile(fileName)) {
+    const spans = extractPolyglotFunctionSpans(sourceText, fileName);
+    return spans.reduce((acc, s) => acc + Math.max(0, s.cyclomaticComplexity - 1), 0);
+  }
   const sf = ts.createSourceFile(
     fileName,
     sourceText,
@@ -83,6 +94,17 @@ function extractFunctionNamesInRange(
   startLine?: number,
   endLine?: number,
 ): string[] {
+  if (isPolyglotSourceFile(fileName)) {
+    const spans = extractPolyglotFunctionSpans(sourceText, fileName);
+    return spans
+      .filter((s) => {
+        if (startLine !== undefined && endLine !== undefined) {
+          return !(s.endLine < startLine || s.startLine > endLine);
+        }
+        return true;
+      })
+      .map((s) => s.name);
+  }
   const sf = ts.createSourceFile(
     fileName,
     sourceText,
@@ -131,6 +153,10 @@ export function generateCandidateMutations(
   startLine?: number,
   endLine?: number,
 ): CandidateMutation[] {
+  const polyAdapter = getPolyglotAdapter(fileName);
+  if (polyAdapter) {
+    return polyAdapter.generateCandidateMutations(sourceText, startLine, endLine);
+  }
   const sf = ts.createSourceFile(
     fileName,
     sourceText,
@@ -220,13 +246,25 @@ export function generateCandidateMutations(
   return candidates;
 }
 
-async function runCommandPasses(cmd: string, cwd: string): Promise<boolean> {
+async function runCommandOutcome(
+  cmd: string,
+  cwd: string,
+): Promise<{ passed: boolean; compilerError: boolean }> {
   try {
     await execAsync(cmd, { cwd, timeout: 30_000 });
-    return true;
-  } catch {
-    return false;
+    return { passed: true, compilerError: false };
+  } catch (err: any) {
+    const combinedOutput = `${err?.stdout ?? ""}\n${err?.stderr ?? ""}\n${err?.message ?? ""}`;
+    return {
+      passed: false,
+      compilerError: isCompilerErrorOutput(combinedOutput),
+    };
   }
+}
+
+async function runCommandPasses(cmd: string, cwd: string): Promise<boolean> {
+  const res = await runCommandOutcome(cmd, cwd);
+  return res.passed;
 }
 
 async function checkAntiGamingSourceIntegrity(
@@ -251,7 +289,12 @@ async function checkAntiGamingSourceIntegrity(
 async function detectDefaultTestCommand(
   rootDir: string,
   associatedTestFiles: string[],
+  targetFile = "",
 ): Promise<string> {
+  const polyAdapter = getPolyglotAdapter(targetFile);
+  if (polyAdapter) {
+    return polyAdapter.defaultTestCommand(rootDir, associatedTestFiles);
+  }
   const testTargets = associatedTestFiles.length > 0 ? ` ${associatedTestFiles.join(" ")}` : "";
   try {
     const pkgRaw = await fs.readFile(path.join(rootDir, "package.json"), "utf8");
@@ -328,7 +371,7 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
 
   const testCmd =
     options.testCmd ??
-    (await detectDefaultTestCommand(rootDir, Array.from(associatedTestFiles)));
+    (await detectDefaultTestCommand(rootDir, Array.from(associatedTestFiles), relTarget));
 
   // First ensure baseline tests pass on unmodified source
   const baselinePass = await runCommandPasses(testCmd, rootDir);
@@ -354,16 +397,24 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
   );
   const candidates = options.mutants
     ? allCandidates
-    : allCandidates.filter((c) => c.mutated.includes("undefined as any"));
+    : allCandidates.filter(
+        (c) => Boolean(c.isBodyClearance) || c.mutated.includes("undefined as any"),
+      );
 
   const survivingMutants: SurvivingMutant[] = [];
   let killedMutants = 0;
+  let validMutantsCount = 0;
 
   try {
     for (const candidate of candidates) {
       await fs.writeFile(absTarget, candidate.mutatedSource, "utf8");
-      const mutantSurvived = await runCommandPasses(testCmd, rootDir);
-      if (mutantSurvived) {
+      const outcome = await runCommandOutcome(testCmd, rootDir);
+      if (outcome.compilerError) {
+        // Exempt CompileError mutants so they are neither counted as killed nor surviving
+        continue;
+      }
+      validMutantsCount++;
+      if (outcome.passed) {
         survivingMutants.push({
           id: candidate.id,
           line: candidate.line,
@@ -391,9 +442,9 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
       passed: false,
       exitCode: 1,
       summary:
-        `Verification FAILED for ${relTarget}: ${survivingMutants.length} mutant(s) survived (${killedMutants}/${candidates.length} killed).\n` +
+        `Verification FAILED for ${relTarget}: ${survivingMutants.length} mutant(s) survived (${killedMutants}/${validMutantsCount} killed).\n` +
         violations.map((v) => `  - ${v}`).join("\n"),
-      totalMutants: candidates.length,
+      totalMutants: validMutantsCount,
       killedMutants,
       survivingMutants,
       violations,
@@ -403,8 +454,8 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
   return {
     passed: true,
     exitCode: 0,
-    summary: `VERIFIED ${relTarget}: All ${killedMutants}/${candidates.length} mutants killed and anti-gaming gates passed.`,
-    totalMutants: candidates.length,
+    summary: `VERIFIED ${relTarget}: All ${killedMutants}/${validMutantsCount} mutants killed and anti-gaming gates passed.`,
+    totalMutants: validMutantsCount,
     killedMutants,
     survivingMutants: [],
     violations: [],
