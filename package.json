@@ -2,6 +2,7 @@
   "name": "codefog",
   "version": "1.0.0",
   "description": "See which parts of your codebase you can actually trust. Fog-first trust and risk map for TypeScript/JavaScript repositories.",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "codefog": "./dist/bin.js"
@@ -11,8 +12,31 @@
   "files": [
     "dist"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/3arry2hu/codefog.git"
+  },
+  "homepage": "https://github.com/3arry2hu/codefog#readme",
+  "bugs": {
+    "url": "https://github.com/3arry2hu/codefog/issues"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "keywords": [
+    "coverage",
+    "testing",
+    "mutation-testing",
+    "ast",
+    "trust-score",
+    "codefog",
+    "typescript"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/bin.js",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm test && npm run typecheck && npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "dogfood": "vitest run --coverage.enabled=true --coverage.provider=v8 --coverage.reporter=lcov --coverage.include=\"src/**/*.ts\" && npm run build && node dist/bin.js --fail-on none"
