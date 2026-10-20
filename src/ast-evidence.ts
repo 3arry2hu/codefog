@@ -72,11 +72,15 @@ const TEST_BLOCK_CALLEES = new Set(["it", "test"]);
   const IGNORED_DIRS = new Set([
     "node_modules",
     ".git",
+    "vendor",
     "dist",
     "coverage",
     ".codefog",
     "target",
     "build",
+    ".idea",
+    ".vscode",
+    ".gradle",
   ]);
 
 function toPosix(p: string): string {

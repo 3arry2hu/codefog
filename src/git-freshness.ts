@@ -171,7 +171,10 @@ interface CommitEntry {
 
 async function runGit(rootDir: string, args: string[]): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("git", args, { cwd: rootDir });
+    const { stdout } = await execFileAsync("git", args, {
+      cwd: rootDir,
+      maxBuffer: 10 * 1024 * 1024,
+    });
     return stdout.trim();
   } catch {
     return null;

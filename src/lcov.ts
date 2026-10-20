@@ -1,6 +1,15 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { findFilesByExtensionInRepo } from "./polyglot.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import {
+  extractPolyglotFunctionSpans,
+  findFilesByExtensionInRepo,
+  getPolyglotAdapter,
+  isPolyglotSourceFile,
+} from "./polyglot.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface LcovBranchEntry {
   line: number;
@@ -315,6 +324,89 @@ async function readGoModulePrefix(rootDir: string): Promise<string | undefined> 
   return undefined;
 }
 
+async function synthesizeZeroHitRecordsFromRepo(
+  rootDir: string,
+  out: Map<string, LcovFileRecord>,
+): Promise<void> {
+  const exts = [".go", ".rs", ".java", ".ts", ".tsx", ".js", ".jsx", ".mjs"];
+  const allFiles: string[] = [];
+  for (const ext of exts) {
+    const found = await findFilesByExtensionInRepo(rootDir, rootDir, ext);
+    allFiles.push(...found);
+  }
+
+  for (const rel of allFiles) {
+    const isTsJsSource =
+      /\.(ts|tsx|js|jsx|mjs)$/.test(rel) &&
+      !rel.endsWith(".d.ts") &&
+      !/\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(rel);
+    if (!isTsJsSource && !isPolyglotSourceFile(rel)) continue;
+
+    let content = "";
+    try {
+      content = await fs.readFile(path.join(rootDir, rel), "utf8");
+    } catch {
+      continue;
+    }
+    const rawLines = content.split(/\r?\n/);
+    const lines = new Map<number, number>();
+    const functions: LcovFunctionEntry[] = [];
+
+    if (isPolyglotSourceFile(rel)) {
+      const spans = extractPolyglotFunctionSpans(content, rel);
+      for (const s of spans) {
+        functions.push({ name: s.name, line: s.startLine, hits: 0 });
+        for (let ln = s.startLine; ln <= s.endLine; ln++) {
+          const text = (rawLines[ln - 1] ?? "").trim();
+          if (
+            !text ||
+            text.startsWith("//") ||
+            text.startsWith("/*") ||
+            text.startsWith("*") ||
+            text === "{" ||
+            text === "}"
+          ) {
+            continue;
+          }
+          lines.set(ln, 0);
+        }
+      }
+      const adapter = getPolyglotAdapter(rel);
+      if (adapter?.filterProductionLines && spans.length > 0) {
+        adapter.filterProductionLines(lines, spans);
+      }
+    } else {
+      rawLines.forEach((rawLine, idx) => {
+        const text = rawLine.trim();
+        if (
+          !text ||
+          text.startsWith("//") ||
+          text.startsWith("/*") ||
+          text.startsWith("*") ||
+          text === "{" ||
+          text === "}"
+        ) {
+          return;
+        }
+        lines.set(idx + 1, 0);
+      });
+    }
+
+    if (lines.size === 0) continue;
+
+    out.set(rel, {
+      file: rel,
+      lines,
+      branches: [],
+      functions,
+      linesFound: lines.size,
+      linesHit: 0,
+      branchesFound: 0,
+      branchesHit: 0,
+    });
+  }
+}
+
 export async function loadCoverageRecords(
   rootDir: string,
   explicitPaths?: string | string[],
@@ -352,15 +444,11 @@ export async function loadCoverageRecords(
         // continue checking other default coverage paths
       }
     }
-    if (resolvedPaths.length === 0) {
-      throw new Error(
-        `Could not read LCOV coverage file at ${path.join(rootDir, "coverage", "lcov.info")}`,
-      );
-    }
   }
 
   const merged = new Map<string, LcovFileRecord>();
   let latestMtimeMs: number | undefined;
+  const missingPaths: string[] = [];
 
   for (const absPath of resolvedPaths) {
     let content = "";
@@ -371,7 +459,25 @@ export async function loadCoverageRecords(
         latestMtimeMs = stat.mtimeMs;
       }
     } catch {
-      throw new Error(`Could not read LCOV coverage file at ${absPath}`);
+      if (goModulePrefix && absPath.endsWith(".out")) {
+        try {
+          await execFileAsync("go", ["test", `-coverprofile=${absPath}`, "./..."], {
+            cwd: rootDir,
+            timeout: 25000,
+          });
+          content = await fs.readFile(absPath, "utf8");
+          const stat = await fs.stat(absPath);
+          if (latestMtimeMs === undefined || stat.mtimeMs > latestMtimeMs) {
+            latestMtimeMs = stat.mtimeMs;
+          }
+        } catch {
+          missingPaths.push(absPath);
+          continue;
+        }
+      } else {
+        missingPaths.push(absPath);
+        continue;
+      }
     }
 
     const trimmed = content.trimStart();
@@ -389,6 +495,38 @@ export async function loadCoverageRecords(
 
     for (const [rel, rec] of parsed.entries()) {
       merged.set(rel, rec);
+    }
+  }
+
+  if (merged.size === 0) {
+    if (goModulePrefix && resolvedPaths.length === 0) {
+      const autoCoverOut = path.join(rootDir, "coverage.out");
+      try {
+        await execFileAsync("go", ["test", `-coverprofile=${autoCoverOut}`, "./..."], {
+          cwd: rootDir,
+          timeout: 25000,
+        });
+        const content = await fs.readFile(autoCoverOut, "utf8");
+        const stat = await fs.stat(autoCoverOut);
+        latestMtimeMs = stat.mtimeMs;
+        repoGoFiles = await findFilesByExtensionInRepo(rootDir, rootDir, ".go");
+        const parsed = parseGoCoverProfile(content, rootDir, goModulePrefix, repoGoFiles);
+        for (const [rel, rec] of parsed.entries()) {
+          merged.set(rel, rec);
+        }
+      } catch {
+        // fallback to static zero-hit repo synthesis below
+      }
+    }
+
+    if (merged.size === 0) {
+      await synthesizeZeroHitRecordsFromRepo(rootDir, merged);
+    }
+
+    if (merged.size === 0) {
+      const targetErrPath =
+        missingPaths[0] ?? path.join(rootDir, "coverage", "lcov.info");
+      throw new Error(`Could not read LCOV coverage file at ${targetErrPath}`);
     }
   }
 

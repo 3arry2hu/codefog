@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { analyzeRepository } from "./analyzer.js";
@@ -79,7 +80,7 @@ export async function runCli(
     }
 
     if (argv.includes("--version") || argv.includes("-v")) {
-      io.stdout("1.1.0\n");
+      io.stdout("1.1.1\n");
       return 0;
     }
     if (argv.includes("--help") || argv.includes("-h")) {
@@ -118,6 +119,22 @@ export async function runCli(
       let testCmd: string | undefined;
       let allowSourceChange = false;
 
+      if (process.env.npm_command === "exec") {
+        if (process.env.npm_config_mutants === "true") mutants = true;
+        if (process.env.npm_config_allow_source_change === "true") allowSourceChange = true;
+        const envLines = process.env.npm_config_lines;
+        if (envLines && envLines !== "true" && envLines !== "false") {
+          const [s, e] = envLines.split("-").map((n) => parseInt(n, 10));
+          if (!Number.isNaN(s)) startLine = s;
+          if (!Number.isNaN(e)) endLine = e;
+          else if (startLine !== undefined) endLine = startLine;
+        }
+        const envTestCmd = process.env.npm_config_test_cmd;
+        if (envTestCmd && envTestCmd !== "true" && envTestCmd !== "false") {
+          testCmd = envTestCmd;
+        }
+      }
+
       for (let i = 1; i < argv.length; i++) {
         const arg = argv[i]!;
         if (arg === "--mutants") {
@@ -134,8 +151,17 @@ export async function runCli(
           else if (startLine !== undefined) endLine = startLine;
         } else if (arg === "--test-cmd") {
           testCmd = argv[++i];
-        } else if (!arg.startsWith("-") && !targetFile) {
-          targetFile = arg;
+        } else if (!arg.startsWith("-")) {
+          if (!targetFile) {
+            targetFile = arg;
+          } else if (/^\d+(?:-\d+)?$/.test(arg) && startLine === undefined) {
+            const [s, e] = arg.split("-").map((n) => parseInt(n, 10));
+            if (!Number.isNaN(s)) startLine = s;
+            if (!Number.isNaN(e)) endLine = e;
+            else if (startLine !== undefined) endLine = startLine;
+          } else if (!testCmd) {
+            testCmd = arg;
+          }
         }
       }
 
@@ -211,15 +237,104 @@ export async function runCli(
     }
 
     const validFailOnPolicies = new Set(["none", "returned", "regression", "any-fog"]);
+
+    // Recover options if `npm exec` / `npx` consumed `--<flag>=<val>` into `npm_config_*` env vars
+    if (process.env.npm_command === "exec") {
+      const envVal = (k: string): string | undefined => {
+        const v = process.env[k];
+        return v && v !== "true" && v !== "false" ? v : undefined;
+      };
+      const envCov = envVal("npm_config_coverage");
+      if (envCov) coveragePaths.push(envCov);
+      const envLcov = envVal("npm_config_lcov");
+      if (envLcov && !lcovPath) lcovPath = envLcov;
+      const envMut = envVal("npm_config_mutation_report");
+      if (envMut && !mutationReportPath) mutationReportPath = envMut;
+      const envStryker = envVal("npm_config_stryker");
+      if (envStryker && !strykerPath) strykerPath = envStryker;
+      const envDiff = envVal("npm_config_diff");
+      if (envDiff && !diffBase) diffBase = envDiff;
+      const envHtml = envVal("npm_config_html");
+      if (envHtml && !htmlPath) htmlPath = envHtml;
+      const envPr = process.env.npm_config_pr_comment;
+      if (envPr && !prCommentDir) {
+        prCommentDir = envPr === "true" ? ".codefog" : envPr;
+      }
+      const envFailOn = envVal("npm_config_fail_on");
+      if (envFailOn) failOn = envFailOn;
+      if (process.env.npm_config_json === "true") jsonMode = true;
+      if (process.env.npm_config_open === "true") openBrowser = true;
+    }
+
+    // Classify positional arguments so that `npm exec` / `npx` stripping `--coverage`,
+    // `--mutation-report`, `--fail-on`, `--html`, or `--diff` never mistakes a file path for `rootDir`
+    for (const pos of positional) {
+      if (validFailOnPolicies.has(pos)) {
+        let isDir = false;
+        try {
+          isDir = (await fs.stat(path.resolve(rootDir, pos))).isDirectory();
+        } catch {
+          isDir = false;
+        }
+        if (!isDir) {
+          failOn = pos;
+          continue;
+        }
+      }
+
+      if (
+        /(?:outcomes\.json|mutation\.json|stryker\.json|mutations\.xml)$/i.test(pos) ||
+        (/(?:mutant|mutation|stryker|pitest)/i.test(pos) && /\.(?:json|xml)$/i.test(pos))
+      ) {
+        mutationReportPath = pos;
+        continue;
+      }
+
+      if (/\.html?$/i.test(pos)) {
+        htmlPath = pos;
+        continue;
+      }
+
+      if (
+        /\.(?:out|info|lcov|cov|profdata)$/i.test(pos) ||
+        /(?:coverage|lcov|jacoco).*\.(?:out|info|xml|txt|json)$/i.test(pos)
+      ) {
+        coveragePaths.push(pos);
+        continue;
+      }
+
+      try {
+        const st = await fs.stat(path.resolve(rootDir, pos));
+        if (st.isFile()) {
+          coveragePaths.push(pos);
+        } else if (st.isDirectory()) {
+          if (pos === ".codefog" || pos.endsWith("/.codefog")) {
+            prCommentDir = pos;
+          } else {
+            rootDir = path.resolve(rootDir, pos);
+          }
+        }
+      } catch {
+        if (
+          pos.startsWith("origin/") ||
+          pos.startsWith("HEAD") ||
+          pos === "main" ||
+          pos === "master"
+        ) {
+          diffBase = pos;
+        } else if (path.extname(pos)) {
+          coveragePaths.push(pos);
+        } else {
+          rootDir = path.resolve(rootDir, pos);
+        }
+      }
+    }
+
     if (!validFailOnPolicies.has(failOn)) {
       io.stderr(
         `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, regression, any-fog, none.\n`,
       );
       return 1;
-    }
-
-    if (positional[0]) {
-      rootDir = path.resolve(positional[0]);
     }
 
     const report = await analyzeRepository({

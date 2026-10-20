@@ -289,5 +289,22 @@ describe("Ticket #9 (Ticket 1): Go (golang) end-to-end slice & --coverage ingest
     });
     expect(res2.passed).toBe(true);
     expect(res2.killedMutants).toBeGreaterThanOrEqual(3);
+
+    // 3. Verify npm exec / npx stripped-flag recovery (`coverage.out` and `none` passed as positional args)
+    // and fallback to zero-hit repo synthesis when `coverage.out` does not exist on disk yet
+    let cliOut = "";
+    let cliErr = "";
+    const code = await runCli(["--root", tmpDir, "coverage.out", "none"], {
+      stdout: (s) => {
+        cliOut += s;
+      },
+      stderr: (s) => {
+        cliErr += s;
+      },
+    });
+    expect(code).toBe(0);
+    expect(cliErr).toBe("");
+    expect(cliOut).toContain("Trust Score:");
+    expect(cliOut).toContain("CanRefund");
   });
 });

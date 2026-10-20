@@ -363,11 +363,15 @@ export async function findFilesByExtensionInRepo(
     if (
       entry.name === "node_modules" ||
       entry.name === ".git" ||
+      entry.name === "vendor" ||
       entry.name === "target" ||
       entry.name === "build" ||
       entry.name === "dist" ||
       entry.name === "coverage" ||
-      entry.name === ".codefog"
+      entry.name === ".codefog" ||
+      entry.name === ".idea" ||
+      entry.name === ".vscode" ||
+      entry.name === ".gradle"
     ) {
       continue;
     }
@@ -1879,7 +1883,11 @@ export async function analyzeJavaFilesAstEvidence(
 
 export const goLanguageAdapter: LanguageAdapter = {
   id: "go",
-  isSourceFile: (f) => f.endsWith(".go") && !f.endsWith("_test.go"),
+  isSourceFile: (f) =>
+    f.endsWith(".go") &&
+    !f.endsWith("_test.go") &&
+    !f.endsWith(".pb.go") &&
+    !f.endsWith("_gen.go"),
   isTestFile: (f) => f.endsWith("_test.go"),
   extractFunctionSpans: (src) => extractGoFunctionSpans(src),
   extractRuntimeFingerprints: (src) => {
