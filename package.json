@@ -1,6 +1,6 @@
 {
   "name": "@barryzhu/codefog",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "See which parts of your codebase you can actually trust. Fog-first trust and risk map for TypeScript/JavaScript, Go, Rust, and Java repositories.",
   "license": "MIT",
   "type": "module",

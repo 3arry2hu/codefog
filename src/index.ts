@@ -8,6 +8,7 @@ export * from "./polyglot.js";
 export * from "./verify.js";
 export * from "./html-report.js";
 export * from "./diff-pr.js";
+export * from "./oracle.js";
 export * from "./skill-installer.js";
 export * from "./analyzer.js";
 export * from "./cli.js";
