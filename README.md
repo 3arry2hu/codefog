@@ -120,7 +120,9 @@ Top Fog Hotspots & Findings:
 
 ## 一键安装 AI Agent Skill（Codex / Claude Code / CodeBuddy / Cursor）
 
-`codefog` 内置了专用于 AI 编码代理的 **代码质量与测试可信度评测优化闭环 Skill**。通过一行 `npx` 命令即可自动为 **Codex**、**Claude Code**、**CodeBuddy** 和 **Cursor** 安装该 Skill：
+`codefog` 内置了专用于 AI 编码代理的 **代码质量与测试可信度评测优化闭环 Skill**。通过一行 `npx` 命令即可自动为 **Codex**、**Claude Code**、**CodeBuddy** 和 **Cursor** 安装该 Skill。
+
+> 📖 **完整使用手册与 Prompt 模板库**：请参阅 [**《`codefog` AI Skill 使用指南》(`docs/ai-skill-guide.md`)**](./docs/ai-skill-guide.md)。
 
 ### 1. 一键安装 Skill
 
