@@ -272,7 +272,9 @@ export async function analyzeFileGitFreshness(params: {
     if (sourceTextAtCommitCache.has(sha)) {
       return sourceTextAtCommitCache.get(sha)!;
     }
-    const text = await runGit(rootDir, ["show", `${sha}:${relPath}`]);
+    const text =
+      (await runGit(rootDir, ["show", `${sha}:./${relPath}`])) ??
+      (await runGit(rootDir, ["show", `${sha}:${relPath}`]));
     sourceTextAtCommitCache.set(sha, text);
     return text;
   }
@@ -316,6 +318,7 @@ export async function analyzeFileGitFreshness(params: {
   }
 
   const functions = new Map<string, FunctionFreshnessInfo>();
+  const testHistoryCache = new Map<string, CommitEntry[]>();
 
   for (const span of functionSpans) {
     const fnName = span.name;
@@ -326,9 +329,19 @@ export async function analyzeFileGitFreshness(params: {
       testFiles[0] === relPath &&
       inlineTestCommits !== null;
 
-    const testHistory = usesSameFileInlineTests
-      ? inlineTestCommits!
-      : await getCommitHistory(rootDir, testFiles);
+    let testHistory: CommitEntry[];
+    if (usesSameFileInlineTests) {
+      testHistory = inlineTestCommits!;
+    } else {
+      const cacheKey = testFiles.slice().sort().join("|");
+      const cached = testHistoryCache.get(cacheKey);
+      if (cached) {
+        testHistory = cached;
+      } else {
+        testHistory = await getCommitHistory(rootDir, testFiles);
+        testHistoryCache.set(cacheKey, testHistory);
+      }
+    }
     const latestTest = testHistory[0];
 
     let isFogReturned = false;
@@ -337,21 +350,23 @@ export async function analyzeFileGitFreshness(params: {
     if (latestTest) {
       // Check Self-proof Fog via git blame + commit history:
       // All blamed lines of the function (or initial file commit) share the exact same commit as the sole test commit
-      const blameShas = await getBlameShasForRange(
-        rootDir,
-        relPath,
-        span.startLine,
-        span.endLine,
-      );
-      const allBlamedInSameTestCommit =
-        blameShas.size > 0 &&
-        Array.from(blameShas).every((sha) => sha === latestTest.sha);
-
-      if (
-        testHistory.length === 1 &&
-        (latestTest.sha === oldestSrc.sha || allBlamedInSameTestCommit)
-      ) {
-        isSelfProofFog = true;
+      if (testHistory.length === 1) {
+        if (latestTest.sha === oldestSrc.sha) {
+          isSelfProofFog = true;
+        } else {
+          const blameShas = await getBlameShasForRange(
+            rootDir,
+            relPath,
+            span.startLine,
+            span.endLine,
+          );
+          if (
+            blameShas.size > 0 &&
+            Array.from(blameShas).every((sha) => sha === latestTest.sha)
+          ) {
+            isSelfProofFog = true;
+          }
+        }
       }
 
       // Check Fog Returned:

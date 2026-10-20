@@ -139,10 +139,14 @@ export function parseGoCoverProfile(
   content: string,
   rootDir: string,
   goModulePrefix?: string,
+  repoGoFiles?: string[],
 ): Map<string, LcovFileRecord> {
   const records = new Map<string, LcovFileRecord>();
   const lineRe = /^(.+):(\d+)\.(\d+),(\d+)\.(\d+)\s+(\d+)\s+(\d+)$/;
   let branchSeq = 0;
+  const sortedGoFiles = repoGoFiles
+    ? [...repoGoFiles].sort((a, b) => b.length - a.length)
+    : undefined;
 
   for (const rawLine of content.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -156,7 +160,11 @@ export function parseGoCoverProfile(
     const endLine = Number.parseInt(m[4]!, 10);
     const count = Number.parseInt(m[7]!, 10);
 
-    const rel = normalizeRepoRelativePath(rawFile, rootDir, goModulePrefix);
+    let rel = normalizeRepoRelativePath(rawFile, rootDir, goModulePrefix);
+    if (sortedGoFiles && !sortedGoFiles.includes(rel)) {
+      const matched = sortedGoFiles.find((f) => rel === f || rel.endsWith(`/${f}`));
+      if (matched) rel = matched;
+    }
     let current = records.get(rel);
     if (!current) {
       current = {
@@ -286,21 +294,33 @@ export async function parseJacocoXml(
   return records;
 }
 
-async function readGoModuleName(rootDir: string): Promise<string | undefined> {
-  try {
-    const goMod = await fs.readFile(path.join(rootDir, "go.mod"), "utf8");
-    const m = /^\s*module\s+(\S+)/m.exec(goMod);
-    return m?.[1];
-  } catch {
-    return undefined;
+async function readGoModulePrefix(rootDir: string): Promise<string | undefined> {
+  let current = path.resolve(rootDir);
+  while (true) {
+    try {
+      const goMod = await fs.readFile(path.join(current, "go.mod"), "utf8");
+      const m = /^\s*module\s+(\S+)/m.exec(goMod);
+      if (m?.[1]) {
+        const modName = m[1].replace(/\/+$/, "");
+        const subRel = path.relative(current, rootDir).replace(/\\/g, "/");
+        return subRel && !subRel.startsWith("..") ? `${modName}/${subRel}` : modName;
+      }
+    } catch {
+      // check parent directory
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
+  return undefined;
 }
 
 export async function loadCoverageRecords(
   rootDir: string,
   explicitPaths?: string | string[],
 ): Promise<{ records: Map<string, LcovFileRecord>; mtimeMs?: number }> {
-  const goModulePrefix = await readGoModuleName(rootDir);
+  const goModulePrefix = await readGoModulePrefix(rootDir);
+  let repoGoFiles: string[] | undefined;
   const candidateRelPaths: string[] = [];
 
   if (explicitPaths) {
@@ -357,7 +377,10 @@ export async function loadCoverageRecords(
     const trimmed = content.trimStart();
     let parsed: Map<string, LcovFileRecord>;
     if (trimmed.startsWith("mode:")) {
-      parsed = parseGoCoverProfile(content, rootDir, goModulePrefix);
+      if (!repoGoFiles) {
+        repoGoFiles = await findFilesByExtensionInRepo(rootDir, rootDir, ".go");
+      }
+      parsed = parseGoCoverProfile(content, rootDir, goModulePrefix, repoGoFiles);
     } else if (trimmed.startsWith("<?xml") || trimmed.includes("<report")) {
       parsed = await parseJacocoXml(content, rootDir);
     } else {

@@ -61,21 +61,31 @@ export function formatLevel1Summary(report: CodefogReport): string {
 }
 
 export async function runCli(
-  argv: string[],
+  rawArgv: string[],
   io: CliIo = {
     stdout: (s) => process.stdout.write(s),
     stderr: (s) => process.stderr.write(s),
   },
 ): Promise<number> {
   try {
+    const argv: string[] = [];
+    for (const token of rawArgv) {
+      if (token.startsWith("--") && token.includes("=")) {
+        const eqIdx = token.indexOf("=");
+        argv.push(token.slice(0, eqIdx), token.slice(eqIdx + 1));
+      } else {
+        argv.push(token);
+      }
+    }
+
     if (argv.includes("--version") || argv.includes("-v")) {
-      io.stdout("1.0.0\n");
+      io.stdout("1.1.0\n");
       return 0;
     }
     if (argv.includes("--help") || argv.includes("-h")) {
       io.stdout(
         [
-          "codefog - Fog-first trust and risk map for TypeScript/JavaScript repositories",
+          "codefog - Fog-first trust and risk map for TypeScript/JavaScript, Go, Rust, and Java repositories",
           "",
           "Usage:",
           "  codefog [rootDir] [options]",
