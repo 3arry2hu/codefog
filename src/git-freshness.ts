@@ -133,15 +133,20 @@ export function extractRuntimeFunctionFingerprints(
   function visit(node: ts.Node): void {
     if (ts.isFunctionDeclaration(node) && node.name) {
       recordFunction(node.name.text, node.parameters, node.body);
-    } else if (ts.isMethodDeclaration(node) && node.name) {
+      return;
+    }
+    if (ts.isMethodDeclaration(node) && node.name) {
       recordFunction(node.name.getText(sf), node.parameters, node.body);
-    } else if (
+      return;
+    }
+    if (
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
       node.initializer &&
       (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
     ) {
       recordFunction(node.name.text, node.initializer.parameters, node.initializer.body);
+      return;
     }
     ts.forEachChild(node, visit);
   }

@@ -88,7 +88,9 @@ function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunct
         endLine: end,
         cyclomaticComplexity: countComplexity(node),
       });
-    } else if (ts.isMethodDeclaration(node) && node.name) {
+      return;
+    }
+    if (ts.isMethodDeclaration(node) && node.name) {
       const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
       const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
       spans.push({
@@ -97,7 +99,9 @@ function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunct
         endLine: end,
         cyclomaticComplexity: countComplexity(node),
       });
-    } else if (
+      return;
+    }
+    if (
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
       node.initializer &&
@@ -111,6 +115,7 @@ function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunct
         endLine: end,
         cyclomaticComplexity: countComplexity(node.initializer),
       });
+      return;
     }
     ts.forEachChild(node, visit);
   }
@@ -313,6 +318,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       }
 
       for (const [ln, hits] of spanLines) {
+        if (lineStates[ln] !== undefined) continue;
         const lineState: EvidenceState = hits > 0 ? regionState : "fog";
         lineStates[ln] = lineState;
         fileLocByState[lineState]++;

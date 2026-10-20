@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dogfood": "vitest run --coverage.enabled=true --coverage.provider=v8 --coverage.reporter=lcov --coverage.include=\"src/**/*.ts\" && npm run build && node dist/bin.js --fail-on none"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@vitest/coverage-v8": "^3.2.7",
     "vitest": "^3.0.8"
   }
 }

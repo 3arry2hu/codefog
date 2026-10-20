@@ -64,6 +64,14 @@ const STRONG_MATCHERS = new Set([
 
 const TEST_BLOCK_CALLEES = new Set(["it", "test"]);
 
+const IGNORED_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "coverage",
+  ".codefog",
+]);
+
 function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
 }
@@ -72,7 +80,19 @@ function stripCodeExtension(p: string): string {
   return p.replace(/\.(tsx?|jsx?|mjs|cjs)$/, "");
 }
 
-async function findTestFiles(dir: string, rootDir: string, out: string[] = []): Promise<string[]> {
+function isTestFileName(name: string): boolean {
+  return /\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(name);
+}
+
+function isSourceFileName(name: string): boolean {
+  return /\.(ts|tsx|js|jsx|mjs)$/.test(name) && !name.endsWith(".d.ts") && !isTestFileName(name);
+}
+
+async function scanRepoFiles(
+  dir: string,
+  rootDir: string,
+  out: { testFiles: string[]; sourceFiles: string[] } = { testFiles: [], sourceFiles: [] },
+): Promise<{ testFiles: string[]; sourceFiles: string[] }> {
   let entries;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -80,20 +100,16 @@ async function findTestFiles(dir: string, rootDir: string, out: string[] = []): 
     return out;
   }
   for (const entry of entries) {
-    if (
-      entry.name === "node_modules" ||
-      entry.name === ".git" ||
-      entry.name === "dist" ||
-      entry.name === "coverage" ||
-      entry.name === ".codefog"
-    ) {
+    if (IGNORED_DIRS.has(entry.name)) {
       continue;
     }
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      await findTestFiles(fullPath, rootDir, out);
-    } else if (/\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(entry.name)) {
-      out.push(toPosix(path.relative(rootDir, fullPath)));
+      await scanRepoFiles(fullPath, rootDir, out);
+    } else if (isTestFileName(entry.name)) {
+      out.testFiles.push(toPosix(path.relative(rootDir, fullPath)));
+    } else if (isSourceFileName(entry.name)) {
+      out.sourceFiles.push(toPosix(path.relative(rootDir, fullPath)));
     }
   }
   return out;
@@ -105,9 +121,9 @@ interface ImportedBinding {
   targetFileStem: string | null;
 }
 
-function extractImports(sourceFile: ts.SourceFile, testFileRel: string): Map<string, ImportedBinding> {
+function extractImports(sourceFile: ts.SourceFile, currentFileRel: string): Map<string, ImportedBinding> {
   const bindings = new Map<string, ImportedBinding>();
-  const testDir = path.posix.dirname(toPosix(testFileRel));
+  const currentDir = path.posix.dirname(toPosix(currentFileRel));
 
   for (const stmt of sourceFile.statements) {
     if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
@@ -116,7 +132,7 @@ function extractImports(sourceFile: ts.SourceFile, testFileRel: string): Map<str
       : "";
     let targetFileStem: string | null = null;
     if (moduleSpec.startsWith(".")) {
-      const resolved = path.posix.normalize(path.posix.join(testDir, moduleSpec));
+      const resolved = path.posix.normalize(path.posix.join(currentDir, moduleSpec));
       targetFileStem = stripCodeExtension(resolved);
     }
 
@@ -215,7 +231,6 @@ interface ExpectChainInfo {
 }
 
 function parseExpectCall(node: ts.CallExpression): ExpectChainInfo | null {
-  // Matches expect(subject).toBe(...) or expect(subject).not.toBe(...) or expect(subject).resolves.toBe(...)
   if (!ts.isPropertyAccessExpression(node.expression)) return null;
   const matcher = node.expression.name.text;
   let current: ts.Expression = node.expression.expression;
@@ -242,7 +257,6 @@ function parseExpectCall(node: ts.CallExpression): ExpectChainInfo | null {
     };
   }
 
-  // Also support assert.equal(actual, expected) / assert.strictEqual(actual, expected)
   if (
     ts.isIdentifier(current) &&
     current.text === "assert" &&
@@ -258,27 +272,41 @@ function parseExpectCall(node: ts.CallExpression): ExpectChainInfo | null {
   return null;
 }
 
-export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestAstResult> {
-  const testFiles = await findTestFiles(rootDir, rootDir);
-  const byFileAndSymbol = new Map<string, FunctionAstEvidence>();
-  const bySymbol = new Map<string, FunctionAstEvidence>();
+interface InternalEvidenceSets {
+  symbol: string;
+  fileStem: string;
+  executedBlocks: Set<string>;
+  strongAssertedBlocks: Set<string>;
+  weakAssertedBlocks: Set<string>;
+  directStrongAssertions: number;
+  directWeakAssertions: number;
+  testFiles: Set<string>;
+}
 
-  function getOrCreate(targetFileStem: string | null, symbol: string): FunctionAstEvidence {
-    const key = targetFileStem ? `${targetFileStem}::${symbol}` : `*::${symbol}`;
-    let entry = byFileAndSymbol.get(key);
+export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestAstResult> {
+  const { testFiles, sourceFiles } = await scanRepoFiles(rootDir, rootDir);
+  const internalMap = new Map<string, InternalEvidenceSets>();
+  const bySymbolInternal = new Map<string, InternalEvidenceSets>();
+
+  function getOrCreateInternal(targetFileStem: string | null, symbol: string): InternalEvidenceSets {
+    const fileStem = targetFileStem ?? "*";
+    const key = `${fileStem}::${symbol}`;
+    let entry = internalMap.get(key);
     if (!entry) {
       entry = {
         symbol,
-        file: targetFileStem ?? "*",
-        executedTestBlocks: 0,
-        assertionsOnOutcome: 0,
-        weakAssertionsOnly: 0,
-        testFiles: [],
+        fileStem,
+        executedBlocks: new Set(),
+        strongAssertedBlocks: new Set(),
+        weakAssertedBlocks: new Set(),
+        directStrongAssertions: 0,
+        directWeakAssertions: 0,
+        testFiles: new Set(),
       };
-      byFileAndSymbol.set(key, entry);
+      internalMap.set(key, entry);
     }
-    if (!bySymbol.has(symbol)) {
-      bySymbol.set(symbol, entry);
+    if (!bySymbolInternal.has(symbol)) {
+      bySymbolInternal.set(symbol, entry);
     }
     return entry;
   }
@@ -299,12 +327,15 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
       true,
     );
     const imports = extractImports(sourceFile, testFileRel);
+    let blockCounter = 0;
 
     function analyzeTestBlockBody(body: ts.Node): void {
+      const blockId = `${testFileRel}#${++blockCounter}`;
       const taintedVars = new Map<string, CallTarget[]>();
       const calledInBlock = new Map<string, CallTarget>();
       const strongAssertedInBlock = new Map<string, number>();
       const weakAssertedInBlock = new Map<string, number>();
+      let blockHasAnyStrongAssertion = false;
 
       function recordCallTarget(target: CallTarget): void {
         const key = `${target.targetFileStem ?? "*"}::${target.symbol}`;
@@ -312,7 +343,6 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
       }
 
       function walkBlock(node: ts.Node): void {
-        // Variable declarations: const out = formatInvoice(250);
         if (ts.isVariableDeclaration(node) && node.initializer) {
           const targets = resolveExpressionSymbols(node.initializer, imports, taintedVars);
           if (targets.length > 0) {
@@ -329,7 +359,6 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
           }
         }
 
-        // Binary assignment: out = formatInvoice(250)
         if (
           ts.isBinaryExpression(node) &&
           node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
@@ -342,10 +371,18 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
           }
         }
 
-        // Check if this is an expect(...).matcher(...) call
         if (ts.isCallExpression(node)) {
           const expectInfo = parseExpectCall(node);
           if (expectInfo) {
+            const isWeak =
+              WEAK_MATCHERS.has(expectInfo.matcher) && !expectInfo.isNegated;
+            const isStrong =
+              STRONG_MATCHERS.has(expectInfo.matcher) ||
+              (WEAK_MATCHERS.has(expectInfo.matcher) && expectInfo.isNegated);
+            if (isStrong) {
+              blockHasAnyStrongAssertion = true;
+            }
+
             const subjectTargets = resolveExpressionSymbols(
               expectInfo.subject,
               imports,
@@ -354,12 +391,6 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
             for (const t of subjectTargets) {
               recordCallTarget(t);
               const key = `${t.targetFileStem ?? "*"}::${t.symbol}`;
-              const isWeak =
-                WEAK_MATCHERS.has(expectInfo.matcher) && !expectInfo.isNegated;
-              const isStrong =
-                STRONG_MATCHERS.has(expectInfo.matcher) ||
-                (WEAK_MATCHERS.has(expectInfo.matcher) && expectInfo.isNegated);
-
               if (isStrong) {
                 strongAssertedInBlock.set(key, (strongAssertedInBlock.get(key) ?? 0) + 1);
               } else if (isWeak) {
@@ -367,7 +398,6 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
               }
             }
           } else {
-            // Standalone call expression: e.g. syncWebhook({ id: 'evt_1' })
             if (ts.isIdentifier(node.expression)) {
               const id = node.expression.text;
               const imp = imports.get(id);
@@ -398,12 +428,22 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
       walkBlock(body);
 
       for (const [key, target] of calledInBlock.entries()) {
-        const evidence = getOrCreate(target.targetFileStem, target.symbol);
-        evidence.executedTestBlocks += 1;
-        evidence.assertionsOnOutcome += strongAssertedInBlock.get(key) ?? 0;
-        evidence.weakAssertionsOnly += weakAssertedInBlock.get(key) ?? 0;
-        if (!evidence.testFiles.includes(testFileRel)) {
-          evidence.testFiles.push(testFileRel);
+        const evidence = getOrCreateInternal(target.targetFileStem, target.symbol);
+        evidence.executedBlocks.add(blockId);
+        evidence.testFiles.add(testFileRel);
+        const strongCount = strongAssertedInBlock.get(key) ?? 0;
+        const weakCount = weakAssertedInBlock.get(key) ?? 0;
+        // Also support CLI-style tests where runCli(..., { stdout }) captures output into a buffer and asserts on the buffer
+        const effectiveStrong =
+          strongCount > 0 ? strongCount : blockHasAnyStrongAssertion && calledInBlock.size === 1 && weakCount === 0 ? 1 : 0;
+
+        if (effectiveStrong > 0) {
+          evidence.strongAssertedBlocks.add(blockId);
+          evidence.directStrongAssertions += effectiveStrong;
+        }
+        if (weakCount > 0) {
+          evidence.weakAssertedBlocks.add(blockId);
+          evidence.directWeakAssertions += weakCount;
         }
       }
     }
@@ -432,6 +472,160 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
     }
 
     findTestBlocks(sourceFile);
+  }
+
+  // Build static call graph across source files and propagate test & assertion evidence
+  const callGraph = new Map<string, Set<string>>();
+
+  for (const srcFileRel of sourceFiles) {
+    const fullPath = path.join(rootDir, srcFileRel);
+    let content = "";
+    try {
+      content = await fs.readFile(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+
+    const sf = ts.createSourceFile(
+      srcFileRel,
+      content,
+      ts.ScriptTarget.Latest,
+      true,
+      srcFileRel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    );
+    const srcStem = stripCodeExtension(toPosix(srcFileRel));
+    const imports = extractImports(sf, srcFileRel);
+
+    function collectCallsInFunction(callerSymbol: string, fnBody: ts.Node): void {
+      const callerKey = `${srcStem}::${callerSymbol}`;
+      let edges = callGraph.get(callerKey);
+      if (!edges) {
+        edges = new Set();
+        callGraph.set(callerKey, edges);
+      }
+
+      function walkBody(n: ts.Node): void {
+        if (ts.isCallExpression(n)) {
+          if (ts.isIdentifier(n.expression)) {
+            const calleeId = n.expression.text;
+            const imp = imports.get(calleeId);
+            if (imp && imp.targetFileStem && imp.exportedName !== "*") {
+              const targetSym = imp.exportedName === "default" ? calleeId : imp.exportedName;
+              edges!.add(`${imp.targetFileStem}::${targetSym}`);
+            } else {
+              edges!.add(`${srcStem}::${calleeId}`);
+            }
+          } else if (
+            ts.isPropertyAccessExpression(n.expression) &&
+            ts.isIdentifier(n.expression.expression)
+          ) {
+            const ns = imports.get(n.expression.expression.text);
+            if (ns && ns.targetFileStem && ns.exportedName === "*") {
+              edges!.add(`${ns.targetFileStem}::${n.expression.name.text}`);
+            }
+          }
+        }
+        ts.forEachChild(n, walkBody);
+      }
+
+      walkBody(fnBody);
+    }
+
+    function visitTopLevel(node: ts.Node): void {
+      if (ts.isFunctionDeclaration(node) && node.name && node.body) {
+        collectCallsInFunction(node.name.text, node.body);
+        return;
+      }
+      if (ts.isMethodDeclaration(node) && node.name && node.body) {
+        collectCallsInFunction(node.name.getText(sf), node.body);
+        return;
+      }
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer &&
+        (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+      ) {
+        collectCallsInFunction(node.name.text, node.initializer.body);
+        return;
+      }
+      ts.forEachChild(node, visitTopLevel);
+    }
+
+    visitTopLevel(sf);
+  }
+
+  // Fixed-point propagation along callGraph edges
+  let changed = true;
+  let iterations = 0;
+  while (changed && iterations < 20) {
+    changed = false;
+    iterations++;
+    for (const [callerKey, callees] of callGraph.entries()) {
+      const [callerStem, callerSym] = callerKey.split("::");
+      const callerEv =
+        internalMap.get(callerKey) ??
+        internalMap.get(`*::${callerSym}`) ??
+        (callerSym ? bySymbolInternal.get(callerSym) : undefined);
+
+      if (!callerEv || callerEv.executedBlocks.size === 0) continue;
+
+      for (const calleeKey of callees) {
+        const [calleeStem, calleeSym] = calleeKey.split("::");
+        if (!calleeSym) continue;
+        const calleeEv = getOrCreateInternal(calleeStem ?? null, calleeSym);
+
+        for (const blk of callerEv.executedBlocks) {
+          if (!calleeEv.executedBlocks.has(blk)) {
+            calleeEv.executedBlocks.add(blk);
+            changed = true;
+          }
+        }
+        for (const blk of callerEv.strongAssertedBlocks) {
+          if (!calleeEv.strongAssertedBlocks.has(blk)) {
+            calleeEv.strongAssertedBlocks.add(blk);
+            changed = true;
+          }
+        }
+        for (const blk of callerEv.weakAssertedBlocks) {
+          if (!calleeEv.weakAssertedBlocks.has(blk)) {
+            calleeEv.weakAssertedBlocks.add(blk);
+            changed = true;
+          }
+        }
+        for (const tf of callerEv.testFiles) {
+          if (!calleeEv.testFiles.has(tf)) {
+            calleeEv.testFiles.add(tf);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  const byFileAndSymbol = new Map<string, FunctionAstEvidence>();
+  const bySymbol = new Map<string, FunctionAstEvidence>();
+
+  for (const [key, internal] of internalMap.entries()) {
+    const pub: FunctionAstEvidence = {
+      symbol: internal.symbol,
+      file: internal.fileStem,
+      executedTestBlocks: internal.executedBlocks.size,
+      assertionsOnOutcome: Math.max(
+        internal.directStrongAssertions,
+        internal.strongAssertedBlocks.size,
+      ),
+      weakAssertionsOnly: Math.max(
+        internal.directWeakAssertions,
+        internal.weakAssertedBlocks.size,
+      ),
+      testFiles: Array.from(internal.testFiles),
+    };
+    byFileAndSymbol.set(key, pub);
+    const existingBySym = bySymbol.get(internal.symbol);
+    if (!existingBySym || pub.assertionsOnOutcome > existingBySym.assertionsOnOutcome) {
+      bySymbol.set(internal.symbol, pub);
+    }
   }
 
   return {

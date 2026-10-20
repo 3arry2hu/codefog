@@ -104,15 +104,20 @@ function extractFunctionNamesInRange(
   function visit(node: ts.Node): void {
     if (ts.isFunctionDeclaration(node) && node.name) {
       checkAndAdd(node.name.text, node);
-    } else if (ts.isMethodDeclaration(node) && node.name) {
+      return;
+    }
+    if (ts.isMethodDeclaration(node) && node.name) {
       checkAndAdd(node.name.getText(sf), node);
-    } else if (
+      return;
+    }
+    if (
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
       node.initializer &&
       (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
     ) {
       checkAndAdd(node.name.text, node);
+      return;
     }
     ts.forEachChild(node, visit);
   }
