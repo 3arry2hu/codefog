@@ -139,6 +139,15 @@ export interface FileSummary {
   diffStatus?: "fog-returned" | "weakened" | "improved" | "unchanged";
 }
 
+export interface DeletedDocClaimEvent {
+  file: string;
+  claimText: string;
+  rawText: string;
+  kind: DocClaimKind;
+  line: number;
+  referent: DocReferent;
+}
+
 export interface DiffComparison {
   baseRef: string;
   coverageUpEvidenceDown: boolean;
@@ -147,6 +156,9 @@ export interface DiffComparison {
   weakenedFiles: string[];
   beforeSummary: {
     trustScore: number;
+    docTrustScore?: number;
+    totalDocClaims?: number;
+    docClaimsByState?: LocByState;
     metrics: {
       lineCoveragePct: number;
       branchCoveragePct: number;
@@ -163,6 +175,8 @@ export interface DiffComparison {
       riskScore: number;
     }>;
   };
+  newDocFogReturnedClaims?: DocClaim[];
+  deletedDocClaims?: DeletedDocClaimEvent[];
 }
 
 export type DocBlockKind =
@@ -224,6 +238,20 @@ export interface DocClaim {
   executionOutput?: string;
 }
 
+export interface DocFileSummary {
+  path: string;
+  modulePath: "docs";
+  totalClaims: number;
+  unverifiedClaims: number;
+  dominantState: EvidenceState;
+  trustScore: number;
+  riskScore: number;
+  claimsByState: LocByState;
+  lines: string[];
+  lineStates: Record<number, EvidenceState>;
+  claims: DocClaim[];
+}
+
 export interface CodefogReport {
   $schema: "https://codefog.dev/schemas/v1/report.json";
   version: "1.0.0";
@@ -253,6 +281,7 @@ export interface CodefogReport {
   };
   docTrustScore?: number;
   docClaims?: DocClaim[];
+  docFiles?: DocFileSummary[];
   modules: ModuleSummary[];
   findings: Finding[];
   files: FileSummary[];

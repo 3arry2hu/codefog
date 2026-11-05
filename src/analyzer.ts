@@ -22,10 +22,13 @@ import {
   emptyLocByState,
   getDominantState,
   roundPct,
+  STATE_EVIDENCE_RANK,
 } from "./scoring.js";
 import type {
   AnalyzeOptions,
   CodefogReport,
+  DocClaim,
+  DocFileSummary,
   EvidenceState,
   FileSummary,
   FileSymbolRegion,
@@ -575,26 +578,6 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     });
   }
 
-  const docResult = options.docs
-    ? await analyzeDocClaims({
-        rootDir,
-        checkExternalLinks: options.checkExternalLinks,
-        runDocs: options.runDocs,
-      })
-    : undefined;
-
-  if (docResult) {
-    for (const f of findings) {
-      f.subjectType = "code";
-      f.tags = [];
-    }
-    findings.push(...docResult.docFindings);
-  }
-
-  modules.sort((a, b) => b.maxRiskScore - a.maxRiskScore || a.trustScore - b.trustScore);
-  findings.sort((a, b) => b.riskScore - a.riskScore || a.id.localeCompare(b.id));
-  files.sort((a, b) => b.riskScore - a.riskScore || a.path.localeCompare(b.path));
-
   const repoLocByState = emptyLocByState();
   for (const m of modules) {
     for (const k of Object.keys(repoLocByState) as EvidenceState[]) {
@@ -608,6 +591,97 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     repoLocByState["self-proof-fog"] +
     repoLocByState["weak-evidence"] +
     repoLocByState.verified;
+
+  const docResult = options.docs
+    ? await analyzeDocClaims({
+        rootDir,
+        checkExternalLinks: options.checkExternalLinks,
+        runDocs: options.runDocs,
+      })
+    : undefined;
+
+  let docFiles: DocFileSummary[] | undefined;
+  if (docResult) {
+    for (const f of findings) {
+      f.subjectType = "code";
+      f.tags = [];
+    }
+    findings.push(...docResult.docFindings);
+
+    const claimsByFile = new Map<string, DocClaim[]>();
+    for (const c of docResult.docClaims) {
+      const list = claimsByFile.get(c.file) ?? [];
+      list.push(c);
+      claimsByFile.set(c.file, list);
+    }
+
+    docFiles = [];
+    for (const parsedDoc of docResult.parsedDocs) {
+      if (parsedDoc.ignoredFile) continue;
+      const fileClaims = claimsByFile.get(parsedDoc.file) ?? [];
+      if (fileClaims.length === 0) continue;
+
+      const claimsByState = emptyLocByState();
+      const docLineStates: Record<number, EvidenceState> = {};
+      for (const claim of fileClaims) {
+        claimsByState[claim.state]++;
+        for (let ln = claim.startLine; ln <= claim.endLine; ln++) {
+          const prev = docLineStates[ln];
+          if (
+            prev === undefined ||
+            STATE_EVIDENCE_RANK[claim.state] < STATE_EVIDENCE_RANK[prev]
+          ) {
+            docLineStates[ln] = claim.state;
+          }
+        }
+      }
+
+      const totalClaims = fileClaims.length;
+      const unverifiedClaims = totalClaims - claimsByState.verified;
+      const dominantState = getDominantState(claimsByState);
+      const docFileRisk = computeRiskScore({
+        unverifiedLoc: unverifiedClaims,
+        churn90d: 1,
+        cyclomaticComplexity: 1,
+        state: dominantState,
+      });
+
+      docFiles.push({
+        path: parsedDoc.file,
+        modulePath: "docs",
+        totalClaims,
+        unverifiedClaims,
+        dominantState,
+        trustScore: computeTrustScore(claimsByState),
+        riskScore: docFileRisk,
+        claimsByState,
+        lines: parsedDoc.lines,
+        lineStates: docLineStates,
+        claims: fileClaims,
+      });
+    }
+
+    docFiles.sort(
+      (a, b) =>
+        b.riskScore - a.riskScore ||
+        b.totalClaims - a.totalClaims ||
+        a.path.localeCompare(b.path),
+    );
+
+    const docMaxRisk = docFiles.reduce((max, df) => Math.max(max, df.riskScore), 0);
+    modules.push({
+      path: "docs",
+      totalFiles: docFiles.length,
+      verifiedFilesCollapsed: docFiles.filter((df) => df.dominantState === "verified").length,
+      trustScore: docResult.docTrustScore,
+      maxRiskScore: docMaxRisk,
+      locByState: { ...docResult.docClaimsByState },
+    });
+  }
+
+  modules.sort((a, b) => b.maxRiskScore - a.maxRiskScore || a.trustScore - b.trustScore);
+  findings.sort((a, b) => b.riskScore - a.riskScore || a.id.localeCompare(b.id));
+  files.sort((a, b) => b.riskScore - a.riskScore || a.path.localeCompare(b.path));
 
   const report: CodefogReport = {
     $schema: "https://codefog.dev/schemas/v1/report.json",
@@ -644,6 +718,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       ? {
           docTrustScore: docResult.docTrustScore,
           docClaims: docResult.docClaims,
+          docFiles,
         }
       : {}),
     modules,
