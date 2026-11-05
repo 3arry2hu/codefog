@@ -14,6 +14,7 @@ import {
   createDeterministicFindingId,
   emptyLocByState,
 } from "./scoring.js";
+import { evaluateDocCodeBlockClaim } from "./doc-runners.js";
 import type {
   DocBlockKind,
   DocClaim,
@@ -1240,7 +1241,20 @@ export async function analyzeDocClaims(options: {
 
     for (const block of doc.blocks) {
       if (block.ignored) continue;
-      if (block.kind === "code-block") continue;
+      if (block.kind === "code-block") {
+        const codeClaim = await evaluateDocCodeBlockClaim({
+          rootDir,
+          docFile: doc.file,
+          block,
+          runDocs: Boolean(options.runDocs),
+          symbolIndex,
+          pkgInfo,
+        });
+        if (codeClaim) {
+          docClaims.push(codeClaim);
+        }
+        continue;
+      }
 
       const blockLines = doc.lines.slice(block.startLine - 1, block.endLine);
       for (let lineIdx = 0; lineIdx < blockLines.length; lineIdx++) {
@@ -1569,7 +1583,9 @@ export async function analyzeDocClaims(options: {
           startLine: claim.startLine,
           endLine: claim.endLine,
         },
-        reason: `Doc claim '${claim.text}' (${claim.kind}) in ${claim.file}:${claim.startLine} could not be resolved (Fog Returned).`,
+        reason: claim.executionOutput
+          ? `Doc claim '${claim.text}' (${claim.kind}) in ${claim.file}:${claim.startLine}-${claim.endLine} failed execution (Fog Returned): ${claim.executionOutput}`
+          : `Doc claim '${claim.text}' (${claim.kind}) in ${claim.file}:${claim.startLine} could not be resolved (Fog Returned).`,
         evidence: {
           executedByTests: 0,
           assertionsOnOutcome: 0,

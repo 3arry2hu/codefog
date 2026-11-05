@@ -62,6 +62,11 @@ const STRONG_MATCHERS = new Set([
   "strictEqual",
   "deepEqual",
   "deepStrictEqual",
+  "notEqual",
+  "notStrictEqual",
+  "notDeepEqual",
+  "notDeepStrictEqual",
+  "match",
   "throws",
   "rejects",
   "doesNotThrow",
@@ -706,3 +711,76 @@ export function lookupFunctionAstEvidence(
     astResult.bySymbol.get(symbol)
   );
 }
+
+/**
+ * Counts TS/JS Outcome Assertions in a standalone code snippet (e.g. a Markdown code block),
+ * reusing the TS/JS adapter's expect/assert matcher classification.
+ * Comments (such as `// =>`) and `console.log` calls are not counted as assertions.
+ */
+export function countTsJsOutcomeAssertions(sourceText: string): number {
+  const sf = ts.createSourceFile(
+    "snippet.ts",
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let outcomeAssertions = 0;
+
+  function hasValueComparison(expr: ts.Node): boolean {
+    let found = false;
+    function check(n: ts.Node): void {
+      if (ts.isBinaryExpression(n)) {
+        const op = n.operatorToken.kind;
+        if (
+          op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+          op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+          op === ts.SyntaxKind.EqualsEqualsToken ||
+          op === ts.SyntaxKind.ExclamationEqualsToken ||
+          op === ts.SyntaxKind.LessThanToken ||
+          op === ts.SyntaxKind.LessThanEqualsToken ||
+          op === ts.SyntaxKind.GreaterThanToken ||
+          op === ts.SyntaxKind.GreaterThanEqualsToken
+        ) {
+          found = true;
+          return;
+        }
+      }
+      ts.forEachChild(n, check);
+    }
+    check(expr);
+    return found;
+  }
+
+  function walk(node: ts.Node): void {
+    if (ts.isCallExpression(node)) {
+      const expectInfo = parseExpectCall(node);
+      if (expectInfo) {
+        const isStrong =
+          STRONG_MATCHERS.has(expectInfo.matcher) ||
+          (WEAK_MATCHERS.has(expectInfo.matcher) && expectInfo.isNegated);
+        if (isStrong) {
+          outcomeAssertions++;
+        } else if (
+          expectInfo.matcher === "ok" &&
+          node.arguments.length > 0 &&
+          hasValueComparison(node.arguments[0]!)
+        ) {
+          outcomeAssertions++;
+        }
+      } else if (
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "assert" &&
+        node.arguments.length > 0 &&
+        hasValueComparison(node.arguments[0]!)
+      ) {
+        outcomeAssertions++;
+      }
+    }
+    ts.forEachChild(node, walk);
+  }
+
+  walk(sf);
+  return outcomeAssertions;
+}
+
