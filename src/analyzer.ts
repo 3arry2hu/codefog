@@ -195,7 +195,6 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     sarifPath: options.sarifPath,
     knipPath: options.knipPath,
     libyearPath: options.libyearPath,
-    externalReportPath: options.externalReportPath,
   });
 
   let totalLinesFound = 0;

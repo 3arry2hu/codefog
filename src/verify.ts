@@ -38,7 +38,6 @@ export interface VerifyOptions {
   expectationsPath?: string;
   defectsPath?: string;
   runDocs?: boolean;
-  checkExternalLinks?: boolean;
 }
 
 export interface VerifyResult {
@@ -581,7 +580,6 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
     analyzeDocClaims({
       rootDir,
       runDocs: options.runDocs,
-      checkExternalLinks: options.checkExternalLinks,
       extraDocFiles: [relTarget],
     }),
   ]);

@@ -388,7 +388,6 @@ export interface LoadExternalOverlayInput {
   sarifPath?: string | string[];
   knipPath?: string | string[];
   libyearPath?: string | string[];
-  externalReportPath?: string | string[];
 }
 
 export async function loadExternalOverlay(
@@ -398,13 +397,11 @@ export async function loadExternalOverlay(
   const sarifPaths = toPathList(input.sarifPath);
   const knipPaths = toPathList(input.knipPath);
   const libyearPaths = toPathList(input.libyearPath);
-  const externalPaths = toPathList(input.externalReportPath);
 
   if (
     sarifPaths.length === 0 &&
     knipPaths.length === 0 &&
-    libyearPaths.length === 0 &&
-    externalPaths.length === 0
+    libyearPaths.length === 0
   ) {
     return undefined;
   }
@@ -428,24 +425,6 @@ export async function loadExternalOverlay(
     const abs = path.resolve(rootDir, p);
     const content = await fs.readFile(abs, "utf8");
     libyear = mergeLibyearSummaries(libyear, parseLibyearContent(content));
-  }
-
-  for (const p of externalPaths) {
-    const abs = path.resolve(rootDir, p);
-    const content = await fs.readFile(abs, "utf8");
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    if (Array.isArray(parsed.runs)) {
-      issues.push(...parseSarifContent(content, rootDir));
-    } else if (
-      Array.isArray(parsed) ||
-      "totalLibyears" in parsed ||
-      "dependencies" in parsed ||
-      "packages" in parsed
-    ) {
-      libyear = mergeLibyearSummaries(libyear, parseLibyearContent(content));
-    } else {
-      issues.push(...parseKnipContent(content, rootDir));
-    }
   }
 
   return {

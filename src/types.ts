@@ -305,5 +305,4 @@ export interface AnalyzeOptions {
   sarifPath?: string | string[];
   knipPath?: string | string[];
   libyearPath?: string | string[];
-  externalReportPath?: string | string[];
 }
