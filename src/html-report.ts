@@ -501,7 +501,15 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       <div class="kpi-card">
         <div class="kpi-label">Pseudo-tested Methods</div>
         <div class="kpi-val">${report.summary.metrics.pseudoTestedMethods}</div>
-      </div>
+      </div>${
+        report.libyear
+          ? `
+      <div class="kpi-card">
+        <div class="kpi-label">Dependency Drift (libyear)</div>
+        <div class="kpi-val">${report.libyear.totalLibyears}</div>
+      </div>`
+          : ""
+      }
     </section>
 
     <!-- Level 1: Repository Overview -->
@@ -511,6 +519,14 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       <div class="panel" style="margin-bottom:16px;display:flex;gap:24px;align-items:center">
         <div><strong>Trust Score:</strong> ${report.summary.trustScore}/100</div>
         <div><strong>Doc Trust Score:</strong> ${report.summary.docTrustScore}/100</div>
+      </div>`
+        : ""
+    }${
+      report.libyear
+        ? `
+      <div class="panel" style="margin-bottom:16px">
+        <h2>Dependency Drift (libyear) <span>${report.libyear.totalLibyears} libyears</span></h2>
+        <div style="font-size:12px;color:#475569">${report.libyear.dependencies.map((d) => `<code>${escapeHtmlServer(d.name)}</code>: ${d.libyears} libyears`).join(" · ")}</div>
       </div>`
         : ""
     }
