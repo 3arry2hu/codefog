@@ -3,6 +3,56 @@ import * as path from "node:path";
 
 export type SupportedLanguageId = "ts" | "go" | "rust" | "java";
 
+export const REPO_IGNORED_DIRS: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".git",
+  "vendor",
+  "dist",
+  "coverage",
+  ".codefog",
+  "target",
+  "build",
+  ".idea",
+  ".vscode",
+  ".gradle",
+]);
+
+export function isIgnoredRepoDir(dirName: string): boolean {
+  return REPO_IGNORED_DIRS.has(dirName);
+}
+
+export function isIgnoredRepoRelPath(relPath: string): boolean {
+  return relPath
+    .replace(/\\/g, "/")
+    .split("/")
+    .some((seg) => REPO_IGNORED_DIRS.has(seg));
+}
+
+export async function walkRepoFiles(
+  dirAbs: string,
+  rootDir: string,
+  onFile: (relPath: string, entryName: string, fullPath: string) => void | Promise<void>,
+): Promise<void> {
+  let entries;
+  try {
+    entries = await fs.readdir(dirAbs, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (isIgnoredRepoDir(entry.name)) {
+      continue;
+    }
+    const fullPath = path.join(dirAbs, entry.name);
+    if (entry.isDirectory()) {
+      await walkRepoFiles(fullPath, rootDir, onFile);
+    } else if (entry.isFile()) {
+      const relPath = path.relative(rootDir, fullPath).replace(/\\/g, "/");
+      await onFile(relPath, entry.name, fullPath);
+    }
+  }
+}
+
 export interface PolyglotFunctionSpan {
   name: string;
   receiverType?: string;
@@ -365,35 +415,11 @@ export async function findFilesByExtensionInRepo(
   ext: string,
   out: string[] = [],
 ): Promise<string[]> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (
-      entry.name === "node_modules" ||
-      entry.name === ".git" ||
-      entry.name === "vendor" ||
-      entry.name === "target" ||
-      entry.name === "build" ||
-      entry.name === "dist" ||
-      entry.name === "coverage" ||
-      entry.name === ".codefog" ||
-      entry.name === ".idea" ||
-      entry.name === ".vscode" ||
-      entry.name === ".gradle"
-    ) {
-      continue;
+  await walkRepoFiles(dir, rootDir, (relPath, entryName) => {
+    if (entryName.endsWith(ext)) {
+      out.push(relPath);
     }
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await findFilesByExtensionInRepo(full, rootDir, ext, out);
-    } else if (entry.name.endsWith(ext)) {
-      out.push(path.relative(rootDir, full).replace(/\\/g, "/"));
-    }
-  }
+  });
   return out;
 }
 

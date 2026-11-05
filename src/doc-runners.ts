@@ -67,39 +67,16 @@ async function collectTsJsSourceFiles(
   rootDir: string,
   out: string[] = [],
 ): Promise<string[]> {
-  let entries;
-  try {
-    entries = await fs.readdir(dirAbs, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
+  await walkRepoFiles(dirAbs, rootDir, (rel, entryName) => {
     if (
-      entry.name === "node_modules" ||
-      entry.name === ".git" ||
-      entry.name === "vendor" ||
-      entry.name === "dist" ||
-      entry.name === "coverage" ||
-      entry.name === ".codefog" ||
-      entry.name === "target" ||
-      entry.name === "build"
-    ) {
-      continue;
-    }
-    const full = path.join(dirAbs, entry.name);
-    const rel = toPosix(path.relative(rootDir, full));
-    if (entry.isDirectory()) {
-      await collectTsJsSourceFiles(full, rootDir, out);
-    } else if (
-      entry.isFile() &&
-      /\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(entry.name) &&
-      !entry.name.endsWith(".d.ts") &&
-      !/\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(entry.name) &&
+      /\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(entryName) &&
+      !entryName.endsWith(".d.ts") &&
+      !/\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(entryName) &&
       !/(?:^|\/)tests?\//.test(rel)
     ) {
       out.push(rel);
     }
-  }
+  });
   return out;
 }
 
@@ -432,6 +409,8 @@ import * as fsSync from "node:fs";
 import {
   countGoOutcomeAssertions,
   findFilesByExtensionInRepo,
+  isIgnoredRepoDir,
+  walkRepoFiles,
 } from "./polyglot.js";
 
 async function findExecutableInDirs(
@@ -960,16 +939,8 @@ async function discoverJavaClasspaths(rootDir: string): Promise<string[]> {
     for (const entry of entries) {
       if (
         !entry.isDirectory() ||
-        entry.name === ".git" ||
-        entry.name === "node_modules" ||
-        entry.name === ".codefog" ||
-        entry.name === "dist" ||
-        entry.name === "coverage" ||
-        entry.name === "vendor" ||
-        entry.name === ".gradle" ||
-        entry.name === ".idea" ||
-        entry.name === ".vscode" ||
-        entry.name === "src"
+        entry.name === "src" ||
+        (isIgnoredRepoDir(entry.name) && entry.name !== "target" && entry.name !== "build")
       ) {
         continue;
       }

@@ -5,6 +5,7 @@ import {
   POLYGLOT_LANGUAGE_ADAPTERS,
   isPolyglotSourceFile,
   isPolyglotTestFile,
+  walkRepoFiles,
 } from "./polyglot.js";
 
 export interface FunctionAstEvidence {
@@ -74,20 +75,6 @@ const STRONG_MATCHERS = new Set([
 
 const TEST_BLOCK_CALLEES = new Set(["it", "test"]);
 
-  const IGNORED_DIRS = new Set([
-    "node_modules",
-    ".git",
-    "vendor",
-    "dist",
-    "coverage",
-    ".codefog",
-    "target",
-    "build",
-    ".idea",
-    ".vscode",
-    ".gradle",
-  ]);
-
 function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
 }
@@ -112,28 +99,13 @@ async function scanRepoFiles(
   rootDir: string,
   out: { testFiles: string[]; sourceFiles: string[] } = { testFiles: [], sourceFiles: [] },
 ): Promise<{ testFiles: string[]; sourceFiles: string[] }> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (IGNORED_DIRS.has(entry.name)) {
-      continue;
+  await walkRepoFiles(dir, rootDir, (relEntryPath) => {
+    if (isTestFileName(relEntryPath)) {
+      out.testFiles.push(relEntryPath);
+    } else if (isSourceFileName(relEntryPath)) {
+      out.sourceFiles.push(relEntryPath);
     }
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await scanRepoFiles(fullPath, rootDir, out);
-    } else {
-      const relEntryPath = toPosix(path.relative(rootDir, fullPath));
-      if (isTestFileName(relEntryPath)) {
-        out.testFiles.push(relEntryPath);
-      } else if (isSourceFileName(relEntryPath)) {
-        out.sourceFiles.push(relEntryPath);
-      }
-    }
-  }
+  });
   return out;
 }
 

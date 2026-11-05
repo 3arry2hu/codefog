@@ -10,9 +10,11 @@ import {
 } from "./git-freshness.js";
 import {
   getPolyglotAdapter,
+  isIgnoredRepoRelPath,
   isPolyglotSourceFile,
   isPolyglotTestFile,
   stripCommentsAndMaskStrings,
+  walkRepoFiles,
 } from "./polyglot.js";
 import {
   computeRiskScore,
@@ -96,33 +98,11 @@ async function collectFilesUnderDir(
   predicate: (relPath: string, entryName: string) => boolean,
   out: Set<string>,
 ): Promise<void> {
-  let entries;
-  try {
-    entries = await fs.readdir(dirAbs, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (
-      entry.name === "node_modules" ||
-      entry.name === ".git" ||
-      entry.name === "vendor" ||
-      entry.name === "dist" ||
-      entry.name === "coverage" ||
-      entry.name === ".codefog" ||
-      entry.name === "target" ||
-      entry.name === "build"
-    ) {
-      continue;
+  await walkRepoFiles(dirAbs, rootDir, (relPath, entryName) => {
+    if (predicate(relPath, entryName)) {
+      out.add(relPath);
     }
-    const full = path.join(dirAbs, entry.name);
-    const rel = toPosix(path.relative(rootDir, full));
-    if (entry.isDirectory()) {
-      await collectFilesUnderDir(full, rootDir, predicate, out);
-    } else if (entry.isFile() && predicate(rel, entry.name)) {
-      out.add(rel);
-    }
-  }
+  });
 }
 
 export async function discoverDocFiles(rootDir: string): Promise<string[]> {
@@ -1433,20 +1413,7 @@ export async function analyzeDocClaims(options: {
         const byFile = new Map<string, RepoSymbol[]>();
 
         const sortedFiles = Array.from(tracked)
-          .filter((rel) => {
-            if (!isRepoSourceFile(rel)) return false;
-            const segs = rel.split("/");
-            return !segs.some(
-              (s) =>
-                s === "node_modules" ||
-                s === "vendor" ||
-                s === "dist" ||
-                s === "coverage" ||
-                s === ".codefog" ||
-                s === "target" ||
-                s === "build",
-            );
-          })
+          .filter((rel) => isRepoSourceFile(rel) && !isIgnoredRepoRelPath(rel))
           .sort((a, b) => a.localeCompare(b));
 
         for (const relPath of sortedFiles) {
