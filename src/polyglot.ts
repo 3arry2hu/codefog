@@ -2507,6 +2507,10 @@ export const rustLanguageAdapter: LanguageAdapter = {
   },
   extractInlineTestBlockFingerprints: (src) => {
     const map = new Map<string, string>();
+    const rawBlockFp = extractRustInlineTestFingerprint(src);
+    if (rawBlockFp) {
+      map.set("__inline_test_blocks__", rawBlockFp);
+    }
     for (const f of parseAllRustFunctions(src)) {
       if (f.isTest) {
         map.set(f.name, f.runtimeFingerprint);
