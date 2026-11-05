@@ -516,7 +516,467 @@ export const tsJsDocCodeBlockRunner: DocCodeBlockRunner = {
 // Go Doc Code Block Runner Slot (#26)
 // ============================================================================
 
-// Ticket #26 adds `goDocCodeBlockRunner` (`id: "go"`, `languages: ["go"]`) here.
+import {
+  countGoOutcomeAssertions,
+  findFilesByExtensionInRepo,
+} from "./polyglot.js";
+
+const GO_STDLIB_BY_QUALIFIER: ReadonlyMap<string, string> = new Map([
+  ["fmt", "fmt"],
+  ["reflect", "reflect"],
+  ["errors", "errors"],
+  ["strings", "strings"],
+  ["bytes", "bytes"],
+  ["slices", "slices"],
+  ["maps", "maps"],
+  ["os", "os"],
+  ["io", "io"],
+  ["log", "log"],
+  ["strconv", "strconv"],
+  ["math", "math"],
+  ["time", "time"],
+  ["sort", "sort"],
+  ["context", "context"],
+  ["regexp", "regexp"],
+  ["sync", "sync"],
+  ["filepath", "path/filepath"],
+  ["json", "encoding/json"],
+  ["http", "net/http"],
+  ["utf8", "unicode/utf8"],
+]);
+
+interface GoRepoPackageMeta {
+  pkgName: string;
+  importPath: string;
+  relDir: string;
+  exportedSymbols: Set<string>;
+}
+
+function extractGoExportedNames(sourceText: string): Set<string> {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const exported = new Set<string>();
+
+  // Top-level functions (not methods with receivers)
+  const funcRe = /^[ \t]*func[ \t]+([A-Z][A-Za-z0-9_]*)[ \t]*[\[/(]/gm;
+  let m: RegExpExecArray | null;
+  while ((m = funcRe.exec(masked)) !== null) {
+    if (m[1]) exported.add(m[1]);
+  }
+
+  // Exported types
+  const typeRe = /^[ \t]*type[ \t]+([A-Z][A-Za-z0-9_]*)\b/gm;
+  while ((m = typeRe.exec(noComments)) !== null) {
+    if (m[1]) exported.add(m[1]);
+  }
+
+  // Exported single-line var/const
+  const varConstRe = /^[ \t]*(?:var|const)[ \t]+([A-Z][A-Za-z0-9_]*)\b/gm;
+  while ((m = varConstRe.exec(noComments)) !== null) {
+    if (m[1]) exported.add(m[1]);
+  }
+
+  return exported;
+}
+
+function renameMainFuncInGoSource(sourceText: string): string {
+  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  const mainRe = /^([ \t]*func[ \t]+)main([ \t]*\(\s*\))/gm;
+  const m = mainRe.exec(masked);
+  if (!m) return sourceText;
+  const prefixLen = m[1]!.length;
+  const nameStart = m.index + prefixLen;
+  const nameEnd = nameStart + 4;
+  return (
+    sourceText.slice(0, nameStart) + "_codefogOrigMain" + sourceText.slice(nameEnd)
+  );
+}
+
+function wrapGoDocCodeBlock(
+  rawCode: string,
+  repoPackagesByName: Map<string, GoRepoPackageMeta>,
+  repoPackagesList: GoRepoPackageMeta[],
+): string {
+  const { noComments, masked } = stripCommentsAndMaskStrings(rawCode);
+
+  const spansToRemove: Array<{ start: number; end: number }> = [];
+  const explicitImports: Array<{ alias?: string; path: string; rawSpec: string }> = [];
+
+  // 1. Strip existing `package <name>` declaration if present
+  const pkgMatch = /^[ \t]*package[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:;|\r?\n|$)/m.exec(
+    noComments,
+  );
+  if (pkgMatch) {
+    spansToRemove.push({
+      start: pkgMatch.index,
+      end: pkgMatch.index + pkgMatch[0].length,
+    });
+  }
+
+  // 2. Extract parenthesized `import ( ... )` blocks
+  const importBlockRe = /^[ \t]*import[ \t]*\(/gm;
+  let ibm: RegExpExecArray | null;
+  while ((ibm = importBlockRe.exec(masked)) !== null) {
+    const openParenIdx = masked.indexOf("(", ibm.index);
+    if (openParenIdx === -1) continue;
+    const closeParenIdx = findMatchingDelimiter(masked, openParenIdx, "(", ")");
+    if (closeParenIdx === -1) continue;
+    spansToRemove.push({ start: ibm.index, end: closeParenIdx + 1 });
+
+    const blockInner = noComments.slice(openParenIdx + 1, closeParenIdx);
+    const specRe = /^[ \t]*(?:([A-Za-z_.]\w*)[ \t]+)?"([^"]+)"/gm;
+    let sm: RegExpExecArray | null;
+    while ((sm = specRe.exec(blockInner)) !== null) {
+      const alias = sm[1];
+      const impPath = sm[2]!;
+      explicitImports.push({
+        alias,
+        path: impPath,
+        rawSpec: alias ? `${alias} "${impPath}"` : `"${impPath}"`,
+      });
+    }
+    importBlockRe.lastIndex = closeParenIdx + 1;
+  }
+
+  function isInsideRemovedSpan(idx: number): boolean {
+    return spansToRemove.some((s) => idx >= s.start && idx < s.end);
+  }
+
+  // 3. Extract single-line `import [alias] "path"` statements
+  const singleImportRe = /^[ \t]*import[ \t]+(?:([A-Za-z_.]\w*)[ \t]+)?"([^"]+)"[^\n]*/gm;
+  let sim: RegExpExecArray | null;
+  while ((sim = singleImportRe.exec(noComments)) !== null) {
+    if (isInsideRemovedSpan(sim.index)) continue;
+    spansToRemove.push({ start: sim.index, end: sim.index + sim[0].length });
+    const alias = sim[1];
+    const impPath = sim[2]!;
+    explicitImports.push({
+      alias,
+      path: impPath,
+      rawSpec: alias ? `${alias} "${impPath}"` : `"${impPath}"`,
+    });
+  }
+
+  // Reconstruct body with package and import declarations removed
+  const sortedSpans = [...spansToRemove].sort((a, b) => a.start - b.start);
+  let remainingBody = "";
+  let cursor = 0;
+  for (const s of sortedSpans) {
+    if (s.start > cursor) {
+      remainingBody += rawCode.slice(cursor, s.start);
+    }
+    cursor = Math.max(cursor, s.end);
+  }
+  remainingBody += rawCode.slice(cursor);
+
+  const { noComments: bodyNoComments, masked: bodyMasked } =
+    stripCommentsAndMaskStrings(remainingBody);
+
+  // Track already-imported package qualifiers and import paths
+  const importedQualifiers = new Set<string>();
+  const importedPaths = new Set<string>();
+  const finalImportSpecs: string[] = [];
+
+  for (const imp of explicitImports) {
+    importedPaths.add(imp.path);
+    finalImportSpecs.push(imp.rawSpec);
+    if (imp.alias && imp.alias !== "." && imp.alias !== "_") {
+      importedQualifiers.add(imp.alias);
+    } else if (!imp.alias) {
+      const segs = imp.path.split("/");
+      const lastSeg = segs[segs.length - 1];
+      if (lastSeg) importedQualifiers.add(lastSeg);
+      for (const pkg of repoPackagesList) {
+        if (pkg.importPath === imp.path) {
+          importedQualifiers.add(pkg.pkgName);
+        }
+      }
+    }
+  }
+
+  // Detect local variables declared in the snippet so we don't confuse them with package names
+  const declaredVars = new Set<string>();
+  const shortDeclRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*)*\s*:=/g;
+  let dm: RegExpExecArray | null;
+  while ((dm = shortDeclRe.exec(bodyMasked)) !== null) {
+    const lhs = dm[0].replace(/:=$/, "");
+    for (const part of lhs.split(",")) {
+      const v = part.trim();
+      if (v) declaredVars.add(v);
+    }
+  }
+  const varDeclRe = /\b(?:var|const)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  while ((dm = varDeclRe.exec(bodyMasked)) !== null) {
+    if (dm[1]) declaredVars.add(dm[1]);
+  }
+
+  // 4. Auto-import qualified references `<pkg>.<ExportedIdent>`
+  const qualifiedRefRe = /\b([a-z][A-Za-z0-9_]*)\s*\.\s*[A-Z][A-Za-z0-9_]*\b/g;
+  let qm: RegExpExecArray | null;
+  while ((qm = qualifiedRefRe.exec(bodyMasked)) !== null) {
+    const qual = qm[1]!;
+    if (importedQualifiers.has(qual) || declaredVars.has(qual)) continue;
+    const repoPkg = repoPackagesByName.get(qual);
+    if (repoPkg && !importedPaths.has(repoPkg.importPath)) {
+      importedQualifiers.add(qual);
+      importedPaths.add(repoPkg.importPath);
+      finalImportSpecs.push(
+        repoPkg.pkgName === qual
+          ? `"${repoPkg.importPath}"`
+          : `${qual} "${repoPkg.importPath}"`,
+      );
+      continue;
+    }
+    const stdPath = GO_STDLIB_BY_QUALIFIER.get(qual);
+    if (stdPath && !importedPaths.has(stdPath)) {
+      importedQualifiers.add(qual);
+      importedPaths.add(stdPath);
+      finalImportSpecs.push(`"${stdPath}"`);
+    }
+  }
+
+  // 5. Auto dot-import local repo package if its exported symbol is called bare without qualifier
+  for (const pkg of repoPackagesList) {
+    if (importedPaths.has(pkg.importPath) || importedQualifiers.has(pkg.pkgName)) {
+      continue;
+    }
+    let usesExportedSymbolBare = false;
+    for (const sym of pkg.exportedSymbols) {
+      if (declaredVars.has(sym)) continue;
+      const bareSymRe = new RegExp(`(?<!\\.)\\b${sym}\\b`);
+      if (bareSymRe.test(bodyMasked)) {
+        usesExportedSymbolBare = true;
+        break;
+      }
+    }
+    if (usesExportedSymbolBare) {
+      importedPaths.add(pkg.importPath);
+      finalImportSpecs.push(`. "${pkg.importPath}"`);
+    }
+  }
+
+  // 6. Check if `func main(` already exists; if not, separate any top-level named funcs and wrap statements in `func main()`
+  const hasMainFunc = /\bfunc[ \t]+main[ \t]*\(/.test(bodyMasked);
+  let assembledMainSection: string;
+
+  if (hasMainFunc) {
+    assembledMainSection = remainingBody.trim();
+  } else {
+    const topFuncs: string[] = [];
+    const funcSpans: Array<{ start: number; end: number }> = [];
+    const topFuncRe = /^[ \t]*func[ \t]+(?:\([^)]+\)[ \t]*)?[A-Za-z_][A-Za-z0-9_]*[ \t]*(?:\[[^\]]+\][ \t]*)?\(/gm;
+    let tfm: RegExpExecArray | null;
+    while ((tfm = topFuncRe.exec(bodyMasked)) !== null) {
+      const openParen = bodyMasked.indexOf("(", tfm.index + 4);
+      if (openParen === -1) continue;
+      const closeParen = findMatchingDelimiter(bodyMasked, openParen, "(", ")");
+      if (closeParen === -1) continue;
+      const openBrace = bodyMasked.indexOf("{", closeParen + 1);
+      if (openBrace === -1) continue;
+      const closeBrace = findMatchingDelimiter(bodyMasked, openBrace, "{", "}");
+      if (closeBrace === -1) continue;
+      funcSpans.push({ start: tfm.index, end: closeBrace + 1 });
+      topFuncs.push(remainingBody.slice(tfm.index, closeBrace + 1));
+      topFuncRe.lastIndex = closeBrace + 1;
+    }
+
+    let stmtBody = "";
+    let fCursor = 0;
+    for (const fsSpan of funcSpans) {
+      if (fsSpan.start > fCursor) {
+        stmtBody += remainingBody.slice(fCursor, fsSpan.start);
+      }
+      fCursor = Math.max(fCursor, fsSpan.end);
+    }
+    stmtBody += remainingBody.slice(fCursor);
+
+    assembledMainSection = [
+      ...topFuncs,
+      `func main() {\n${stmtBody.trim()}\n}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  const importSection =
+    finalImportSpecs.length > 0
+      ? `import (\n${finalImportSpecs.map((s) => `\t${s}`).join("\n")}\n)\n\n`
+      : "";
+
+  return `package main\n\n${importSection}${assembledMainSection}\n`;
+}
+
+function summarizeGoExecutionFailure(rawOutput: string): string {
+  const lines = rawOutput
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => Boolean(l) && !l.startsWith("# "));
+  if (lines.length === 0) {
+    return "Go code block execution failed with non-zero exit code.";
+  }
+  const priorityLine = lines.find((l) =>
+    /(?:undefined:|cannot use|not enough arguments|too many arguments|syntax error:|panic:|fatal error:|no required module|imported and not used)/i.test(
+      l,
+    ),
+  );
+  const summary = priorityLine
+    ? lines.slice(lines.indexOf(priorityLine), lines.indexOf(priorityLine) + 3).join(" | ")
+    : lines.slice(0, 3).join(" | ");
+  return summary.slice(0, 300);
+}
+
+async function resolveGoBinary(): Promise<string> {
+  try {
+    await fs.access("/usr/local/go/bin/go");
+    return "/usr/local/go/bin/go";
+  } catch {
+    return "go";
+  }
+}
+
+export const goDocCodeBlockRunner: DocCodeBlockRunner = {
+  id: "go",
+  languages: ["go"],
+  detectOutcomeAssertions: (code) => countGoOutcomeAssertions(code),
+  runCodeBlock: async (ctx) => {
+    const assertionsOnOutcome = countGoOutcomeAssertions(ctx.code);
+    const timeoutMs = ctx.timeoutMs ?? 15000;
+    const execDir = await fs.mkdtemp(path.join(os.tmpdir(), "codefog-rundocs-go-"));
+
+    try {
+      let goModContent = "";
+      let modulePath = "codefog.local/docrun";
+      try {
+        goModContent = await fs.readFile(path.join(ctx.rootDir, "go.mod"), "utf8");
+        const m = /^\s*module\s+(\S+)/m.exec(goModContent);
+        if (m?.[1]) {
+          modulePath = m[1];
+        }
+      } catch {
+        goModContent = `module ${modulePath}\n\ngo 1.22\n`;
+      }
+
+      await fs.writeFile(path.join(execDir, "go.mod"), goModContent, "utf8");
+
+      try {
+        const goSum = await fs.readFile(path.join(ctx.rootDir, "go.sum"), "utf8");
+        await fs.writeFile(path.join(execDir, "go.sum"), goSum, "utf8");
+      } catch {
+        // optional
+      }
+
+      try {
+        const rootVendor = path.join(ctx.rootDir, "vendor");
+        await fs.access(rootVendor);
+        await fs.symlink(rootVendor, path.join(execDir, "vendor"), "dir");
+      } catch {
+        // optional
+      }
+
+      const allGoFiles = await findFilesByExtensionInRepo(ctx.rootDir, ctx.rootDir, ".go");
+      const prodGoFiles = allGoFiles.filter(
+        (f) => !f.endsWith("_test.go") && !f.endsWith(".pb.go") && !f.endsWith("_gen.go"),
+      );
+
+      const repoPackagesByDir = new Map<string, GoRepoPackageMeta>();
+      const repoPackagesByName = new Map<string, GoRepoPackageMeta>();
+      const rootMainFiles: Array<{ name: string; content: string }> = [];
+
+      for (const rel of prodGoFiles) {
+        const srcText = await fs.readFile(path.join(ctx.rootDir, rel), "utf8");
+        const destPath = path.join(execDir, rel);
+        await fs.mkdir(path.dirname(destPath), { recursive: true });
+        await fs.writeFile(destPath, srcText, "utf8");
+
+        const { noComments } = stripCommentsAndMaskStrings(srcText);
+        const pkgMatch = /^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)\b/m.exec(noComments);
+        const pkgName = pkgMatch?.[1] ?? "main";
+        const relDir = toPosix(path.dirname(rel));
+
+        if (pkgName === "main") {
+          if (relDir === ".") {
+            rootMainFiles.push({
+              name: path.basename(rel),
+              content: renameMainFuncInGoSource(srcText),
+            });
+          }
+          continue;
+        }
+
+        const importPath = relDir === "." ? modulePath : `${modulePath}/${relDir}`;
+        let meta = repoPackagesByDir.get(relDir);
+        if (!meta) {
+          meta = {
+            pkgName,
+            importPath,
+            relDir,
+            exportedSymbols: new Set<string>(),
+          };
+          repoPackagesByDir.set(relDir, meta);
+          repoPackagesByName.set(pkgName, meta);
+          if (relDir !== ".") {
+            const dirBase = path.posix.basename(relDir);
+            if (!repoPackagesByName.has(dirBase)) {
+              repoPackagesByName.set(dirBase, meta);
+            }
+          }
+        }
+        for (const sym of extractGoExportedNames(srcText)) {
+          meta.exportedSymbols.add(sym);
+        }
+      }
+
+      const runnerDir = path.join(execDir, "codefog_doc_runner");
+      await fs.mkdir(runnerDir, { recursive: true });
+
+      for (const rf of rootMainFiles) {
+        await fs.writeFile(path.join(runnerDir, `root_${rf.name}`), rf.content, "utf8");
+      }
+
+      const wrappedGoCode = wrapGoDocCodeBlock(
+        ctx.code,
+        repoPackagesByName,
+        Array.from(repoPackagesByDir.values()),
+      );
+      await fs.writeFile(path.join(runnerDir, "main.go"), wrappedGoCode, "utf8");
+
+      const goBin = await resolveGoBinary();
+      const envPath = process.env.PATH
+        ? `/usr/local/go/bin:${process.env.PATH}`
+        : "/usr/local/go/bin:/usr/bin:/bin";
+
+      await execFileAsync(goBin, ["run", "./codefog_doc_runner"], {
+        cwd: execDir,
+        timeout: timeoutMs,
+        env: {
+          ...process.env,
+          PATH: envPath,
+          GOPROXY: "off",
+          GOTOOLCHAIN: "local",
+        },
+      });
+
+      return {
+        passed: true,
+        assertionsOnOutcome,
+      };
+    } catch (err: any) {
+      const stderr = typeof err?.stderr === "string" ? err.stderr : "";
+      const stdout = typeof err?.stdout === "string" ? err.stdout : "";
+      const message = typeof err?.message === "string" ? err.message : String(err);
+      const killed = Boolean(err?.killed) || err?.signal === "SIGTERM";
+      const rawOut = killed
+        ? `Execution timed out after ${timeoutMs}ms. ${stderr || stdout || message}`
+        : stderr || stdout || message;
+      return {
+        passed: false,
+        assertionsOnOutcome,
+        executionOutput: summarizeGoExecutionFailure(rawOut),
+      };
+    } finally {
+      await fs.rm(execDir, { recursive: true, force: true });
+    }
+  },
+};
 
 // ============================================================================
 // Rust Doc Code Block Runner Slot (#27)
@@ -1283,6 +1743,7 @@ export const javaDocCodeBlockRunner: DocCodeBlockRunner = {
 
 export const DOC_CODE_BLOCK_RUNNERS: DocCodeBlockRunner[] = [
   tsJsDocCodeBlockRunner,
+  goDocCodeBlockRunner,
   rustDocCodeBlockRunner,
   javaDocCodeBlockRunner,
 ];

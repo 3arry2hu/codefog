@@ -783,8 +783,11 @@ export async function analyzeGoFilesAstEvidence(
         const calleeName = am[3]!;
         const callArgs = am[4] ?? "";
 
-        // Handle `diff := cmp.Diff(want, got)` where `got` is a value variable
-        if (pkgAlias === "cmp" && calleeName === "Diff") {
+        // Handle `diff := cmp.Diff(want, got)` or `eq := reflect.DeepEqual(got, want)` where `got` is a value variable
+        if (
+          (pkgAlias === "cmp" && (calleeName === "Diff" || calleeName === "Equal")) ||
+          (pkgAlias === "reflect" && calleeName === "DeepEqual")
+        ) {
           const lhsVars = lhsRaw.split(",").map((s) => s.trim()).filter(Boolean);
           const diffVar = lhsVars[0];
           if (diffVar && diffVar !== "_") {
@@ -853,18 +856,10 @@ export async function analyzeGoFilesAstEvidence(
         }
       }
 
-      // 3. Scan `if <cond> { ... t.Error/t.Fatal/t.Fail ... }`
-      const ifFailRe =
-        /\bif\s+([^{]+)\{[^}]*\b(?:t\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow))\b/gs;
-      let im: RegExpExecArray | null;
-      while ((im = ifFailRe.exec(bodyText)) !== null) {
-        const rawCond = im[1]!;
-        const semiIdx = rawCond.indexOf(";");
-        const condExpr = semiIdx !== -1 ? rawCond.slice(semiIdx + 1) : rawCond;
-
+      // 3. Scan `if <cond> { ... t.Error/t.Fatal/t.Fail/panic ... }`
+      for (const { initPart, condExpr } of extractGoFailureBranchConditions(bodyText)) {
         let inlineVars: Set<string> | null = null;
-        if (semiIdx !== -1) {
-          const initPart = rawCond.slice(0, semiIdx);
+        if (initPart) {
           const initAssignMatch = /^([A-Za-z0-9_, \t]+?)\s*(?::=|=)/.exec(initPart.trim());
           if (initAssignMatch?.[1]) {
             inlineVars = new Set(
@@ -976,6 +971,161 @@ export async function analyzeGoFilesAstEvidence(
     evidenceEntries: Array.from(evidenceMap.values()),
     callGraphEdges,
   };
+}
+
+const GO_FAILURE_BRANCH_RE =
+  /\b(?:panic\s*\(|t\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\b|log\.(?:Fatal|Fatalf|Panic|Panicf)\b|os\.Exit\s*\(\s*[1-9])/;
+
+const GO_EQUALITY_CALL_RE =
+  /\b(?:reflect\.DeepEqual|cmp\.(?:Diff|Equal)|bytes\.Equal|slices\.Equal|maps\.Equal|strings\.EqualFold|errors\.(?:Is|As))\s*\(/;
+
+const GO_TESTIFY_OUTCOME_RE =
+  /\b(?:assert|require)\.(?:Equal|EqualValues|Exactly|ElementsMatch|True|False|NoError|Error|ErrorIs|Zero)\s*\(([^)]+)\)/g;
+
+function extractGoFailureBranchConditions(
+  sourceText: string,
+): Array<{ initPart: string; condExpr: string; initMasked: string; condMasked: string }> {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const results: Array<{
+    initPart: string;
+    condExpr: string;
+    initMasked: string;
+    condMasked: string;
+  }> = [];
+  const ifRe = /\bif\b/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = ifRe.exec(masked)) !== null) {
+    const condStart = match.index + match[0].length;
+    let parenDepth = 0;
+    let openBraceIdx = -1;
+    let closeBraceIdx = -1;
+
+    for (let i = condStart; i < masked.length; i++) {
+      const ch = masked[i];
+      if (ch === "(") {
+        parenDepth++;
+      } else if (ch === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+      } else if (ch === "{" && parenDepth === 0) {
+        const closeIdx = findMatchingDelimiter(masked, i, "{", "}");
+        if (closeIdx === -1) break;
+        let k = closeIdx + 1;
+        while (k < masked.length && (masked[k] === " " || masked[k] === "\t")) {
+          k++;
+        }
+        const nextCh = masked[k];
+        if (
+          nextCh === "{" ||
+          nextCh === "=" ||
+          nextCh === "!" ||
+          nextCh === "<" ||
+          nextCh === ">" ||
+          nextCh === "&" ||
+          nextCh === "|"
+        ) {
+          i = closeIdx;
+          continue;
+        }
+        openBraceIdx = i;
+        closeBraceIdx = closeIdx;
+        break;
+      }
+    }
+
+    if (openBraceIdx === -1 || closeBraceIdx === -1) continue;
+
+    const headerRaw = noComments.slice(condStart, openBraceIdx);
+    const headerMasked = masked.slice(condStart, openBraceIdx);
+    const bodyMasked = masked.slice(openBraceIdx + 1, closeBraceIdx);
+    if (GO_FAILURE_BRANCH_RE.test(bodyMasked)) {
+      let splitSemi = -1;
+      let pDepth = 0;
+      let bDepth = 0;
+      for (let i = 0; i < headerMasked.length; i++) {
+        const c = headerMasked[i];
+        if (c === "(") pDepth++;
+        else if (c === ")") pDepth = Math.max(0, pDepth - 1);
+        else if (c === "{") bDepth++;
+        else if (c === "}") bDepth = Math.max(0, bDepth - 1);
+        else if (c === ";" && pDepth === 0 && bDepth === 0) {
+          splitSemi = i;
+          break;
+        }
+      }
+      const initPart = splitSemi !== -1 ? headerRaw.slice(0, splitSemi).trim() : "";
+      const condExpr = (splitSemi !== -1 ? headerRaw.slice(splitSemi + 1) : headerRaw).trim();
+      const initMasked = splitSemi !== -1 ? headerMasked.slice(0, splitSemi).trim() : "";
+      const condMasked = (
+        splitSemi !== -1 ? headerMasked.slice(splitSemi + 1) : headerMasked
+      ).trim();
+      results.push({ initPart, condExpr, initMasked, condMasked });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Counts Go Outcome Assertions in a standalone code snippet or test body,
+ * reusing the Go adapter's value-comparison / `reflect.DeepEqual` / `cmp.Diff` / `testify`
+ * rules and excluding `fmt.Println` or pure `err != nil` checks.
+ */
+export function countGoOutcomeAssertions(sourceText: string): number {
+  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  let count = 0;
+
+  const equalityVars = new Set<string>();
+  const eqAssignRe =
+    /([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*(?:reflect\.DeepEqual|cmp\.(?:Diff|Equal)|bytes\.Equal|slices\.Equal|maps\.Equal|strings\.EqualFold|errors\.(?:Is|As))\s*\(/g;
+  let em: RegExpExecArray | null;
+  while ((em = eqAssignRe.exec(masked)) !== null) {
+    if (em[1] && em[1] !== "_") {
+      equalityVars.add(em[1]);
+    }
+  }
+
+  for (const { initMasked, condMasked } of extractGoFailureBranchConditions(sourceText)) {
+    if (!condMasked) continue;
+
+    if (GO_EQUALITY_CALL_RE.test(condMasked) || GO_EQUALITY_CALL_RE.test(initMasked)) {
+      count++;
+      continue;
+    }
+
+    let usesEqualityVar = false;
+    for (const eqVar of equalityVars) {
+      if (new RegExp(`\\b${eqVar}\\b`).test(condMasked)) {
+        usesEqualityVar = true;
+        break;
+      }
+    }
+    if (usesEqualityVar) {
+      count++;
+      continue;
+    }
+
+    const strippedNil = condMasked
+      .replace(/\b[A-Za-z_][A-Za-z0-9_.]*\s*[!=]=\s*nil\b/g, "")
+      .replace(/\bnil\s*[!=]=\s*[A-Za-z_][A-Za-z0-9_.]*\b/g, "")
+      .replace(/&&|\|\||\s+/g, "");
+
+    if (strippedNil.length === 0) {
+      continue;
+    }
+
+    if (/(?:==|!=|<=|>=|<|>|!)/.test(strippedNil)) {
+      count++;
+    }
+  }
+
+  GO_TESTIFY_OUTCOME_RE.lastIndex = 0;
+  let tm: RegExpExecArray | null;
+  while ((tm = GO_TESTIFY_OUTCOME_RE.exec(masked)) !== null) {
+    count++;
+  }
+
+  return count;
 }
 
 // ============================================================================
