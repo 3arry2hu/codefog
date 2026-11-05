@@ -1,7 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import ts from "typescript";
-import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
+import {
+  createGitTimelineSession,
+  extractRuntimeFunctionFingerprints,
+  type GitTimelineSession,
+  type RepoCommitInfo,
+} from "./git-freshness.js";
 import {
   getPolyglotAdapter,
   isPolyglotSourceFile,
@@ -1238,11 +1243,12 @@ export async function analyzeDocClaims(options: {
   runDocs?: boolean;
 }): Promise<DocAnalysisResult> {
   const rootDir = path.resolve(options.rootDir);
-  const [docFiles, symbolIndex, gitignoreMatchers, pkgInfo] = await Promise.all([
+  const [docFiles, symbolIndex, gitignoreMatchers, pkgInfo, gitSession] = await Promise.all([
     discoverDocFiles(rootDir),
     buildRepoSymbolIndex(rootDir),
     loadGitignoreMatchers(rootDir),
     loadPackageManifestInfo(rootDir),
+    createGitTimelineSession(rootDir),
   ]);
   const parsedDocs: ParsedDocFile[] = [];
   const parsedDocsByPath = new Map<string, ParsedDocFile>();
@@ -1256,6 +1262,266 @@ export async function analyzeDocClaims(options: {
     } catch {
       // skip unreadable file
     }
+  }
+
+  const parsedDocAtCommitCache = new Map<string, Promise<ParsedDocFile | null>>();
+  const symbolsAtCommitCache = new Map<string, Promise<RepoSymbol[]>>();
+  const symbolIndexAtCommitCache = new Map<string, Promise<RepoSymbolIndex>>();
+  const pkgScriptsAtCommitCache = new Map<string, Promise<Map<string, string>>>();
+
+  function getParsedDocAtCommit(sha: string, relPath: string): Promise<ParsedDocFile | null> {
+    const key = `${sha}:${relPath}`;
+    let p = parsedDocAtCommitCache.get(key);
+    if (!p) {
+      p = (async () => {
+        const text = await gitSession.getFileTextAtCommit(sha, relPath);
+        if (text === null) return null;
+        return parseMarkdownDoc(relPath, text);
+      })();
+      parsedDocAtCommitCache.set(key, p);
+    }
+    return p;
+  }
+
+  function getFileSymbolsAtCommit(sha: string, relPath: string): Promise<RepoSymbol[]> {
+    const key = `${sha}:${relPath}`;
+    let p = symbolsAtCommitCache.get(key);
+    if (!p) {
+      p = (async () => {
+        const text = await gitSession.getFileTextAtCommit(sha, relPath);
+        if (text === null) return [];
+        return extractSymbolsFromSource(text, relPath);
+      })();
+      symbolsAtCommitCache.set(key, p);
+    }
+    return p;
+  }
+
+  function getPackageScriptsAtCommit(sha: string): Promise<Map<string, string>> {
+    let p = pkgScriptsAtCommitCache.get(sha);
+    if (!p) {
+      p = (async () => {
+        const scripts = new Map<string, string>();
+        const raw = await gitSession.getFileTextAtCommit(sha, "package.json");
+        if (!raw) return scripts;
+        try {
+          const parsed = JSON.parse(raw) as { scripts?: Record<string, string> };
+          if (parsed.scripts && typeof parsed.scripts === "object") {
+            for (const [k, v] of Object.entries(parsed.scripts)) {
+              if (typeof v === "string") {
+                scripts.set(k, v);
+              }
+            }
+          }
+        } catch {
+          // ignore malformed package.json
+        }
+        return scripts;
+      })();
+      pkgScriptsAtCommitCache.set(sha, p);
+    }
+    return p;
+  }
+
+  async function findScriptLastChangeCommit(
+    scriptName: string,
+    currentDef: string,
+  ): Promise<RepoCommitInfo | null> {
+    if (!gitSession.isGitRepo) return null;
+    const pkgCommits = await gitSession.getFileCommits("package.json");
+    if (pkgCommits.length === 0) {
+      return {
+        sha: "WORKTREE",
+        shortSha: gitSession.commits[0]?.shortSha ?? "0000000",
+        isoDate: new Date().toISOString(),
+        index: -1,
+      };
+    }
+
+    const headScripts = await getPackageScriptsAtCommit(pkgCommits[0]!.sha);
+    if (headScripts.get(scriptName) !== currentDef) {
+      return {
+        sha: "WORKTREE",
+        shortSha: gitSession.commits[0]?.shortSha ?? "0000000",
+        isoDate: new Date().toISOString(),
+        index: -1,
+      };
+    }
+
+    for (let i = 0; i < pkgCommits.length; i++) {
+      const cur = pkgCommits[i]!;
+      const next = pkgCommits[i + 1];
+      if (!next) return cur;
+      const nextScripts = await getPackageScriptsAtCommit(next.sha);
+      if (nextScripts.get(scriptName) !== currentDef) {
+        return cur;
+      }
+    }
+
+    return pkgCommits[pkgCommits.length - 1]!;
+  }
+
+  async function findFileLatestCommit(relPath: string): Promise<RepoCommitInfo | null> {
+    if (!gitSession.isGitRepo) return null;
+    const commits = await gitSession.getFileCommits(relPath);
+    return commits[0] ?? null;
+  }
+
+  function getSymbolIndexAtCommit(sha: string): Promise<RepoSymbolIndex> {
+    let p = symbolIndexAtCommitCache.get(sha);
+    if (!p) {
+      p = (async () => {
+        const tracked = await gitSession.listTrackedFilesAtCommit(sha);
+        const byName = new Map<string, RepoSymbol[]>();
+        const byQualifiedName = new Map<string, RepoSymbol[]>();
+        const byFile = new Map<string, RepoSymbol[]>();
+
+        const sortedFiles = Array.from(tracked)
+          .filter((rel) => {
+            if (!isRepoSourceFile(rel)) return false;
+            const segs = rel.split("/");
+            return !segs.some(
+              (s) =>
+                s === "node_modules" ||
+                s === "vendor" ||
+                s === "dist" ||
+                s === "coverage" ||
+                s === ".codefog" ||
+                s === "target" ||
+                s === "build",
+            );
+          })
+          .sort((a, b) => a.localeCompare(b));
+
+        for (const relPath of sortedFiles) {
+          const fileSyms = await getFileSymbolsAtCommit(sha, relPath);
+          byFile.set(relPath, fileSyms);
+          for (const sym of fileSyms) {
+            const list = byName.get(sym.name) ?? [];
+            list.push(sym);
+            byName.set(sym.name, list);
+            if (sym.qualifiedName) {
+              const qList = byQualifiedName.get(sym.qualifiedName) ?? [];
+              qList.push(sym);
+              byQualifiedName.set(sym.qualifiedName, qList);
+            }
+          }
+        }
+
+        return { byName, byQualifiedName, byFile };
+      })();
+      symbolIndexAtCommitCache.set(sha, p);
+    }
+    return p;
+  }
+
+  async function findSymbolRemovalCommit(sym: RepoSymbol): Promise<RepoCommitInfo | null> {
+    if (!gitSession.isGitRepo) return null;
+    const fileCommits = await gitSession.getFileCommits(sym.file);
+    if (fileCommits.length === 0) return gitSession.commits[0] ?? null;
+
+    const matchSym = (list: RepoSymbol[]): RepoSymbol | undefined =>
+      sym.qualifiedName
+        ? list.find((s) => s.qualifiedName === sym.qualifiedName) ??
+          list.find((s) => s.name === sym.name)
+        : list.find((s) => s.name === sym.name);
+
+    for (let i = 0; i < fileCommits.length; i++) {
+      const cur = fileCommits[i]!;
+      const next = fileCommits[i + 1];
+      if (!next) return cur;
+      const nextSyms = await getFileSymbolsAtCommit(next.sha, sym.file);
+      if (matchSym(nextSyms)) {
+        return cur;
+      }
+    }
+    return fileCommits[0]!;
+  }
+
+  async function findBlockLastSubstantiveCommit(
+    docFile: string,
+    block: DocBlock,
+  ): Promise<RepoCommitInfo | null> {
+    if (!gitSession.isGitRepo) return null;
+    const docCommits = await gitSession.getFileCommits(docFile);
+    if (docCommits.length === 0) {
+      return {
+        sha: "WORKTREE",
+        shortSha: gitSession.commits[0]?.shortSha ?? "0000000",
+        isoDate: new Date().toISOString(),
+        index: -1,
+      };
+    }
+
+    const headDoc = await getParsedDocAtCommit(docCommits[0]!.sha, docFile);
+    const hasNormalized = (parsed: ParsedDocFile | null): boolean =>
+      Boolean(parsed?.blocks.some((b) => b.normalizedText === block.normalizedText));
+
+    if (!hasNormalized(headDoc)) {
+      return {
+        sha: "WORKTREE",
+        shortSha: gitSession.commits[0]?.shortSha ?? "0000000",
+        isoDate: new Date().toISOString(),
+        index: -1,
+      };
+    }
+
+    for (let i = 0; i < docCommits.length; i++) {
+      const cur = docCommits[i]!;
+      const next = docCommits[i + 1];
+      if (!next) return cur;
+      const nextDoc = await getParsedDocAtCommit(next.sha, docFile);
+      if (!hasNormalized(nextDoc)) {
+        return cur;
+      }
+    }
+
+    return docCommits[docCommits.length - 1]!;
+  }
+
+  async function findSymbolLastRuntimeChangeCommit(
+    sym: RepoSymbol,
+  ): Promise<RepoCommitInfo | null> {
+    if (!gitSession.isGitRepo) return null;
+    const fileCommits = await gitSession.getFileCommits(sym.file);
+    if (fileCommits.length === 0) {
+      return {
+        sha: "WORKTREE",
+        shortSha: gitSession.commits[0]?.shortSha ?? "0000000",
+        isoDate: new Date().toISOString(),
+        index: -1,
+      };
+    }
+
+    const matchSym = (list: RepoSymbol[]): RepoSymbol | undefined =>
+      sym.qualifiedName
+        ? list.find((s) => s.qualifiedName === sym.qualifiedName) ??
+          list.find((s) => s.name === sym.name)
+        : list.find((s) => s.name === sym.name);
+
+    const headSyms = await getFileSymbolsAtCommit(fileCommits[0]!.sha, sym.file);
+    const symAtHead = matchSym(headSyms);
+    if (!symAtHead || symAtHead.runtimeFingerprint !== sym.runtimeFingerprint) {
+      return {
+        sha: "WORKTREE",
+        shortSha: gitSession.commits[0]?.shortSha ?? "0000000",
+        isoDate: new Date().toISOString(),
+        index: -1,
+      };
+    }
+
+    for (let i = 0; i < fileCommits.length; i++) {
+      const cur = fileCommits[i]!;
+      const next = fileCommits[i + 1];
+      if (!next) return cur;
+      const nextSyms = await getFileSymbolsAtCommit(next.sha, sym.file);
+      const symAtNext = matchSym(nextSyms);
+      if (!symAtNext || symAtNext.runtimeFingerprint !== sym.runtimeFingerprint) {
+        return cur;
+      }
+    }
+
+    return fileCommits[fileCommits.length - 1]!;
   }
 
   const docClaims: DocClaim[] = [];
@@ -1280,6 +1546,7 @@ export async function analyzeDocClaims(options: {
         continue;
       }
 
+      const blockCommit = await findBlockLastSubstantiveCommit(doc.file, block);
       const blockLines = doc.lines.slice(block.startLine - 1, block.endLine);
       for (let lineIdx = 0; lineIdx < blockLines.length; lineIdx++) {
         const rawLine = blockLines[lineIdx]!;
@@ -1326,6 +1593,7 @@ export async function analyzeDocClaims(options: {
             const anchorSlug = rawHref.slice(1).toLowerCase();
             const heading = doc.headings.find((h) => h.slug === anchorSlug);
             const resolved = Boolean(heading);
+            const fileCommit = resolved ? await findFileLatestCommit(doc.file) : null;
             const referent: DocReferent | undefined = heading
               ? {
                   kind: "anchor",
@@ -1333,8 +1601,25 @@ export async function analyzeDocClaims(options: {
                   anchor: anchorSlug,
                   startLine: heading.line,
                   endLine: heading.line,
+                  ...(fileCommit
+                    ? {
+                        lastModifiedCommit: fileCommit.shortSha,
+                        lastModifiedAt: fileCommit.isoDate,
+                      }
+                    : {}),
                 }
               : undefined;
+            let existedAtClaimCommit: boolean | undefined;
+            if (!resolved && gitSession.isGitRepo && blockCommit) {
+              const lookupSha =
+                blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
+              if (lookupSha) {
+                const histDoc = await getParsedDocAtCommit(lookupSha, doc.file);
+                existedAtClaimCommit = Boolean(
+                  histDoc?.headings.some((h) => h.slug === anchorSlug),
+                );
+              }
+            }
             docClaims.push({
               id: createDeterministicFindingId(doc.file, `${lineNum}:${rawHref}`),
               file: doc.file,
@@ -1350,6 +1635,7 @@ export async function analyzeDocClaims(options: {
               state: resolved ? "verified" : "fog-returned",
               referents: referent ? [referent] : [],
               ...(referent ? { referent } : {}),
+              ...(existedAtClaimCommit !== undefined ? { existedAtClaimCommit } : {}),
             });
             continue;
           }
@@ -1404,14 +1690,51 @@ export async function analyzeDocClaims(options: {
           }
 
           const state: EvidenceState = exists && anchorValid ? "verified" : "fog-returned";
+          const fileCommit = await findFileLatestCommit(resolvedRel);
+          let existedAtClaimCommit: boolean | undefined;
+          if (state === "fog-returned" && gitSession.isGitRepo && blockCommit) {
+            const lookupSha =
+              blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
+            if (lookupSha) {
+              const trackedAtCommit = await gitSession.listTrackedFilesAtCommit(lookupSha);
+              if (!trackedAtCommit.has(resolvedRel)) {
+                existedAtClaimCommit = false;
+              } else if (anchorPart && resolvedRel.toLowerCase().endsWith(".md")) {
+                const histDoc = await getParsedDocAtCommit(lookupSha, resolvedRel);
+                existedAtClaimCommit = Boolean(
+                  histDoc?.headings.some((h) => h.slug === anchorPart.toLowerCase()),
+                );
+              } else {
+                existedAtClaimCommit = true;
+              }
+            }
+          }
           const referent: DocReferent | undefined =
             exists && anchorValid
               ? {
                   kind: "file",
                   file: resolvedRel,
                   ...(anchorPart ? { anchor: anchorPart.toLowerCase() } : {}),
+                  ...(fileCommit
+                    ? {
+                        lastModifiedCommit: fileCommit.shortSha,
+                        lastModifiedAt: fileCommit.isoDate,
+                      }
+                    : {}),
                 }
-              : undefined;
+              : existedAtClaimCommit
+                ? {
+                    kind: "file",
+                    file: resolvedRel,
+                    ...(anchorPart ? { anchor: anchorPart.toLowerCase() } : {}),
+                    ...(fileCommit
+                      ? {
+                          lastModifiedCommit: fileCommit.shortSha,
+                          lastModifiedAt: fileCommit.isoDate,
+                        }
+                      : {}),
+                  }
+                : undefined;
           docClaims.push({
             id: createDeterministicFindingId(doc.file, `${lineNum}:${rawHref}`),
             file: doc.file,
@@ -1427,6 +1750,7 @@ export async function analyzeDocClaims(options: {
             state,
             referents: referent ? [referent] : [],
             ...(referent ? { referent } : {}),
+            ...(existedAtClaimCommit !== undefined ? { existedAtClaimCommit } : {}),
           });
         }
 
@@ -1445,6 +1769,68 @@ export async function analyzeDocClaims(options: {
             isInstructionFile(doc.file),
           );
           if (cmdClaim) {
+            let cmdState = cmdClaim.state;
+            let cmdReferent = cmdClaim.referent;
+            let existedAtClaimCommit: boolean | undefined;
+
+            if (
+              cmdReferent?.kind === "script" &&
+              cmdReferent.script &&
+              cmdReferent.scriptDefinition !== undefined
+            ) {
+              const scriptCommit = await findScriptLastChangeCommit(
+                cmdReferent.script,
+                cmdReferent.scriptDefinition,
+              );
+              if (scriptCommit) {
+                cmdReferent = {
+                  ...cmdReferent,
+                  lastModifiedCommit: scriptCommit.shortSha,
+                  lastModifiedAt: scriptCommit.isoDate,
+                };
+              }
+              if (blockCommit && scriptCommit && scriptCommit.index < blockCommit.index) {
+                cmdState = "fog-returned";
+                existedAtClaimCommit = true;
+              }
+            } else if (cmdReferent?.file) {
+              const refCommit = await findFileLatestCommit(cmdReferent.file);
+              if (refCommit) {
+                cmdReferent = {
+                  ...cmdReferent,
+                  lastModifiedCommit: refCommit.shortSha,
+                  lastModifiedAt: refCommit.isoDate,
+                };
+              }
+            } else if (cmdState === "fog-returned" && gitSession.isGitRepo && blockCommit) {
+              const lookupSha =
+                blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
+              if (lookupSha) {
+                const firstSeg = cmdClaim.target.split(/\s*(?:&&|\|\||;)\s*/)[0] ?? cmdClaim.target;
+                const pmRunM =
+                  /^(?:npm|pnpm|yarn|bun)\s+run(?:-script)?\s+([A-Za-z0-9_:.-]+)/.exec(firstSeg);
+                const pmAliasM =
+                  /^(?:npm|pnpm|yarn|bun)\s+(test|t|tst|start|stop|restart)\b/.exec(firstSeg);
+                const nodeFileM =
+                  /^(?:npx\s+)?(?:node|tsx|ts-node)\s+(?:-[A-Za-z0-9-=]+\s+)*([^\s-][^\s]*)/.exec(
+                    firstSeg,
+                  );
+                if (pmRunM?.[1] || pmAliasM?.[1]) {
+                  const sName =
+                    pmRunM?.[1] ??
+                    (pmAliasM![1] === "t" || pmAliasM![1] === "tst" ? "test" : pmAliasM![1]!);
+                  const histScripts = await getPackageScriptsAtCommit(lookupSha);
+                  existedAtClaimCommit = histScripts.has(sName);
+                } else if (nodeFileM?.[1]) {
+                  const fArg = nodeFileM[1].replace(/^\.\//, "");
+                  const tracked = await gitSession.listTrackedFilesAtCommit(lookupSha);
+                  existedAtClaimCommit = tracked.has(fArg);
+                } else {
+                  existedAtClaimCommit = false;
+                }
+              }
+            }
+
             docClaims.push({
               id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
               file: doc.file,
@@ -1457,10 +1843,11 @@ export async function analyzeDocClaims(options: {
               blockKind: block.kind,
               blockStartLine: block.startLine,
               blockEndLine: block.endLine,
-              state: cmdClaim.state,
-              referents: cmdClaim.referent ? [cmdClaim.referent] : [],
-              ...(cmdClaim.referent ? { referent: cmdClaim.referent } : {}),
+              state: cmdState,
+              referents: cmdReferent ? [cmdReferent] : [],
+              ...(cmdReferent ? { referent: cmdReferent } : {}),
               ...(cmdClaim.commandIntent ? { commandIntent: cmdClaim.commandIntent } : {}),
+              ...(existedAtClaimCommit !== undefined ? { existedAtClaimCommit } : {}),
             });
             continue;
           }
@@ -1472,6 +1859,7 @@ export async function analyzeDocClaims(options: {
           ) {
             const anchorSlug = code.slice(1).toLowerCase();
             const heading = doc.headings.find((h) => h.slug === anchorSlug);
+            const fileCommit = heading ? await findFileLatestCommit(doc.file) : null;
             const referent: DocReferent | undefined = heading
               ? {
                   kind: "anchor",
@@ -1479,8 +1867,25 @@ export async function analyzeDocClaims(options: {
                   anchor: anchorSlug,
                   startLine: heading.line,
                   endLine: heading.line,
+                  ...(fileCommit
+                    ? {
+                        lastModifiedCommit: fileCommit.shortSha,
+                        lastModifiedAt: fileCommit.isoDate,
+                      }
+                    : {}),
                 }
               : undefined;
+            let existedAtClaimCommit: boolean | undefined;
+            if (!heading && gitSession.isGitRepo && blockCommit) {
+              const lookupSha =
+                blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
+              if (lookupSha) {
+                const histDoc = await getParsedDocAtCommit(lookupSha, doc.file);
+                existedAtClaimCommit = Boolean(
+                  histDoc?.headings.some((h) => h.slug === anchorSlug),
+                );
+              }
+            }
             docClaims.push({
               id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
               file: doc.file,
@@ -1496,6 +1901,7 @@ export async function analyzeDocClaims(options: {
               state: heading ? "verified" : "fog-returned",
               referents: referent ? [referent] : [],
               ...(referent ? { referent } : {}),
+              ...(existedAtClaimCommit !== undefined ? { existedAtClaimCommit } : {}),
             });
             continue;
           }
@@ -1528,9 +1934,39 @@ export async function analyzeDocClaims(options: {
             }
 
             const exists = await pathExists(path.join(rootDir, cleanPath));
+            const fileCommit = await findFileLatestCommit(cleanPath);
+            let existedAtClaimCommit: boolean | undefined;
+            if (!exists && gitSession.isGitRepo && blockCommit) {
+              const lookupSha =
+                blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
+              if (lookupSha) {
+                const trackedAtCommit = await gitSession.listTrackedFilesAtCommit(lookupSha);
+                existedAtClaimCommit = trackedAtCommit.has(cleanPath);
+              }
+            }
             const referent: DocReferent | undefined = exists
-              ? { kind: "file", file: cleanPath }
-              : undefined;
+              ? {
+                  kind: "file",
+                  file: cleanPath,
+                  ...(fileCommit
+                    ? {
+                        lastModifiedCommit: fileCommit.shortSha,
+                        lastModifiedAt: fileCommit.isoDate,
+                      }
+                    : {}),
+                }
+              : existedAtClaimCommit
+                ? {
+                    kind: "file",
+                    file: cleanPath,
+                    ...(fileCommit
+                      ? {
+                          lastModifiedCommit: fileCommit.shortSha,
+                          lastModifiedAt: fileCommit.isoDate,
+                        }
+                      : {}),
+                  }
+                : undefined;
             docClaims.push({
               id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
               file: doc.file,
@@ -1546,6 +1982,7 @@ export async function analyzeDocClaims(options: {
               state: exists ? "verified" : "fog-returned",
               referents: referent ? [referent] : [],
               ...(referent ? { referent } : {}),
+              ...(existedAtClaimCommit !== undefined ? { existedAtClaimCommit } : {}),
             });
             continue;
           }
@@ -1556,14 +1993,32 @@ export async function analyzeDocClaims(options: {
             const matchedSymbols = resolveSymbolInIndex(symCandidate, symbolIndex);
             if (matchedSymbols.length > 0) {
               const targetName = symCandidate.qualifiedName ?? symCandidate.bareName ?? code;
-              const referents: DocReferent[] = matchedSymbols.map((s) => ({
-                kind: "symbol",
-                file: s.file,
-                symbol: s.name,
-                startLine: s.startLine,
-                endLine: s.endLine,
-                runtimeFingerprint: s.runtimeFingerprint,
-              }));
+              const referents: DocReferent[] = [];
+              let staleReferent: DocReferent | undefined;
+
+              for (const s of matchedSymbols) {
+                const symCommit = await findSymbolLastRuntimeChangeCommit(s);
+                const ref: DocReferent = {
+                  kind: "symbol",
+                  file: s.file,
+                  symbol: s.name,
+                  startLine: s.startLine,
+                  endLine: s.endLine,
+                  runtimeFingerprint: s.runtimeFingerprint,
+                  ...(symCommit
+                    ? {
+                        lastModifiedCommit: symCommit.shortSha,
+                        lastModifiedAt: symCommit.isoDate,
+                      }
+                    : {}),
+                };
+                referents.push(ref);
+                if (blockCommit && symCommit && symCommit.index < blockCommit.index && !staleReferent) {
+                  staleReferent = ref;
+                }
+              }
+
+              const symState: EvidenceState = staleReferent ? "fog-returned" : "weak-evidence";
               docClaims.push({
                 id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
                 file: doc.file,
@@ -1576,10 +2031,56 @@ export async function analyzeDocClaims(options: {
                 blockKind: block.kind,
                 blockStartLine: block.startLine,
                 blockEndLine: block.endLine,
-                state: "weak-evidence",
+                state: symState,
                 referents,
-                referent: referents[0],
+                referent: staleReferent ?? referents[0],
+                ...(gitSession.isGitRepo ? { existedAtClaimCommit: true } : {}),
               });
+            } else if (gitSession.isGitRepo && blockCommit) {
+              const lookupSha =
+                blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
+              if (lookupSha) {
+                const histIndex = await getSymbolIndexAtCommit(lookupSha);
+                const histMatches = resolveSymbolInIndex(symCandidate, histIndex);
+                if (histMatches.length > 0) {
+                  const targetName = symCandidate.qualifiedName ?? symCandidate.bareName ?? code;
+                  const referents: DocReferent[] = [];
+                  for (const hs of histMatches) {
+                    const removalCommit = await findSymbolRemovalCommit(hs);
+                    referents.push({
+                      kind: "symbol",
+                      file: hs.file,
+                      symbol: hs.name,
+                      startLine: hs.startLine,
+                      endLine: hs.endLine,
+                      runtimeFingerprint: hs.runtimeFingerprint,
+                      ...(removalCommit
+                        ? {
+                            lastModifiedCommit: removalCommit.shortSha,
+                            lastModifiedAt: removalCommit.isoDate,
+                          }
+                        : {}),
+                    });
+                  }
+                  docClaims.push({
+                    id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
+                    file: doc.file,
+                    kind: "symbol",
+                    text: targetName,
+                    rawText: code,
+                    target: targetName,
+                    startLine: lineNum,
+                    endLine: lineNum,
+                    blockKind: block.kind,
+                    blockStartLine: block.startLine,
+                    blockEndLine: block.endLine,
+                    state: "fog-returned",
+                    referents,
+                    referent: referents[0],
+                    existedAtClaimCommit: true,
+                  });
+                }
+              }
             }
           }
         }
@@ -1700,6 +2201,12 @@ export async function analyzeDocClaims(options: {
   for (const claim of docClaims) {
     docClaimsByState[claim.state]++;
     if (claim.state === "fog-returned") {
+      const existedNote =
+        claim.existedAtClaimCommit === true
+          ? " (声明最后修改时引用对象存在 / referent existed at claim commit)"
+          : claim.existedAtClaimCommit === false
+            ? " (声明最后修改时引用对象不存在 / referent did not exist at claim commit)"
+            : "";
       docFindings.push({
         id: claim.id,
         title: claim.text,
@@ -1720,8 +2227,8 @@ export async function analyzeDocClaims(options: {
           endLine: claim.endLine,
         },
         reason: claim.executionOutput
-          ? `Doc claim '${claim.text}' (${claim.kind}) in ${claim.file}:${claim.startLine}-${claim.endLine} failed execution (Fog Returned): ${claim.executionOutput}`
-          : `Doc claim '${claim.text}' (${claim.kind}) in ${claim.file}:${claim.startLine} could not be resolved (Fog Returned).`,
+          ? `Doc claim '${claim.text}' (${claim.kind}) in ${claim.file}:${claim.startLine}-${claim.endLine} failed execution (Fog Returned): ${claim.executionOutput}${existedNote}`
+          : `Doc claim '${claim.text}' (${claim.kind}) in ${claim.file}:${claim.startLine} is outdated or could not be resolved (Fog Returned)${existedNote}.`,
         evidence: {
           executedByTests: 0,
           assertionsOnOutcome: 0,
