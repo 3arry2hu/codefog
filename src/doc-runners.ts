@@ -522,7 +522,327 @@ export const tsJsDocCodeBlockRunner: DocCodeBlockRunner = {
 // Rust Doc Code Block Runner Slot (#27)
 // ============================================================================
 
-// Ticket #27 adds `rustDocCodeBlockRunner` (`id: "rust"`, `languages: ["rust"]`) here.
+import { createHash } from "node:crypto";
+import * as fsSync from "node:fs";
+import { countRustOutcomeAssertions, hasRustMainFunction } from "./polyglot.js";
+
+interface RustCargoManifestMeta {
+  packageName: string;
+  libName: string;
+  edition: string;
+  libPath: string;
+}
+
+const rustWorkspaceLocks = new Map<string, Promise<void>>();
+const rustWorkDirsToClean = new Set<string>();
+let rustExitCleanupRegistered = false;
+
+function registerRustWorkDirCleanup(dir: string): void {
+  rustWorkDirsToClean.add(dir);
+  if (rustExitCleanupRegistered) return;
+  rustExitCleanupRegistered = true;
+  process.once("exit", () => {
+    for (const d of rustWorkDirsToClean) {
+      try {
+        fsSync.rmSync(d, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup errors on exit
+      }
+    }
+  });
+}
+
+async function withRustWorkspaceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = rustWorkspaceLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  rustWorkspaceLocks.set(
+    key,
+    prev.then(() => next),
+  );
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+async function resolveCargoBinary(): Promise<string> {
+  const preferred = "/root/.cargo/bin/cargo";
+  try {
+    await fs.access(preferred);
+    return preferred;
+  } catch {
+    return "cargo";
+  }
+}
+
+async function parseRustCargoManifest(rootDir: string): Promise<RustCargoManifestMeta> {
+  let packageName = "rust_crate";
+  let libName: string | undefined;
+  let edition = "2021";
+  let libPath = "src/lib.rs";
+
+  try {
+    const raw = await fs.readFile(path.join(rootDir, "Cargo.toml"), "utf8");
+    let currentSection = "";
+    for (const rawLine of raw.split(/\r?\n/)) {
+      const line = rawLine.replace(/#.*$/, "").trim();
+      if (!line) continue;
+      const secMatch = /^\[([^\]]+)\]$/.exec(line);
+      if (secMatch) {
+        currentSection = secMatch[1]!.trim();
+        continue;
+      }
+      const kvMatch = /^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/.exec(line);
+      if (!kvMatch) continue;
+      const [, key, val] = kvMatch;
+      if (currentSection === "package") {
+        if (key === "name" && val) packageName = val;
+        if (key === "edition" && val) edition = val;
+      } else if (currentSection === "lib") {
+        if (key === "name" && val) libName = val;
+        if (key === "path" && val) libPath = val;
+      }
+    }
+  } catch {
+    // Fallback defaults when Cargo.toml is absent
+  }
+
+  const resolvedLibName = (libName ?? packageName).replace(/[^A-Za-z0-9_]/g, "_");
+  return {
+    packageName,
+    libName: resolvedLibName,
+    edition,
+    libPath,
+  };
+}
+
+function wrapRustDocCodeBlock(
+  rawCode: string,
+  libName: string,
+  pubModules: string[],
+): string {
+  // Un-hide rustdoc `# ` setup lines while preserving `#[...]` and `#![...]` attributes
+  const unhiddenLines = rawCode.split(/\r?\n/).map((line) => {
+    const m = /^(\s*)#(?:\s+(.*)|$)/.exec(line);
+    if (m) {
+      return `${m[1] ?? ""}${m[2] ?? ""}`;
+    }
+    return line;
+  });
+
+  const innerAttrs: string[] = [];
+  const bodyLines: string[] = [];
+  for (const line of unhiddenLines) {
+    if (/^\s*#!\[/.test(line)) {
+      innerAttrs.push(line);
+    } else {
+      bodyLines.push(line);
+    }
+  }
+
+  const bodyCode = bodyLines.join("\n");
+  const modImports = pubModules.map(
+    (modName) => `#[allow(unused_imports)]\nuse ${libName}::${modName}::*;`,
+  );
+
+  const prelude = [
+    "#![allow(unused_imports, dead_code, unused_variables, unused_mut, unused_must_use)]",
+    ...innerAttrs,
+    `extern crate ${libName};`,
+    `#[allow(unused_imports)]`,
+    `pub use ${libName}::*;`,
+    ...modImports,
+  ].join("\n");
+
+  if (hasRustMainFunction(bodyCode)) {
+    return `${prelude}\n${bodyCode}\n`;
+  }
+
+  return [
+    prelude,
+    "fn main() {",
+    "    let _ = {",
+    bodyCode,
+    "    };",
+    "}",
+    "",
+  ].join("\n");
+}
+
+function summarizeRustExecutionFailure(rawOutput: string): string {
+  const lines = rawOutput
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return "Rust code block execution failed with non-zero exit code.";
+  }
+  const priorityIdx = lines.findIndex((l) =>
+    /(?:^error(?:\[E\d+\])?:|panicked at|assertion .* failed)/i.test(l),
+  );
+  const summary =
+    priorityIdx >= 0
+      ? lines.slice(priorityIdx, priorityIdx + 4).join(" | ")
+      : lines.slice(0, 3).join(" | ");
+  return summary.slice(0, 300);
+}
+
+export const rustDocCodeBlockRunner: DocCodeBlockRunner = {
+  id: "rust",
+  languages: ["rust"],
+  detectOutcomeAssertions: (code) => countRustOutcomeAssertions(code),
+  runCodeBlock: async (ctx) => {
+    const assertionsOnOutcome = countRustOutcomeAssertions(ctx.code);
+    const timeoutMs = ctx.timeoutMs ?? 20000;
+    const rootAbs = path.resolve(ctx.rootDir);
+    const rootHash = createHash("sha1").update(rootAbs).digest("hex").slice(0, 12);
+    const workDir = path.join(os.tmpdir(), `codefog-rundocs-rust-${rootHash}`);
+    registerRustWorkDirCleanup(workDir);
+
+    return withRustWorkspaceLock(rootHash, async () => {
+      try {
+        const cargoBin = await resolveCargoBinary();
+        const manifest = await parseRustCargoManifest(rootAbs);
+        const targetDir = path.join(workDir, "target");
+        const runnerDir = path.join(workDir, "runner");
+        await fs.mkdir(path.join(runnerDir, "src"), { recursive: true });
+
+        let depCratePath = rootAbs;
+        const pubModules: string[] = [];
+        const libAbsPath = path.join(rootAbs, manifest.libPath);
+
+        let hasLibRs = false;
+        try {
+          await fs.access(libAbsPath);
+          hasLibRs = true;
+        } catch {
+          hasLibRs = false;
+        }
+
+        if (hasLibRs) {
+          try {
+            const libSrc = await fs.readFile(libAbsPath, "utf8");
+            const modRe = /\bpub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/g;
+            let mm: RegExpExecArray | null;
+            while ((mm = modRe.exec(libSrc)) !== null) {
+              if (mm[1]) pubModules.push(mm[1]);
+            }
+          } catch {
+            // ignore
+          }
+        } else {
+          // Synthesize a library wrapper when the repo has src/*.rs without src/lib.rs
+          const synthDir = path.join(workDir, "synth_lib");
+          await fs.mkdir(path.join(synthDir, "src"), { recursive: true });
+          const synthLibLines: string[] = [];
+          try {
+            const srcDir = path.join(rootAbs, "src");
+            const entries = await fs.readdir(srcDir, { withFileTypes: true });
+            for (const entry of entries) {
+              if (
+                entry.isFile() &&
+                entry.name.endsWith(".rs") &&
+                entry.name !== "lib.rs" &&
+                entry.name !== "main.rs"
+              ) {
+                const stem = entry.name.replace(/\.rs$/, "");
+                const fullRsPath = toPosix(path.join(srcDir, entry.name));
+                synthLibLines.push(`#[path = "${fullRsPath}"]`);
+                synthLibLines.push(`pub mod ${stem};`);
+                synthLibLines.push(`pub use ${stem}::*;`);
+                pubModules.push(stem);
+              }
+            }
+          } catch {
+            // ignore
+          }
+          await fs.writeFile(
+            path.join(synthDir, "Cargo.toml"),
+            [
+              "[package]",
+              `name = "${manifest.packageName}"`,
+              'version = "0.1.0"',
+              `edition = "${manifest.edition}"`,
+              "",
+              "[lib]",
+              `name = "${manifest.libName}"`,
+              'path = "src/lib.rs"',
+            ].join("\n") + "\n",
+            "utf8",
+          );
+          await fs.writeFile(
+            path.join(synthDir, "src", "lib.rs"),
+            synthLibLines.join("\n") + "\n",
+            "utf8",
+          );
+          depCratePath = synthDir;
+        }
+
+        const runnerCargoToml =
+          [
+            "[package]",
+            'name = "__codefog_rust_doc_runner__"',
+            'version = "0.1.0"',
+            `edition = "${manifest.edition}"`,
+            "",
+            "[dependencies]",
+            `${manifest.packageName} = { path = ${JSON.stringify(toPosix(depCratePath))} }`,
+          ].join("\n") + "\n";
+
+        await fs.writeFile(path.join(runnerDir, "Cargo.toml"), runnerCargoToml, "utf8");
+
+        const wrappedMainRs = wrapRustDocCodeBlock(
+          ctx.code,
+          manifest.libName,
+          pubModules,
+        );
+        await fs.writeFile(path.join(runnerDir, "src", "main.rs"), wrappedMainRs, "utf8");
+
+        const cargoPathDir = "/root/.cargo/bin";
+        const currentPath = process.env.PATH ?? "";
+        const envPath = currentPath.includes(cargoPathDir)
+          ? currentPath
+          : `${cargoPathDir}:${currentPath}`;
+
+        await execFileAsync(
+          cargoBin,
+          ["run", "--offline", "--quiet", "--target-dir", targetDir],
+          {
+            cwd: runnerDir,
+            timeout: timeoutMs,
+            env: {
+              ...process.env,
+              PATH: envPath,
+            },
+          },
+        );
+
+        return {
+          passed: true,
+          assertionsOnOutcome,
+        };
+      } catch (err: any) {
+        const stderr = typeof err?.stderr === "string" ? err.stderr : "";
+        const stdout = typeof err?.stdout === "string" ? err.stdout : "";
+        const message = typeof err?.message === "string" ? err.message : String(err);
+        const killed = Boolean(err?.killed) || err?.signal === "SIGTERM";
+        const rawOut = killed
+          ? `Execution timed out after ${timeoutMs}ms. ${stderr || stdout || message}`
+          : stderr || stdout || message;
+        return {
+          passed: false,
+          assertionsOnOutcome,
+          executionOutput: summarizeRustExecutionFailure(rawOut),
+        };
+      }
+    });
+  },
+};
 
 // ============================================================================
 // Java Doc Code Block Runner Slot (#28)
@@ -963,6 +1283,7 @@ export const javaDocCodeBlockRunner: DocCodeBlockRunner = {
 
 export const DOC_CODE_BLOCK_RUNNERS: DocCodeBlockRunner[] = [
   tsJsDocCodeBlockRunner,
+  rustDocCodeBlockRunner,
   javaDocCodeBlockRunner,
 ];
 
