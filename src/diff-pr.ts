@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
 import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
 import { STATE_COLORS, STATE_EVIDENCE_RANK } from "./scoring.js";
+import { detectDeletedDocClaimsAgainstRef } from "./verify.js";
 import type { CodefogReport, DiffComparison, EvidenceState } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -165,6 +166,7 @@ export async function computeDiffComparison(
   }
 
   let newDocFogReturnedClaims = undefined;
+  let deletedDocClaims = undefined;
   if (docsEnabled) {
     const baseReturnedKeys = new Set<string>();
     for (const bc of baseReport.docClaims ?? []) {
@@ -179,6 +181,7 @@ export async function computeDiffComparison(
         !baseReturnedKeys.has(`${c.file}:${c.target}`) &&
         !baseReturnedKeys.has(`${c.file}:${c.rawText}`),
     );
+    deletedDocClaims = await detectDeletedDocClaimsAgainstRef(rootDir, baseRef);
   }
 
   return {
@@ -207,6 +210,9 @@ export async function computeDiffComparison(
     },
     ...(docsEnabled && newDocFogReturnedClaims
       ? { newDocFogReturnedClaims }
+      : {}),
+    ...(docsEnabled && deletedDocClaims && deletedDocClaims.length > 0
+      ? { deletedDocClaims }
       : {}),
   };
 }

@@ -51,10 +51,22 @@ describe("AI Skill generator and multi-agent installer (codex, claude-code, code
       // Contains evaluation, conclusion, iterative optimization loop, and verification gate
       expect(content).toContain("npx @barryzhu/codefog");
       expect(content).toContain("Trust Score");
+      expect(content).toContain("Doc Trust Score");
       expect(content).toContain("fog-returned");
       expect(content).toContain("verify");
       expect(content).toContain("--mutants");
+      // Contains Documentation Synchronization phase after code loop and doc verification gate
+      expect(content).toContain("文档同步");
+      expect(content).toContain("只能修改文档");
+      expect(content).toContain("codefog verify <doc.md>");
     }
+
+    const repoSkillContent = await fs.readFile(
+      path.resolve(process.cwd(), "skills", "codefog", "SKILL.md"),
+      "utf8",
+    );
+    const installedSkillContent = await fs.readFile(expectedPaths[0]!, "utf8");
+    expect(repoSkillContent).toBe(installedSkillContent);
   });
 
   it("supports filtering specific agents (--agent cursor,claude-code) and global installation (--global)", async () => {
