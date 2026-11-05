@@ -419,6 +419,15 @@ async function findHistoricalSiblingSymbols(
   return new Set();
 }
 
+function normalizeFingerprintForRename(fp: string, symbolName: string): string {
+  let normalized = fp;
+  if (normalized.startsWith(`${symbolName}:`)) {
+    normalized = normalized.slice(symbolName.length + 1);
+  }
+  const escaped = symbolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return normalized.replace(new RegExp(`\\b${escaped}\\b`, "g"), "__SELF__");
+}
+
 async function resolveExistingReferentsForClaim(
   claim: DocClaim,
   symbolIndex: RepoSymbolIndex,
@@ -438,7 +447,10 @@ async function resolveExistingReferentsForClaim(
   for (const ref of refs) {
     if (ref.kind === "symbol") {
       const symName = ref.symbol ?? claim.text;
-      const byName = symbolIndex.byName.get(symName) ?? [];
+      const byName =
+        symbolIndex.byQualifiedName.get(symName) ??
+        symbolIndex.byName.get(symName) ??
+        [];
       const inSameFile = ref.file ? byName.filter((s) => s.file === ref.file) : [];
       const matched = inSameFile.length > 0 ? inSameFile : byName;
       if (matched.length > 0) {
@@ -455,15 +467,17 @@ async function resolveExistingReferentsForClaim(
         continue;
       }
 
-      // Check if symbol was renamed in ref.file (or moved with identical runtimeFingerprint)
-      if (ref.file) {
+      // Check if symbol was renamed in ref.file (using runtimeFingerprint identity, never line overlap alone)
+      if (ref.file && ref.runtimeFingerprint) {
         const curFileSyms = symbolIndex.byFile.get(ref.file) ?? [];
         const histSiblings = await findHistoricalSiblingSymbols(gitSession, ref.file, symName);
         const newSymsInFile = curFileSyms.filter((s) => !histSiblings.has(s.name));
+        const targetNormFp = normalizeFingerprintForRename(ref.runtimeFingerprint, symName);
 
-        const fpMatches = ref.runtimeFingerprint
-          ? newSymsInFile.filter((s) => s.runtimeFingerprint === ref.runtimeFingerprint)
-          : [];
+        const fpMatches = newSymsInFile.filter(
+          (s) =>
+            normalizeFingerprintForRename(s.runtimeFingerprint, s.name) === targetNormFp,
+        );
         if (fpMatches.length > 0) {
           for (const s of fpMatches) {
             active.push({
@@ -476,22 +490,6 @@ async function resolveExistingReferentsForClaim(
             });
           }
           continue;
-        }
-
-        if (ref.startLine !== undefined && ref.endLine !== undefined) {
-          const lineOverlapMatches = newSymsInFile.filter(
-            (s) => s.startLine <= ref.endLine! && s.endLine >= ref.startLine!,
-          );
-          for (const s of lineOverlapMatches) {
-            active.push({
-              kind: "symbol",
-              file: s.file,
-              symbol: s.name,
-              startLine: s.startLine,
-              endLine: s.endLine,
-              runtimeFingerprint: s.runtimeFingerprint,
-            });
-          }
         }
       }
     } else if (ref.kind === "script" && ref.script) {
@@ -610,7 +608,12 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
       const refs =
         c.referents.length > 0 ? c.referents : c.referent ? [c.referent] : [];
       for (const r of refs) {
-        if (r.file && r.file !== relTarget && r.kind !== "generated-artifact") {
+        if (
+          r.file &&
+          r.file !== relTarget &&
+          r.kind !== "generated-artifact" &&
+          !isDocVerifyTarget(r.file)
+        ) {
           referentFiles.add(r.file);
         }
       }
@@ -624,7 +627,7 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
       } catch {
         curRefText = null;
       }
-      if (headRefText !== null && curRefText !== headRefText.trim()) {
+      if (headRefText === null ? curRefText !== null : curRefText !== headRefText.trim()) {
         violations.push(
           `Anti-gaming gate triggered: referent source file '${refFile}' has uncommitted changes relative to HEAD while verifying ${relTarget}. Pass --allow-source-change if modifying source code is intentional.`,
         );
@@ -634,7 +637,6 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
 
   if (headDoc && curDoc) {
     const hunks = alignDocBlockHunks(headDoc, curDoc);
-    let checkedAnyModifiedBlock = false;
     const checkedClaimIds = new Set<string>();
 
     for (const hunk of hunks) {
@@ -642,7 +644,6 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
         hunk.headBlocks.some((b) => inRange(b.startLine, b.endLine)) ||
         hunk.curBlocks.some((b) => inRange(b.startLine, b.endLine));
       if (!hunkInRange) continue;
-      checkedAnyModifiedBlock = true;
 
       const pairCount =
         hunk.headBlocks.length === hunk.curBlocks.length ? hunk.headBlocks.length : 0;
@@ -677,7 +678,22 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
             pkgInfo,
             curDoc,
           );
-          if (activeRefs.length === 0) continue;
+          if (activeRefs.length === 0) {
+            if (hc.kind === "symbol") {
+              const retainedDeadClaim = cbClaims.find(
+                (cc) =>
+                  cc.kind === "symbol" &&
+                  (cc.text === hc.text || cc.rawText === hc.rawText),
+              );
+              if (retainedDeadClaim && !checkedClaimIds.has(retainedDeadClaim.id)) {
+                checkedClaimIds.add(retainedDeadClaim.id);
+                violations.push(
+                  `Unresolvable doc claim '${retainedDeadClaim.text}' (${retainedDeadClaim.kind}) in modified block at ${relTarget}:${retainedDeadClaim.startLine}.`,
+                );
+              }
+            }
+            continue;
+          }
 
           const kept = cbClaims.some(
             (cc) => cc.state !== "fog-returned" && claimMatchesAnyReferent(cc, activeRefs),
@@ -688,26 +704,6 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
               .join(", ");
             violations.push(
               `Anti-gaming gate triggered: fog-returned doc claim '${hc.text}' at ${relTarget}:${hc.startLine} was deleted or rewritten into vague text while referent ${refDesc} still exists.`,
-            );
-          }
-        }
-
-        // Also check if a deleted referent's dead symbol token is still kept in the modified block
-        for (const hc of hbClaims) {
-          if (hc.state !== "fog-returned" || hc.kind !== "symbol") continue;
-          const activeRefs = await resolveExistingReferentsForClaim(
-            hc,
-            curSymbolIndex,
-            gitSession,
-            rootDir,
-            pkgInfo,
-            curDoc,
-          );
-          if (activeRefs.length > 0) continue;
-          const rawCodeToken = `\`${hc.rawText}\``;
-          if (pairedCurBlocks.some((cb) => cb.rawText.includes(rawCodeToken))) {
-            violations.push(
-              `Unresolvable doc claim '${hc.text}' (${hc.kind}) in modified block at ${relTarget}:${hc.startLine}.`,
             );
           }
         }
@@ -752,18 +748,16 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
       }
     }
 
-    if (!checkedAnyModifiedBlock) {
-      for (const cc of curFileClaims) {
-        if (
-          cc.state === "fog-returned" &&
-          inRange(cc.blockStartLine, cc.blockEndLine) &&
-          !checkedClaimIds.has(cc.id)
-        ) {
-          checkedClaimIds.add(cc.id);
-          violations.push(
-            `Unresolved or fog-returned doc claim '${cc.text}' (${cc.kind}) at ${relTarget}:${cc.startLine}.`,
-          );
-        }
+    for (const cc of curFileClaims) {
+      if (
+        cc.state === "fog-returned" &&
+        inRange(cc.blockStartLine, cc.blockEndLine) &&
+        !checkedClaimIds.has(cc.id)
+      ) {
+        checkedClaimIds.add(cc.id);
+        violations.push(
+          `Unresolved or fog-returned doc claim '${cc.text}' (${cc.kind}) at ${relTarget}:${cc.startLine}.`,
+        );
       }
     }
   } else {

@@ -2064,49 +2064,56 @@ export async function analyzeDocClaims(options: {
                 ...(gitSession.isGitRepo ? { existedAtClaimCommit: true } : {}),
               });
             } else if (gitSession.isGitRepo && blockCommit) {
-              const lookupSha =
-                blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
-              if (lookupSha) {
+              const candidateShas =
+                blockCommit.sha === "WORKTREE"
+                  ? gitSession.commits.map((c) => c.sha)
+                  : [blockCommit.sha];
+              let histMatches: RepoSymbol[] = [];
+              for (const lookupSha of candidateShas) {
                 const histIndex = await getSymbolIndexAtCommit(lookupSha);
-                const histMatches = resolveSymbolInIndex(symCandidate, histIndex);
-                if (histMatches.length > 0) {
-                  const targetName = symCandidate.qualifiedName ?? symCandidate.bareName ?? code;
-                  const referents: DocReferent[] = [];
-                  for (const hs of histMatches) {
-                    const removalCommit = await findSymbolRemovalCommit(hs);
-                    referents.push({
-                      kind: "symbol",
-                      file: hs.file,
-                      symbol: hs.name,
-                      startLine: hs.startLine,
-                      endLine: hs.endLine,
-                      runtimeFingerprint: hs.runtimeFingerprint,
-                      ...(removalCommit
-                        ? {
-                            lastModifiedCommit: removalCommit.shortSha,
-                            lastModifiedAt: removalCommit.isoDate,
-                          }
-                        : {}),
-                    });
-                  }
-                  docClaims.push({
-                    id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
-                    file: doc.file,
+                const matchesAtCommit = resolveSymbolInIndex(symCandidate, histIndex);
+                if (matchesAtCommit.length > 0) {
+                  histMatches = matchesAtCommit;
+                  break;
+                }
+              }
+              if (histMatches.length > 0) {
+                const targetName = symCandidate.qualifiedName ?? symCandidate.bareName ?? code;
+                const referents: DocReferent[] = [];
+                for (const hs of histMatches) {
+                  const removalCommit = await findSymbolRemovalCommit(hs);
+                  referents.push({
                     kind: "symbol",
-                    text: targetName,
-                    rawText: code,
-                    target: targetName,
-                    startLine: lineNum,
-                    endLine: lineNum,
-                    blockKind: block.kind,
-                    blockStartLine: block.startLine,
-                    blockEndLine: block.endLine,
-                    state: "fog-returned",
-                    referents,
-                    referent: referents[0],
-                    existedAtClaimCommit: true,
+                    file: hs.file,
+                    symbol: hs.name,
+                    startLine: hs.startLine,
+                    endLine: hs.endLine,
+                    runtimeFingerprint: hs.runtimeFingerprint,
+                    ...(removalCommit
+                      ? {
+                          lastModifiedCommit: removalCommit.shortSha,
+                          lastModifiedAt: removalCommit.isoDate,
+                        }
+                      : {}),
                   });
                 }
+                docClaims.push({
+                  id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
+                  file: doc.file,
+                  kind: "symbol",
+                  text: targetName,
+                  rawText: code,
+                  target: targetName,
+                  startLine: lineNum,
+                  endLine: lineNum,
+                  blockKind: block.kind,
+                  blockStartLine: block.startLine,
+                  blockEndLine: block.endLine,
+                  state: "fog-returned",
+                  referents,
+                  referent: referents[0],
+                  existedAtClaimCommit: true,
+                });
               }
             }
           }
