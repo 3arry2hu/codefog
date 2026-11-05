@@ -847,7 +847,7 @@ export interface PackageManifestInfo {
 
 export function inferCommandIntent(
   rawCmd: string,
-): "install" | "build" | "test" | "lint" | "typecheck" | undefined {
+): "install" | "build" | "test" | "lint" | undefined {
   const cmd = rawCmd.trim().replace(/^\$\s+/, "");
   if (!cmd || looksLikePathToken(cmd)) return undefined;
   if (
@@ -878,14 +878,6 @@ export function inferCommandIntent(
     /^(?:cargo\s+clippy|go\s+vet)(?:\s|$)/.test(cmd)
   ) {
     return "lint";
-  }
-  if (
-    /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?typecheck(?::\S+)?(?:\s|$)/.test(cmd) ||
-    /^(?:npx\s+|pnpm\s+(?:exec\s+|dlx\s+)?|yarn\s+|bunx\s+)?tsc\s+[^\n]*--noEmit(?:\s|$)/.test(
-      cmd,
-    )
-  ) {
-    return "typecheck";
   }
   if (
     /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build(?::\S+)?(?:\s|$)/.test(cmd) ||
@@ -1042,7 +1034,7 @@ async function resolveInlineCommandClaim(
   target: string;
   state: EvidenceState;
   referent?: DocReferent;
-  commandIntent?: "install" | "build" | "test" | "lint" | "typecheck";
+  commandIntent?: "install" | "build" | "test" | "lint";
 } | null> {
   const trimmed = code.trim().replace(/^\$\s+/, "");
   if (!trimmed || trimmed.startsWith("-")) return null;

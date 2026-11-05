@@ -249,13 +249,13 @@ describe("Ticket 23: AI instruction files command verification & instruction-con
       "utf8",
     );
 
-    // .github/copilot-instructions.md has `mvn test` and `cargo build`
+    // .github/copilot-instructions.md has `mvn test` and `npx tsc --noEmit`
     await fs.writeFile(
       path.join(tmpDir, ".github", "copilot-instructions.md"),
       [
         "# Copilot Instructions",
         "",
-        "Use `mvn test` for verification and `cargo build` for compilation.",
+        "Use `mvn test` for verification and `npx tsc --noEmit` for compilation.",
       ].join("\n"),
       "utf8",
     );
@@ -286,16 +286,16 @@ describe("Ticket 23: AI instruction files command verification & instruction-con
     const report = await analyzeRepository({ rootDir: tmpDir, docs: true });
     const claims = report.docClaims ?? [];
 
-    // Third-party commands `go test ./...`, `mvn test`, `cargo build` are weak-evidence (not fog-returned)
+    // Third-party commands `go test ./...`, `mvn test`, `npx tsc --noEmit` are weak-evidence (not fog-returned)
     const goTestClaim = claims.find((c) => c.target === "go test ./...");
     const mvnTestClaim = claims.find((c) => c.target === "mvn test");
-    const cargoBuildClaim = claims.find((c) => c.target === "cargo build");
+    const tscBuildClaim = claims.find((c) => c.target === "npx tsc --noEmit");
     expect(goTestClaim?.state).toBe("weak-evidence");
     expect(goTestClaim?.commandIntent).toBe("test");
     expect(mvnTestClaim?.state).toBe("weak-evidence");
     expect(mvnTestClaim?.commandIntent).toBe("test");
-    expect(cargoBuildClaim?.state).toBe("weak-evidence");
-    expect(cargoBuildClaim?.commandIntent).toBe("build");
+    expect(tscBuildClaim?.state).toBe("weak-evidence");
+    expect(tscBuildClaim?.commandIntent).toBe("build");
 
     // Unrecognized-intent commands (`npm run seed`, `npm run migrate`) only do existence check, ignoring "## Test" heading
     const seedClaim = claims.find((c) => c.target === "npm run seed");

@@ -234,7 +234,7 @@ export interface DocClaim {
   referents: DocReferent[];
   referent?: DocReferent;
   existedAtClaimCommit?: boolean;
-  commandIntent?: "install" | "build" | "test" | "lint" | "typecheck";
+  commandIntent?: "install" | "build" | "test" | "lint";
   executionOutput?: string;
 }
 
