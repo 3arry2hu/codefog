@@ -1854,6 +1854,18 @@ export async function analyzeJavaFilesAstEvidence(
         }
       }
 
+      // 6. Explicit value comparisons that throw an exception on mismatch
+      for (const tc of extractJavaThrowComparisonExpressions(bodyText)) {
+        for (const t of collectTargetsInExpr(tc.cond)) {
+          const k = `${t.fileStem}::${t.name}`;
+          if (tc.isNullCheckOnly) {
+            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
+          } else {
+            outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+          }
+        }
+      }
+
       for (const [k, target] of calledTargetsInBlock.entries()) {
         const ev = getOrCreateEv(target.fileStem, target.name);
         ev.executedBlocks.add(blockId);
@@ -1875,6 +1887,128 @@ export async function analyzeJavaFilesAstEvidence(
     evidenceEntries: Array.from(evidenceMap.values()),
     callGraphEdges,
   };
+}
+
+function isJavaValueComparisonExpr(cond: string): {
+  hasComparison: boolean;
+  isNullCheckOnly: boolean;
+} {
+  const withoutNullChecks = cond
+    .replace(/\b[A-Za-z0-9_$.()]+\s*(?:==|!=)\s*null\b/g, "")
+    .replace(/\bnull\s*(?:==|!=)\s*[A-Za-z0-9_$.()]+\b/g, "")
+    .replace(/\bObjects\.(?:isNull|nonNull)\s*\([^)]*\)/g, "")
+    .replace(/&&|\|\||\s+/g, "");
+  const hasNullCheck =
+    /\b(?:==|!=)\s*null\b|\bnull\s*(?:==|!=)\b|\bObjects\.(?:isNull|nonNull)\b/.test(cond);
+  if (hasNullCheck && withoutNullChecks.length === 0) {
+    return { hasComparison: true, isNullCheckOnly: true };
+  }
+  const hasValueOp =
+    /(?:!=|==|<=|>=|<|>)/.test(withoutNullChecks) ||
+    /\.\s*(?:equals|equalsIgnoreCase|contentEquals|compareTo|startsWith|endsWith|contains|matches)\s*\(/.test(
+      cond,
+    ) ||
+    /\b(?:Objects\.(?:equals|deepEquals)|Arrays\.(?:equals|deepEquals)|(?:Double|Float|Integer|Long)\.compare)\s*\(/.test(
+      cond,
+    );
+  return { hasComparison: hasValueOp, isNullCheckOnly: false };
+}
+
+export function extractJavaThrowComparisonExpressions(
+  sourceText: string,
+): Array<{ cond: string; isNullCheckOnly: boolean }> {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const results: Array<{ cond: string; isNullCheckOnly: boolean }> = [];
+  const ifRe = /\bif\s*\(/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = ifRe.exec(masked)) !== null) {
+    const openParenIdx = masked.indexOf("(", m.index);
+    if (openParenIdx === -1) continue;
+    const closeParenIdx = findMatchingDelimiter(masked, openParenIdx, "(", ")");
+    if (closeParenIdx === -1) continue;
+
+    const cond = noComments.slice(openParenIdx + 1, closeParenIdx).trim();
+    let cursor = closeParenIdx + 1;
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+
+    let branchText = "";
+    if (masked[cursor] === "{") {
+      const closeBraceIdx = findMatchingDelimiter(masked, cursor, "{", "}");
+      if (closeBraceIdx === -1) continue;
+      branchText = noComments.slice(cursor, closeBraceIdx + 1);
+    } else {
+      const semiIdx = masked.indexOf(";", cursor);
+      if (semiIdx === -1) continue;
+      branchText = noComments.slice(cursor, semiIdx + 1);
+    }
+
+    if (/\bthrow\b/.test(branchText)) {
+      const { hasComparison, isNullCheckOnly } = isJavaValueComparisonExpr(cond);
+      if (hasComparison) {
+        results.push({ cond, isNullCheckOnly });
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Counts Java Outcome Assertions in a standalone code snippet (e.g. a Markdown code block),
+ * reusing the Java adapter's Outcome Assertion rules:
+ * - JUnit `assertEquals`, `assertNotEquals`, `assertArrayEquals`, `assertThrows`, `assertTrue`, `assertFalse`, etc. (excluding pure null checks and `assertNotNull`/`assertDoesNotThrow` Liveness Checks)
+ * - AssertJ `assertThat(x).isEqualTo(y)` etc. (excluding `isNotNull`/`isPresent`/`isNotEmpty` Liveness Checks)
+ * - Explicit value comparisons that throw an exception on mismatch (`if (x != expected) throw new ...`) and `assert x == expected;`
+ * - `System.out.println` and comments are never counted as assertions.
+ */
+export function countJavaOutcomeAssertions(sourceText: string): number {
+  const { noComments } = stripCommentsAndMaskStrings(sourceText);
+  let count = 0;
+
+  const junitOutcomeRe =
+    /\b(?:assertEquals|assertNotEquals|assertArrayEquals|assertIterableEquals|assertLinesMatch|assertThrows|assertThrowsExactly|assertSame|assertNotSame|assertTrue|assertFalse)\s*\(([^;]+)\)/g;
+  let jom: RegExpExecArray | null;
+  while ((jom = junitOutcomeRe.exec(noComments)) !== null) {
+    const expr = jom[1]!;
+    const isNullCheckOnly =
+      /\b(?:!=|==)\s*null\b/.test(expr) && !/(?:==|!=)\s*[^n\s]/.test(expr);
+    if (!isNullCheckOnly) {
+      count++;
+    }
+  }
+
+  const assertJRe = /\bassertThat\s*\(([^;]+?)\)\s*\.\s*([A-Za-z0-9_]+)\s*\(/g;
+  let ajm: RegExpExecArray | null;
+  while ((ajm = assertJRe.exec(noComments)) !== null) {
+    const matcher = ajm[2]!;
+    const isLiveness = /^(?:isNotNull|isPresent|isNotEmpty)$/.test(matcher);
+    if (!isLiveness) {
+      count++;
+    }
+  }
+
+  const assertJThrownRe = /\bassertThatThrownBy\s*\(/g;
+  while (assertJThrownRe.exec(noComments) !== null) {
+    count++;
+  }
+
+  for (const tc of extractJavaThrowComparisonExpressions(sourceText)) {
+    if (!tc.isNullCheckOnly) {
+      count++;
+    }
+  }
+
+  const javaAssertRe = /\bassert\s+([^;:]+)(?::[^;]+)?;/g;
+  let jam: RegExpExecArray | null;
+  while ((jam = javaAssertRe.exec(noComments)) !== null) {
+    const { hasComparison, isNullCheckOnly } = isJavaValueComparisonExpr(jam[1]!);
+    if (hasComparison && !isNullCheckOnly) {
+      count++;
+    }
+  }
+
+  return count;
 }
 
 // ============================================================================
