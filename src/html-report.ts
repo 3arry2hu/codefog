@@ -153,6 +153,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     0,
   );
   const hasDocs = report.summary.docTrustScore !== undefined;
+  const hasExternal = report.external !== undefined || report.libyear !== undefined;
   const serverModulesHtml = hasDocs
     ? report.modules.map((m) => renderModuleRowServer(m)).join("")
     : "";
@@ -628,7 +629,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     function initViews() {
       const l1Mod = document.getElementById("l1-modules");
       l1Mod.innerHTML = REPORT.modules.map(m =>
-        '<div class="module-row"' + ${hasDocs ? `(' data-module="' + m.path + '"') +` : ""} ' onclick="switchLevel(2)">' +
+        ${hasDocs ? `'<div class="module-row" data-module="' + m.path + '" onclick="switchLevel(2)">'` : `'<div class="module-row" onclick="switchLevel(2)">'`} +
           '<div style="display:flex;justify-content:space-between;font-weight:600">' +
             '<span>' + m.path + ' (' + m.totalFiles + ' files, ' + m.verifiedFilesCollapsed + ' verified files collapsed)</span>' +
             '<span>Trust ' + m.trustScore + '/100 · Max Risk ' + m.maxRiskScore + '</span>' +
@@ -810,10 +811,14 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       }
       const mutantsHtml = (f.evidence.survivingMutants || []).map(m =>
         '<li>Line ' + m.line + ': <code>' + m.original + '</code> → <code>' + m.mutated + '</code> (survived ' + m.testsRun + ' tests)</li>'
-      ).join("");
+      ).join("");${
+        hasExternal
+          ? `
       const externalHtml = (f.externalIssues || []).map(ext =>
         '<li>[' + ext.source + '] <code>' + ext.ruleId + '</code> (line ' + ext.line + '): ' + ext.message + '</li>'
-      ).join("");
+      ).join("");`
+          : ""
+      }
       detailEl.innerHTML =
         '<div class="finding-card active">' +
           '<div style="display:flex;justify-content:space-between;align-items:center">' +
@@ -825,8 +830,12 @@ export function renderHtmlFogMap(report: CodefogReport): string {
           '<div style="font-size:12px;margin-top:4px"><strong>Risk Score:</strong> ' + f.riskScore + '/10</div>' +
           '<div style="font-size:12px;margin-top:4px"><strong>Why it is in fog:</strong> ' + f.reason + '</div>' +
           '<div style="font-size:12px;margin-top:4px"><strong>Evidence:</strong> Executed by ' + f.evidence.executedByTests + ' test(s), ' + f.evidence.assertionsOnOutcome + ' outcome assertion(s)' + (f.evidence.pseudoTested ? ' [PSEUDO-TESTED]' : '') + '</div>' +
-          (mutantsHtml ? '<ul style="font-size:12px;margin:6px 0;padding-left:18px">' + mutantsHtml + '</ul>' : '') +
-          (externalHtml ? '<div style="font-size:12px;margin-top:4px"><strong>External Overlay:</strong><ul style="font-size:12px;margin:4px 0;padding-left:18px">' + externalHtml + '</ul></div>' : '') +
+          (mutantsHtml ? '<ul style="font-size:12px;margin:6px 0;padding-left:18px">' + mutantsHtml + '</ul>' : '') +${
+            hasExternal
+              ? `
+          (externalHtml ? '<div style="font-size:12px;margin-top:4px"><strong>External Overlay:</strong><ul style="font-size:12px;margin:4px 0;padding-left:18px">' + externalHtml + '</ul></div>' : '') +`
+              : ""
+          }
           '<div style="font-size:12px;margin-top:6px"><strong>Suggested Action:</strong> ' + f.suggestedAction + '</div>' +
           '<div style="font-size:11px;margin-top:6px;font-family:monospace;background:#E2E8F0;padding:6px;border-radius:4px">' + f.acceptanceCheck.command + '</div>' +
           '<button class="copy-agent-btn" onclick="copyAgentTask(\\'' + f.id + '\\', this, event)">Copy as task for agent</button>' +
@@ -839,18 +848,26 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       document.getElementById("l4-file-title").textContent = file.path + " (Trust " + file.trustScore + "/100)";
 
       // Build map of surviving mutants by line number for inline source annotation
-      const mutantsByLine = {};
-      const externalByLine = {};
+      const mutantsByLine = {};${
+        hasExternal
+          ? `
+      const externalByLine = {};`
+          : ""
+      }
       (file.regions || []).forEach(r => {
         (r.survivingMutants || []).forEach(m => {
           mutantsByLine[m.line] = mutantsByLine[m.line] || [];
           mutantsByLine[m.line].push(m);
-        });
+        });${
+          hasExternal
+            ? `
         (r.externalIssues || []).forEach(ext => {
           const ln = ext.line || r.startLine;
           externalByLine[ln] = externalByLine[ln] || [];
           externalByLine[ln].push(ext);
-        });
+        });`
+            : ""
+        }
       });
 
       const table = document.getElementById("l4-source-table");
@@ -861,12 +878,17 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         const lineMutants = mutantsByLine[ln] || [];
         const mutantRows = lineMutants.map(m =>
           '<tr class="mutant-inline-row"><td class="ln-col">↳</td><td>⚠️ Surviving Mutant [' + m.id + ']: <code>' + m.original + '</code> → <code>' + m.mutated + '</code> (survived ' + m.testsRun + ' tests)</td></tr>'
-        ).join("");
+        ).join("");${
+          hasExternal
+            ? `
         const lineExternal = externalByLine[ln] || [];
         const externalRows = lineExternal.map(ext =>
           '<tr class="mutant-inline-row"><td class="ln-col">↳</td><td>[' + ext.source + '] <code>' + ext.ruleId + '</code>: ' + ext.message + '</td></tr>'
         ).join("");
-        return '<tr class="line-' + st + '"><td class="ln-col">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows + externalRows;
+        return '<tr class="line-' + st + '"><td class="ln-col">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows + externalRows;`
+            : `
+        return '<tr class="line-' + st + '"><td class="ln-col">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;`
+        }
       }).join("");`
       }
 
