@@ -161,7 +161,9 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
 
     expect(claimCalcB2?.state).toBe("fog-returned");
     expect(claimCalcB2?.referent?.lastModifiedCommit).toBe(commitB2Short);
+    expect(claimCalcB2?.existedAtClaimCommit).toBeUndefined();
     expect(claimTaxB2?.state).toBe("weak-evidence");
+    expect(claimTaxB2?.existedAtClaimCommit).toBeUndefined();
 
     const docFindings = reportB2.findings.filter((f) => f.subjectType === "doc");
     expect(docFindings.length).toBe(1);
@@ -312,12 +314,16 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await fs.mkdir(path.join(tmpDir, "docs"), { recursive: true });
     await fs.writeFile(legacyDocFile, "# Legacy\n", "utf8");
 
-    // Commit A: package.json defines build and test; README references npm run build, npm test, docs/legacy.md, and docs/never.md
+    // Commit A: package.json defines build, test, and bin mycli; src/cli.ts has verify and legacy-sync subcommands;
+    // README references npm run build, npm test, mycli legacy-sync, mycli never-sub, docs/legacy.md, and docs/never.md
     await fs.writeFile(
       pkgFile,
       JSON.stringify(
         {
           name: "demo-pkg",
+          bin: {
+            mycli: "src/cli.ts",
+          },
           scripts: {
             build: "tsc -p tsconfig.json",
             test: "vitest run",
@@ -330,6 +336,17 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     );
 
     await fs.writeFile(
+      path.join(tmpDir, "src", "cli.ts"),
+      [
+        "export function runCli(argv: string[]): number {",
+        "  if (argv[0] === 'verify' || argv[0] === 'legacy-sync') return 0;",
+        "  return 1;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
       readmeFile,
       [
         "# Scripts",
@@ -338,20 +355,25 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
         "",
         "Run `npm test` to execute unit tests.",
         "",
+        "Run `mycli legacy-sync` or `mycli never-sub`.",
+        "",
         "See `docs/legacy.md` and `docs/never.md`.",
       ].join("\n"),
       "utf8",
     );
 
     await git(tmpDir, ["add", "."]);
-    await git(tmpDir, ["commit", "-m", "feat: add package.json scripts and README"]);
+    await git(tmpDir, ["commit", "-m", "feat: add package.json scripts, cli, and README"]);
 
-    // Commit B: change build script definition in package.json and delete docs/legacy.md without updating README
+    // Commit B: change build script definition in package.json, remove legacy-sync subcommand from src/cli.ts, and delete docs/legacy.md without updating README
     await fs.writeFile(
       pkgFile,
       JSON.stringify(
         {
           name: "demo-pkg",
+          bin: {
+            mycli: "src/cli.ts",
+          },
           scripts: {
             build: "tsup src/fee.ts --format esm",
             test: "vitest run",
@@ -362,9 +384,19 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
       ),
       "utf8",
     );
+    await fs.writeFile(
+      path.join(tmpDir, "src", "cli.ts"),
+      [
+        "export function runCli(argv: string[]): number {",
+        "  if (argv[0] === 'verify') return 0;",
+        "  return 1;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
     await fs.rm(legacyDocFile);
     await git(tmpDir, ["add", "-A"]);
-    await git(tmpDir, ["commit", "-m", "build: switch build script to tsup and remove legacy doc"]);
+    await git(tmpDir, ["commit", "-m", "build: switch build script to tsup and remove legacy doc/subcommand"]);
     const commitBShort = await git(tmpDir, ["rev-parse", "--short", "HEAD"]);
 
     const report = await analyzeRepository({ rootDir: tmpDir, docs: true });
@@ -372,15 +404,25 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
 
     const buildClaim = claims.find((c) => c.rawText === "npm run build");
     const testClaim = claims.find((c) => c.rawText === "npm test");
+    const legacySubClaim = claims.find((c) => c.rawText === "mycli legacy-sync");
+    const neverSubClaim = claims.find((c) => c.rawText === "mycli never-sub");
     const legacyPathClaim = claims.find((c) => c.rawText === "docs/legacy.md");
     const neverPathClaim = claims.find((c) => c.rawText === "docs/never.md");
 
-    // build script definition changed after README block -> fog-returned
+    // build script definition changed after README block -> fog-returned, but resolution succeeded so existedAtClaimCommit is not set
     expect(buildClaim?.state).toBe("fog-returned");
     expect(buildClaim?.referent?.lastModifiedCommit).toBe(commitBShort);
+    expect(buildClaim?.existedAtClaimCommit).toBeUndefined();
 
-    // test script definition unchanged -> stays weak-evidence
+    // test script definition unchanged -> stays weak-evidence, existedAtClaimCommit is not set
     expect(testClaim?.state).toBe("weak-evidence");
+    expect(testClaim?.existedAtClaimCommit).toBeUndefined();
+
+    // Unresolved bin subcommand claims compute existedAtClaimCommit from git history
+    expect(legacySubClaim?.state).toBe("fog-returned");
+    expect(legacySubClaim?.existedAtClaimCommit).toBe(true);
+    expect(neverSubClaim?.state).toBe("fog-returned");
+    expect(neverSubClaim?.existedAtClaimCommit).toBe(false);
 
     // Both unresolved path claims are fog-returned, but existedAtClaimCommit distinguishes deleted vs never-existed
     expect(legacyPathClaim?.state).toBe("fog-returned");

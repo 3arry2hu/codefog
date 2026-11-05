@@ -1279,7 +1279,7 @@ export async function analyzeDocClaims(options: {
   const parsedDocAtCommitCache = new Map<string, Promise<ParsedDocFile | null>>();
   const symbolsAtCommitCache = new Map<string, Promise<RepoSymbol[]>>();
   const symbolIndexAtCommitCache = new Map<string, Promise<RepoSymbolIndex>>();
-  const pkgScriptsAtCommitCache = new Map<string, Promise<Map<string, string>>>();
+  const pkgManifestAtCommitCache = new Map<string, Promise<PackageManifestInfo>>();
 
   function getParsedDocAtCommit(sha: string, relPath: string): Promise<ParsedDocFile | null> {
     const key = `${sha}:${relPath}`;
@@ -1309,30 +1309,101 @@ export async function analyzeDocClaims(options: {
     return p;
   }
 
-  function getPackageScriptsAtCommit(sha: string): Promise<Map<string, string>> {
-    let p = pkgScriptsAtCommitCache.get(sha);
+  function getPackageManifestAtCommit(sha: string): Promise<PackageManifestInfo> {
+    let p = pkgManifestAtCommitCache.get(sha);
     if (!p) {
       p = (async () => {
         const scripts = new Map<string, string>();
+        const binNames = new Set<string>();
+        const binFiles: string[] = [];
+        const binSubcommands = new Set<string>();
         const raw = await gitSession.getFileTextAtCommit(sha, "package.json");
-        if (!raw) return scripts;
+        if (!raw) {
+          return {
+            hasPackageJson: false,
+            scripts,
+            binNames,
+            binFiles,
+            binSubcommands,
+          };
+        }
+        let parsed: {
+          name?: string;
+          scripts?: Record<string, string>;
+          bin?: string | Record<string, string>;
+        } = {};
         try {
-          const parsed = JSON.parse(raw) as { scripts?: Record<string, string> };
-          if (parsed.scripts && typeof parsed.scripts === "object") {
-            for (const [k, v] of Object.entries(parsed.scripts)) {
-              if (typeof v === "string") {
-                scripts.set(k, v);
-              }
+          parsed = JSON.parse(raw) as typeof parsed;
+        } catch {
+          return {
+            hasPackageJson: false,
+            scripts,
+            binNames,
+            binFiles,
+            binSubcommands,
+          };
+        }
+        if (parsed.scripts && typeof parsed.scripts === "object") {
+          for (const [k, v] of Object.entries(parsed.scripts)) {
+            if (typeof v === "string") {
+              scripts.set(k, v);
             }
           }
-        } catch {
-          // ignore malformed package.json
         }
-        return scripts;
+        const pkgName = typeof parsed.name === "string" ? parsed.name : undefined;
+        if (typeof parsed.bin === "string") {
+          if (pkgName) {
+            const shortName = pkgName.replace(/^@[^/]+\//, "");
+            binNames.add(shortName);
+            binNames.add(pkgName);
+          }
+          binFiles.push(toPosix(parsed.bin).replace(/^\.\//, ""));
+        } else if (parsed.bin && typeof parsed.bin === "object") {
+          for (const [bName, bPath] of Object.entries(parsed.bin)) {
+            binNames.add(bName);
+            if (typeof bPath === "string") {
+              binFiles.push(toPosix(bPath).replace(/^\.\//, ""));
+            }
+          }
+          if (pkgName) {
+            binNames.add(pkgName);
+          }
+        }
+        if (binNames.has("codefog")) {
+          for (const builtin of ["verify", "install-skill", "skill", "init-skill"]) {
+            binSubcommands.add(builtin);
+          }
+        }
+        const candidateCliFiles = new Set<string>([
+          ...binFiles,
+          "src/cli.ts",
+          "src/bin.ts",
+        ]);
+        for (const rel of candidateCliFiles) {
+          const cliSrc = await gitSession.getFileTextAtCommit(sha, rel);
+          if (cliSrc) {
+            for (const sub of extractSubcommandsFromCliSource(cliSrc, binNames)) {
+              binSubcommands.add(sub);
+            }
+          }
+        }
+        return {
+          hasPackageJson: true,
+          packageName: pkgName,
+          scripts,
+          binNames,
+          binFiles,
+          binSubcommands,
+        };
       })();
-      pkgScriptsAtCommitCache.set(sha, p);
+      pkgManifestAtCommitCache.set(sha, p);
     }
     return p;
+  }
+
+  async function getPackageScriptsAtCommit(sha: string): Promise<Map<string, string>> {
+    const manifest = await getPackageManifestAtCommit(sha);
+    return manifest.scripts;
   }
 
   async function findScriptLastChangeCommit(
@@ -1818,7 +1889,6 @@ export async function analyzeDocClaims(options: {
               }
               if (blockCommit && scriptCommit && scriptCommit.index < blockCommit.index) {
                 cmdState = "fog-returned";
-                existedAtClaimCommit = true;
               }
             } else if (cmdReferent?.file) {
               const refCommit = await findFileLatestCommit(cmdReferent.file);
@@ -1853,7 +1923,21 @@ export async function analyzeDocClaims(options: {
                   const tracked = await gitSession.listTrackedFilesAtCommit(lookupSha);
                   existedAtClaimCommit = tracked.has(fArg);
                 } else {
-                  existedAtClaimCommit = false;
+                  const histManifest = await getPackageManifestAtCommit(lookupSha);
+                  const tokens = firstSeg.split(/\s+/);
+                  let idx = 0;
+                  if (tokens[0] === "npx") {
+                    idx = 1;
+                    if (tokens[idx] === "--yes" || tokens[idx] === "-y") idx++;
+                  }
+                  const binToken = (tokens[idx] ?? "").replace(/@[^\s/]+$/, "");
+                  const nextToken = tokens[idx + 1];
+                  existedAtClaimCommit = Boolean(
+                    binToken &&
+                      nextToken &&
+                      histManifest.binNames.has(binToken) &&
+                      histManifest.binSubcommands.has(nextToken),
+                  );
                 }
               }
             }
@@ -2061,19 +2145,22 @@ export async function analyzeDocClaims(options: {
                 state: symState,
                 referents,
                 referent: staleReferent ?? referents[0],
-                ...(gitSession.isGitRepo ? { existedAtClaimCommit: true } : {}),
               });
             } else if (gitSession.isGitRepo && blockCommit) {
+              const blockLookupSha =
+                blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
               const candidateShas =
                 blockCommit.sha === "WORKTREE"
                   ? gitSession.commits.map((c) => c.sha)
                   : [blockCommit.sha];
               let histMatches: RepoSymbol[] = [];
+              let existedAtClaimCommit = false;
               for (const lookupSha of candidateShas) {
                 const histIndex = await getSymbolIndexAtCommit(lookupSha);
                 const matchesAtCommit = resolveSymbolInIndex(symCandidate, histIndex);
                 if (matchesAtCommit.length > 0) {
                   histMatches = matchesAtCommit;
+                  existedAtClaimCommit = lookupSha === blockLookupSha;
                   break;
                 }
               }
@@ -2112,7 +2199,7 @@ export async function analyzeDocClaims(options: {
                   state: "fog-returned",
                   referents,
                   referent: referents[0],
-                  existedAtClaimCommit: true,
+                  existedAtClaimCommit,
                 });
               }
             }
