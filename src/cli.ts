@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
+import { analyzeDocClaims } from "./doc-claims.js";
 import { computeDiffComparison, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { installCodefogSkill } from "./skill-installer.js";
@@ -178,7 +179,7 @@ export async function runCli(
           "  --pr-comment [dir]    Write PR comment Markdown and SVG artifacts",
           "  --json                Output full JSON report to stdout",
           "  --open                Open HTML Fog Map in default browser",
-          "  --fail-on <policy>    Exit gate policy: returned | regression | any-fog | contested | none (default: returned)",
+          "  --fail-on <policy>    Exit gate policy: returned | doc-returned | regression | any-fog | contested | none (default: returned)",
           "  --install-skill [ag]  Install AI agent skill for codex, claude-code, codebuddy, cursor (default: all)",
           "  -g, --global          Install AI skill into user home directory (~/.cursor/skills, ~/.claude/skills, etc.)",
           "  -v, --version         Print version",
@@ -421,7 +422,14 @@ export async function runCli(
       }
     }
 
-    const validFailOnPolicies = new Set(["none", "returned", "regression", "any-fog", "contested"]);
+    const validFailOnPolicies = new Set([
+      "none",
+      "returned",
+      "doc-returned",
+      "regression",
+      "any-fog",
+      "contested",
+    ]);
 
     // Recover options if `npm exec` / `npx` consumed `--<flag>=<val>` into `npm_config_*` env vars
     if (process.env.npm_command === "exec") {
@@ -547,7 +555,7 @@ export async function runCli(
 
     if (!validFailOnPolicies.has(failOn)) {
       io.stderr(
-        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, regression, any-fog, contested, none.\n`,
+        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, doc-returned, regression, any-fog, contested, none.\n`,
       );
       return 1;
     }
@@ -599,6 +607,21 @@ export async function runCli(
     }
     if (failOn === "returned" && report.summary.locByState["fog-returned"] > 0) {
       return 1;
+    }
+    if (failOn === "doc-returned") {
+      const docReturnedCount =
+        report.summary.docClaimsByState !== undefined
+          ? report.summary.docClaimsByState["fog-returned"]
+          : (
+              await analyzeDocClaims({
+                rootDir,
+                checkExternalLinks: checkExternalLinks || undefined,
+                runDocs: runDocs || undefined,
+              })
+            ).docClaimsByState["fog-returned"];
+      if (docReturnedCount > 0) {
+        return 1;
+      }
     }
     if (
       failOn === "regression" &&

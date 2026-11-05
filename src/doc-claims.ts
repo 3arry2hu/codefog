@@ -864,37 +864,50 @@ export function inferCommandIntent(
   rawCmd: string,
 ): "install" | "build" | "test" | "lint" | "typecheck" | undefined {
   const cmd = rawCmd.trim().replace(/^\$\s+/, "");
+  if (!cmd || looksLikePathToken(cmd)) return undefined;
   if (
-    /^(?:npm|pnpm|yarn|bun)\s+(?:install|i|ci)\b/.test(cmd) ||
-    /^(?:go\s+mod\s+download|cargo\s+fetch)\b/.test(cmd)
+    /^(?:npm|pnpm|yarn|bun)\s+(?:install|i|ci)(?:\s|$)/.test(cmd) ||
+    /^(?:go\s+mod\s+(?:download|tidy)|cargo\s+fetch|(?:mvn|\.\/mvnw)\s+(?:clean\s+)?install)(?:\s|$)/.test(
+      cmd,
+    )
   ) {
     return "install";
   }
   if (
-    /^(?:npm|pnpm|yarn|bun)\s+(?:test|t|tst|run\s+test(?::\S+)?)\b/.test(cmd) ||
-    /^(?:npx\s+)?(?:vitest|jest|mocha)\b/.test(cmd) ||
-    /^node\s+--test\b/.test(cmd) ||
-    /^(?:go\s+test|cargo\s+test|mvn\s+test|\.\/gradlew\s+test|gradle\s+test)\b/.test(cmd)
+    /^(?:npm|pnpm|yarn|bun)\s+(?:test|t|tst|run\s+test(?::\S+)?)(?:\s|$)/.test(cmd) ||
+    /^(?:npx\s+|pnpm\s+(?:exec\s+|dlx\s+)?|yarn\s+|bunx\s+)?(?:vitest|jest|mocha|pytest)(?:\s|$)/.test(
+      cmd,
+    ) ||
+    /^node\s+--test(?:\s|$)/.test(cmd) ||
+    /^(?:go\s+test|cargo\s+(?:test|nextest)|(?:mvn|\.\/mvnw)\s+test|(?:\.\/gradlew|gradle)\s+test)(?:\s|$)/.test(
+      cmd,
+    )
   ) {
     return "test";
   }
   if (
-    /^(?:npm|pnpm|yarn|bun)\s+run\s+lint\b/.test(cmd) ||
-    /^(?:npx\s+)?(?:eslint|biome\s+check| biome\s+lint|oxlint|golangci-lint)\b/.test(cmd) ||
-    /^cargo\s+clippy\b/.test(cmd)
+    /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?lint(?::\S+)?(?:\s|$)/.test(cmd) ||
+    /^(?:npx\s+|pnpm\s+(?:exec\s+|dlx\s+)?|yarn\s+|bunx\s+)?(?:eslint|biome\s+(?:check|lint)|oxlint|golangci-lint)(?:\s|$)/.test(
+      cmd,
+    ) ||
+    /^(?:cargo\s+clippy|go\s+vet)(?:\s|$)/.test(cmd)
   ) {
     return "lint";
   }
   if (
-    /^(?:npm|pnpm|yarn|bun)\s+run\s+typecheck\b/.test(cmd) ||
-    /^(?:npx\s+)?tsc\s+[^\n]*--noEmit\b/.test(cmd)
+    /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?typecheck(?::\S+)?(?:\s|$)/.test(cmd) ||
+    /^(?:npx\s+|pnpm\s+(?:exec\s+|dlx\s+)?|yarn\s+|bunx\s+)?tsc\s+[^\n]*--noEmit(?:\s|$)/.test(
+      cmd,
+    )
   ) {
     return "typecheck";
   }
   if (
-    /^(?:npm|pnpm|yarn|bun)\s+run\s+build\b/.test(cmd) ||
-    /^(?:npx\s+)?(?:tsc|tsup|vite\s+build|rollup|webpack|esbuild)\b/.test(cmd) ||
-    /^(?:go\s+build|cargo\s+build|mvn\s+(?:package|compile)|\.\/gradlew\s+build|gradle\s+build)\b/.test(
+    /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build(?::\S+)?(?:\s|$)/.test(cmd) ||
+    /^(?:npx\s+|pnpm\s+(?:exec\s+|dlx\s+)?|yarn\s+|bunx\s+)?(?:tsc|tsup|vite\s+build|rollup|webpack|esbuild)(?:\s|$)/.test(
+      cmd,
+    ) ||
+    /^(?:go\s+build|cargo\s+build|(?:mvn|\.\/mvnw)\s+(?:clean\s+)?(?:package|compile)|(?:\.\/gradlew|gradle)\s+build)(?:\s|$)/.test(
       cmd,
     )
   ) {
@@ -1039,6 +1052,7 @@ async function resolveInlineCommandClaim(
   code: string,
   rootDir: string,
   pkgInfo: PackageManifestInfo,
+  isInstruction = false,
 ): Promise<{
   target: string;
   state: EvidenceState;
@@ -1084,15 +1098,16 @@ async function resolveInlineCommandClaim(
     const rawAlias = pmAliasMatch[1];
     const scriptName = rawAlias === "t" || rawAlias === "tst" ? "test" : rawAlias;
     const def = pkgInfo.scripts.get(scriptName);
-    const exists = def !== undefined;
-    const referent: DocReferent | undefined = exists
-      ? {
-          kind: "script",
-          file: "package.json",
-          script: scriptName,
-          scriptDefinition: def,
-        }
-      : undefined;
+    const exists = def !== undefined || (!pkgInfo.hasPackageJson && isInstruction);
+    const referent: DocReferent | undefined =
+      def !== undefined
+        ? {
+            kind: "script",
+            file: "package.json",
+            script: scriptName,
+            scriptDefinition: def,
+          }
+        : undefined;
     return {
       target: trimmed,
       state: exists ? "weak-evidence" : "fog-returned",
@@ -1169,6 +1184,15 @@ async function resolveInlineCommandClaim(
         };
       }
     }
+  }
+
+  // 5. In AI instruction files, commands matching the fixed intent table (including third-party tools like vitest, tsc, go test, cargo, mvn) participate in intent comparison without existence failure
+  if (isInstruction && commandIntent) {
+    return {
+      target: trimmed,
+      state: "weak-evidence",
+      commandIntent,
+    };
   }
 
   return null;
@@ -1414,7 +1438,12 @@ export async function analyzeDocClaims(options: {
           if (!code || linkTargetsOnLine.has(code)) continue;
 
           // Command claim
-          const cmdClaim = await resolveInlineCommandClaim(code, rootDir, pkgInfo);
+          const cmdClaim = await resolveInlineCommandClaim(
+            code,
+            rootDir,
+            pkgInfo,
+            isInstructionFile(doc.file),
+          );
           if (cmdClaim) {
             docClaims.push({
               id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
@@ -1560,6 +1589,113 @@ export async function analyzeDocClaims(options: {
 
   const docClaimsByState = emptyLocByState();
   const docFindings: Finding[] = [];
+
+  // Detect conflicting commands across different AI instruction files by mapped commandIntent
+  const claimsByIntent = new Map<
+    NonNullable<DocClaim["commandIntent"]>,
+    DocClaim[]
+  >();
+  for (const claim of docClaims) {
+    if (
+      claim.kind === "command" &&
+      claim.commandIntent &&
+      isInstructionFile(claim.file)
+    ) {
+      const list = claimsByIntent.get(claim.commandIntent) ?? [];
+      list.push(claim);
+      claimsByIntent.set(claim.commandIntent, list);
+    }
+  }
+
+  const normalizeCommandForConflict = (raw: string): string =>
+    raw.trim().replace(/^\$\s+/, "").replace(/\s+/g, " ");
+
+  for (const [intent, intentClaims] of claimsByIntent.entries()) {
+    let hasCrossFileConflict = false;
+    for (let i = 0; i < intentClaims.length && !hasCrossFileConflict; i++) {
+      for (let j = i + 1; j < intentClaims.length; j++) {
+        const a = intentClaims[i]!;
+        const b = intentClaims[j]!;
+        if (
+          a.file !== b.file &&
+          normalizeCommandForConflict(a.target) !==
+            normalizeCommandForConflict(b.target)
+        ) {
+          hasCrossFileConflict = true;
+          break;
+        }
+      }
+    }
+
+    if (!hasCrossFileConflict) continue;
+
+    const sortedClaims = [...intentClaims].sort(
+      (a, b) => a.file.localeCompare(b.file) || a.startLine - b.startLine,
+    );
+
+    for (const c of sortedClaims) {
+      if (c.state !== "fog-returned") {
+        c.state = "weak-evidence";
+      }
+    }
+
+    const primary = sortedClaims[0]!;
+    const locationsList = sortedClaims.map((c) => ({
+      file: c.file,
+      symbol: c.text,
+      startLine: c.startLine,
+      endLine: c.endLine,
+      command: c.target,
+    }));
+    const conflictSummary = sortedClaims
+      .map((c) => `${c.file}:${c.startLine} ('${c.target}')`)
+      .join(" vs ");
+    const locationRangeSummary = sortedClaims
+      .map((c) => `${c.file}:${c.startLine}-${c.endLine}`)
+      .join(", ");
+
+    docFindings.push({
+      id: createDeterministicFindingId(
+        primary.file,
+        `instruction-conflict:${intent}:${sortedClaims.map((c) => `${c.file}:${c.startLine}:${c.target}`).join("|")}`,
+      ),
+      title: `instruction-conflict (${intent}): ${conflictSummary}`,
+      state: "weak-evidence",
+      subjectType: "doc",
+      tags: ["instruction-conflict"],
+      riskScore: computeRiskScore({
+        unverifiedLoc: sortedClaims.length,
+        churn90d: 1,
+        cyclomaticComplexity: 1,
+        state: "weak-evidence",
+      }),
+      agentReady: true,
+      location: {
+        file: primary.file,
+        symbol: primary.text,
+        startLine: primary.startLine,
+        endLine: primary.endLine,
+      },
+      locations: locationsList,
+      reason: `Conflicting '${intent}' commands across AI instruction files (instruction-conflict): ${conflictSummary}.`,
+      evidence: {
+        executedByTests: 0,
+        assertionsOnOutcome: 0,
+        pseudoTested: false,
+        oracleContest: false,
+        oracleIds: [],
+        missedBoundary: false,
+        survivingMutants: [],
+      },
+      suggestedAction: `Align '${intent}' command across AI instruction files (${locationRangeSummary}) so all agents execute the same command.`,
+      acceptanceCheck: {
+        command: `npx codefog verify ${primary.file} --lines ${primary.blockStartLine}-${primary.blockEndLine}`,
+        criteria: [
+          `Instruction files (${sortedClaims.map((c) => `${c.file}:${c.startLine}`).join(", ")}) specify a consistent '${intent}' command`,
+        ],
+      },
+    });
+  }
 
   for (const claim of docClaims) {
     docClaimsByState[claim.state]++;

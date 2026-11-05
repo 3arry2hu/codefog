@@ -65,6 +65,13 @@ export interface Finding {
     startLine: number;
     endLine: number;
   };
+  locations?: Array<{
+    file: string;
+    symbol: string;
+    startLine: number;
+    endLine: number;
+    command?: string;
+  }>;
   reason: string;
   evidence: {
     executedByTests: number;
