@@ -783,8 +783,11 @@ export async function analyzeGoFilesAstEvidence(
         const calleeName = am[3]!;
         const callArgs = am[4] ?? "";
 
-        // Handle `diff := cmp.Diff(want, got)` where `got` is a value variable
-        if (pkgAlias === "cmp" && calleeName === "Diff") {
+        // Handle `diff := cmp.Diff(want, got)` or `eq := reflect.DeepEqual(got, want)` where `got` is a value variable
+        if (
+          (pkgAlias === "cmp" && (calleeName === "Diff" || calleeName === "Equal")) ||
+          (pkgAlias === "reflect" && calleeName === "DeepEqual")
+        ) {
           const lhsVars = lhsRaw.split(",").map((s) => s.trim()).filter(Boolean);
           const diffVar = lhsVars[0];
           if (diffVar && diffVar !== "_") {
@@ -853,18 +856,10 @@ export async function analyzeGoFilesAstEvidence(
         }
       }
 
-      // 3. Scan `if <cond> { ... t.Error/t.Fatal/t.Fail ... }`
-      const ifFailRe =
-        /\bif\s+([^{]+)\{[^}]*\b(?:t\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow))\b/gs;
-      let im: RegExpExecArray | null;
-      while ((im = ifFailRe.exec(bodyText)) !== null) {
-        const rawCond = im[1]!;
-        const semiIdx = rawCond.indexOf(";");
-        const condExpr = semiIdx !== -1 ? rawCond.slice(semiIdx + 1) : rawCond;
-
+      // 3. Scan `if <cond> { ... t.Error/t.Fatal/t.Fail/panic ... }`
+      for (const { initPart, condExpr } of extractGoFailureBranchConditions(bodyText)) {
         let inlineVars: Set<string> | null = null;
-        if (semiIdx !== -1) {
-          const initPart = rawCond.slice(0, semiIdx);
+        if (initPart) {
           const initAssignMatch = /^([A-Za-z0-9_, \t]+?)\s*(?::=|=)/.exec(initPart.trim());
           if (initAssignMatch?.[1]) {
             inlineVars = new Set(
@@ -976,6 +971,161 @@ export async function analyzeGoFilesAstEvidence(
     evidenceEntries: Array.from(evidenceMap.values()),
     callGraphEdges,
   };
+}
+
+const GO_FAILURE_BRANCH_RE =
+  /\b(?:panic\s*\(|t\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\b|log\.(?:Fatal|Fatalf|Panic|Panicf)\b|os\.Exit\s*\(\s*[1-9])/;
+
+const GO_EQUALITY_CALL_RE =
+  /\b(?:reflect\.DeepEqual|cmp\.(?:Diff|Equal)|bytes\.Equal|slices\.Equal|maps\.Equal|strings\.EqualFold|errors\.(?:Is|As))\s*\(/;
+
+const GO_TESTIFY_OUTCOME_RE =
+  /\b(?:assert|require)\.(?:Equal|EqualValues|Exactly|ElementsMatch|True|False|NoError|Error|ErrorIs|Zero)\s*\(([^)]+)\)/g;
+
+function extractGoFailureBranchConditions(
+  sourceText: string,
+): Array<{ initPart: string; condExpr: string; initMasked: string; condMasked: string }> {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const results: Array<{
+    initPart: string;
+    condExpr: string;
+    initMasked: string;
+    condMasked: string;
+  }> = [];
+  const ifRe = /\bif\b/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = ifRe.exec(masked)) !== null) {
+    const condStart = match.index + match[0].length;
+    let parenDepth = 0;
+    let openBraceIdx = -1;
+    let closeBraceIdx = -1;
+
+    for (let i = condStart; i < masked.length; i++) {
+      const ch = masked[i];
+      if (ch === "(") {
+        parenDepth++;
+      } else if (ch === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+      } else if (ch === "{" && parenDepth === 0) {
+        const closeIdx = findMatchingDelimiter(masked, i, "{", "}");
+        if (closeIdx === -1) break;
+        let k = closeIdx + 1;
+        while (k < masked.length && (masked[k] === " " || masked[k] === "\t")) {
+          k++;
+        }
+        const nextCh = masked[k];
+        if (
+          nextCh === "{" ||
+          nextCh === "=" ||
+          nextCh === "!" ||
+          nextCh === "<" ||
+          nextCh === ">" ||
+          nextCh === "&" ||
+          nextCh === "|"
+        ) {
+          i = closeIdx;
+          continue;
+        }
+        openBraceIdx = i;
+        closeBraceIdx = closeIdx;
+        break;
+      }
+    }
+
+    if (openBraceIdx === -1 || closeBraceIdx === -1) continue;
+
+    const headerRaw = noComments.slice(condStart, openBraceIdx);
+    const headerMasked = masked.slice(condStart, openBraceIdx);
+    const bodyMasked = masked.slice(openBraceIdx + 1, closeBraceIdx);
+    if (GO_FAILURE_BRANCH_RE.test(bodyMasked)) {
+      let splitSemi = -1;
+      let pDepth = 0;
+      let bDepth = 0;
+      for (let i = 0; i < headerMasked.length; i++) {
+        const c = headerMasked[i];
+        if (c === "(") pDepth++;
+        else if (c === ")") pDepth = Math.max(0, pDepth - 1);
+        else if (c === "{") bDepth++;
+        else if (c === "}") bDepth = Math.max(0, bDepth - 1);
+        else if (c === ";" && pDepth === 0 && bDepth === 0) {
+          splitSemi = i;
+          break;
+        }
+      }
+      const initPart = splitSemi !== -1 ? headerRaw.slice(0, splitSemi).trim() : "";
+      const condExpr = (splitSemi !== -1 ? headerRaw.slice(splitSemi + 1) : headerRaw).trim();
+      const initMasked = splitSemi !== -1 ? headerMasked.slice(0, splitSemi).trim() : "";
+      const condMasked = (
+        splitSemi !== -1 ? headerMasked.slice(splitSemi + 1) : headerMasked
+      ).trim();
+      results.push({ initPart, condExpr, initMasked, condMasked });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Counts Go Outcome Assertions in a standalone code snippet or test body,
+ * reusing the Go adapter's value-comparison / `reflect.DeepEqual` / `cmp.Diff` / `testify`
+ * rules and excluding `fmt.Println` or pure `err != nil` checks.
+ */
+export function countGoOutcomeAssertions(sourceText: string): number {
+  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  let count = 0;
+
+  const equalityVars = new Set<string>();
+  const eqAssignRe =
+    /([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*(?:reflect\.DeepEqual|cmp\.(?:Diff|Equal)|bytes\.Equal|slices\.Equal|maps\.Equal|strings\.EqualFold|errors\.(?:Is|As))\s*\(/g;
+  let em: RegExpExecArray | null;
+  while ((em = eqAssignRe.exec(masked)) !== null) {
+    if (em[1] && em[1] !== "_") {
+      equalityVars.add(em[1]);
+    }
+  }
+
+  for (const { initMasked, condMasked } of extractGoFailureBranchConditions(sourceText)) {
+    if (!condMasked) continue;
+
+    if (GO_EQUALITY_CALL_RE.test(condMasked) || GO_EQUALITY_CALL_RE.test(initMasked)) {
+      count++;
+      continue;
+    }
+
+    let usesEqualityVar = false;
+    for (const eqVar of equalityVars) {
+      if (new RegExp(`\\b${eqVar}\\b`).test(condMasked)) {
+        usesEqualityVar = true;
+        break;
+      }
+    }
+    if (usesEqualityVar) {
+      count++;
+      continue;
+    }
+
+    const strippedNil = condMasked
+      .replace(/\b[A-Za-z_][A-Za-z0-9_.]*\s*[!=]=\s*nil\b/g, "")
+      .replace(/\bnil\s*[!=]=\s*[A-Za-z_][A-Za-z0-9_.]*\b/g, "")
+      .replace(/&&|\|\||\s+/g, "");
+
+    if (strippedNil.length === 0) {
+      continue;
+    }
+
+    if (/(?:==|!=|<=|>=|<|>|!)/.test(strippedNil)) {
+      count++;
+    }
+  }
+
+  GO_TESTIFY_OUTCOME_RE.lastIndex = 0;
+  let tm: RegExpExecArray | null;
+  while ((tm = GO_TESTIFY_OUTCOME_RE.exec(masked)) !== null) {
+    count++;
+  }
+
+  return count;
 }
 
 // ============================================================================
@@ -1174,6 +1324,82 @@ export function generateRustCandidateMutations(
   });
 
   return candidates;
+}
+
+export interface RustAssertionSpan {
+  kind: "outcome" | "liveness";
+  expr: string;
+}
+
+export function extractRustAssertionSpans(noCommentsText: string): RustAssertionSpan[] {
+  const spans: RustAssertionSpan[] = [];
+  const coveredRanges: Array<{ start: number; end: number }> = [];
+  const closeForOpen: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+
+  const macroRe =
+    /\b(assert_eq|assert_ne|debug_assert_eq|debug_assert_ne|assert_matches|debug_assert_matches|assert|debug_assert)!\s*([([{])/g;
+  let m: RegExpExecArray | null;
+  while ((m = macroRe.exec(noCommentsText)) !== null) {
+    const macroName = m[1]!;
+    const openChar = m[2]!;
+    const closeChar = closeForOpen[openChar] ?? ")";
+    const openIdx = m.index + m[0].length - 1;
+    const closeIdx = findMatchingDelimiter(noCommentsText, openIdx, openChar, closeChar);
+    if (closeIdx === -1) continue;
+    const expr = noCommentsText.slice(openIdx + 1, closeIdx);
+    coveredRanges.push({ start: m.index, end: closeIdx + 1 });
+
+    if (macroName === "assert" || macroName === "debug_assert") {
+      const isPureLiveness =
+        /\.\s*(?:is_ok|is_some)\s*\(\s*\)/.test(expr) &&
+        !/==|!=|<=|>=|<|>|\bmatches!\b/.test(expr);
+      spans.push({
+        kind: isPureLiveness ? "liveness" : "outcome",
+        expr,
+      });
+    } else {
+      spans.push({
+        kind: "outcome",
+        expr,
+      });
+    }
+  }
+
+  // Standalone `matches!(...)` outside an outer `assert!(...)` macro
+  const matchesMacroRe = /\bmatches!\s*([([{])/g;
+  while ((m = matchesMacroRe.exec(noCommentsText)) !== null) {
+    const startIdx = m.index;
+    if (coveredRanges.some((r) => startIdx >= r.start && startIdx < r.end)) {
+      continue;
+    }
+    const openChar = m[1]!;
+    const closeChar = closeForOpen[openChar] ?? ")";
+    const openIdx = startIdx + m[0].length - 1;
+    const closeIdx = findMatchingDelimiter(noCommentsText, openIdx, openChar, closeChar);
+    if (closeIdx === -1) continue;
+    const expr = noCommentsText.slice(openIdx + 1, closeIdx);
+    spans.push({
+      kind: "outcome",
+      expr,
+    });
+  }
+
+  return spans;
+}
+
+/**
+ * Counts Rust Outcome Assertions (`assert_eq!`, `assert_ne!`, `matches!`, non-liveness `assert!`)
+ * in a standalone Rust code snippet, reusing the Rust adapter's assertion classification.
+ * `.unwrap()`, `.expect()`, `assert!(x.is_ok())`, and `println!` are not counted as Outcome Assertions.
+ */
+export function countRustOutcomeAssertions(sourceText: string): number {
+  const { noComments } = stripCommentsAndMaskStrings(sourceText);
+  return extractRustAssertionSpans(noComments).filter((s) => s.kind === "outcome").length;
+}
+
+export function hasRustMainFunction(sourceText: string): boolean {
+  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  return /\bfn\s+main\s*\(/.test(masked);
 }
 
 export interface RustFunctionAstMeta {
@@ -1376,36 +1602,15 @@ export async function analyzeRustFilesAstEvidence(
         return found;
       }
 
-      // 3. Outcome assertions: `assert_eq!(...)`, `assert_ne!(...)`, `assert_matches!(...)`
-      const outcomeMacroRe =
-        /\b(?:assert_eq|assert_ne|debug_assert_eq|debug_assert_ne|assert_matches)!\s*\(([^;]+)\)/g;
-      let sm: RegExpExecArray | null;
-      while ((sm = outcomeMacroRe.exec(bodyText)) !== null) {
-        const expr = sm[1]!;
-        for (const t of collectTargetsInExpr(expr)) {
-          const k = `${t.fileStem}::${t.name}`;
-          outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
-        }
-      }
-
-      // 4. `assert!(<cond>)`: check if `<cond>` is purely `.is_ok()` / `.is_some()` (Liveness Check) vs concrete comparison (Outcome Assertion)
-      const assertMacroRe = /\b(?:assert|debug_assert)!\s*\(([^;]+)\)/g;
-      let am: RegExpExecArray | null;
-      while ((am = assertMacroRe.exec(bodyText)) !== null) {
-        const expr = am[1]!;
-        const targets = collectTargetsInExpr(expr);
-        if (targets.length === 0) continue;
-
-        const isPureLiveness =
-          /\.\s*(?:is_ok|is_some)\s*\(\s*\)/.test(expr) &&
-          !/==|!=|<=|>=|<|>|\bmatches!\b/.test(expr);
-
+      // 3. Outcome & Liveness assertions (`assert_eq!`, `assert_ne!`, `assert_matches!`, `matches!`, `assert!`)
+      for (const span of extractRustAssertionSpans(bodyText)) {
+        const targets = collectTargetsInExpr(span.expr);
         for (const t of targets) {
           const k = `${t.fileStem}::${t.name}`;
-          if (isPureLiveness) {
-            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
-          } else {
+          if (span.kind === "outcome") {
             outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+          } else {
+            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
           }
         }
       }
@@ -1854,6 +2059,18 @@ export async function analyzeJavaFilesAstEvidence(
         }
       }
 
+      // 6. Explicit value comparisons that throw an exception on mismatch
+      for (const tc of extractJavaThrowComparisonExpressions(bodyText)) {
+        for (const t of collectTargetsInExpr(tc.cond)) {
+          const k = `${t.fileStem}::${t.name}`;
+          if (tc.isNullCheckOnly) {
+            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
+          } else {
+            outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+          }
+        }
+      }
+
       for (const [k, target] of calledTargetsInBlock.entries()) {
         const ev = getOrCreateEv(target.fileStem, target.name);
         ev.executedBlocks.add(blockId);
@@ -1875,6 +2092,128 @@ export async function analyzeJavaFilesAstEvidence(
     evidenceEntries: Array.from(evidenceMap.values()),
     callGraphEdges,
   };
+}
+
+function isJavaValueComparisonExpr(cond: string): {
+  hasComparison: boolean;
+  isNullCheckOnly: boolean;
+} {
+  const withoutNullChecks = cond
+    .replace(/\b[A-Za-z0-9_$.()]+\s*(?:==|!=)\s*null\b/g, "")
+    .replace(/\bnull\s*(?:==|!=)\s*[A-Za-z0-9_$.()]+\b/g, "")
+    .replace(/\bObjects\.(?:isNull|nonNull)\s*\([^)]*\)/g, "")
+    .replace(/&&|\|\||\s+/g, "");
+  const hasNullCheck =
+    /\b(?:==|!=)\s*null\b|\bnull\s*(?:==|!=)\b|\bObjects\.(?:isNull|nonNull)\b/.test(cond);
+  if (hasNullCheck && withoutNullChecks.length === 0) {
+    return { hasComparison: true, isNullCheckOnly: true };
+  }
+  const hasValueOp =
+    /(?:!=|==|<=|>=|<|>)/.test(withoutNullChecks) ||
+    /\.\s*(?:equals|equalsIgnoreCase|contentEquals|compareTo|startsWith|endsWith|contains|matches)\s*\(/.test(
+      cond,
+    ) ||
+    /\b(?:Objects\.(?:equals|deepEquals)|Arrays\.(?:equals|deepEquals)|(?:Double|Float|Integer|Long)\.compare)\s*\(/.test(
+      cond,
+    );
+  return { hasComparison: hasValueOp, isNullCheckOnly: false };
+}
+
+export function extractJavaThrowComparisonExpressions(
+  sourceText: string,
+): Array<{ cond: string; isNullCheckOnly: boolean }> {
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const results: Array<{ cond: string; isNullCheckOnly: boolean }> = [];
+  const ifRe = /\bif\s*\(/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = ifRe.exec(masked)) !== null) {
+    const openParenIdx = masked.indexOf("(", m.index);
+    if (openParenIdx === -1) continue;
+    const closeParenIdx = findMatchingDelimiter(masked, openParenIdx, "(", ")");
+    if (closeParenIdx === -1) continue;
+
+    const cond = noComments.slice(openParenIdx + 1, closeParenIdx).trim();
+    let cursor = closeParenIdx + 1;
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+
+    let branchText = "";
+    if (masked[cursor] === "{") {
+      const closeBraceIdx = findMatchingDelimiter(masked, cursor, "{", "}");
+      if (closeBraceIdx === -1) continue;
+      branchText = noComments.slice(cursor, closeBraceIdx + 1);
+    } else {
+      const semiIdx = masked.indexOf(";", cursor);
+      if (semiIdx === -1) continue;
+      branchText = noComments.slice(cursor, semiIdx + 1);
+    }
+
+    if (/\bthrow\b/.test(branchText)) {
+      const { hasComparison, isNullCheckOnly } = isJavaValueComparisonExpr(cond);
+      if (hasComparison) {
+        results.push({ cond, isNullCheckOnly });
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Counts Java Outcome Assertions in a standalone code snippet (e.g. a Markdown code block),
+ * reusing the Java adapter's Outcome Assertion rules:
+ * - JUnit `assertEquals`, `assertNotEquals`, `assertArrayEquals`, `assertThrows`, `assertTrue`, `assertFalse`, etc. (excluding pure null checks and `assertNotNull`/`assertDoesNotThrow` Liveness Checks)
+ * - AssertJ `assertThat(x).isEqualTo(y)` etc. (excluding `isNotNull`/`isPresent`/`isNotEmpty` Liveness Checks)
+ * - Explicit value comparisons that throw an exception on mismatch (`if (x != expected) throw new ...`) and `assert x == expected;`
+ * - `System.out.println` and comments are never counted as assertions.
+ */
+export function countJavaOutcomeAssertions(sourceText: string): number {
+  const { noComments } = stripCommentsAndMaskStrings(sourceText);
+  let count = 0;
+
+  const junitOutcomeRe =
+    /\b(?:assertEquals|assertNotEquals|assertArrayEquals|assertIterableEquals|assertLinesMatch|assertThrows|assertThrowsExactly|assertSame|assertNotSame|assertTrue|assertFalse)\s*\(([^;]+)\)/g;
+  let jom: RegExpExecArray | null;
+  while ((jom = junitOutcomeRe.exec(noComments)) !== null) {
+    const expr = jom[1]!;
+    const isNullCheckOnly =
+      /\b(?:!=|==)\s*null\b/.test(expr) && !/(?:==|!=)\s*[^n\s]/.test(expr);
+    if (!isNullCheckOnly) {
+      count++;
+    }
+  }
+
+  const assertJRe = /\bassertThat\s*\(([^;]+?)\)\s*\.\s*([A-Za-z0-9_]+)\s*\(/g;
+  let ajm: RegExpExecArray | null;
+  while ((ajm = assertJRe.exec(noComments)) !== null) {
+    const matcher = ajm[2]!;
+    const isLiveness = /^(?:isNotNull|isPresent|isNotEmpty)$/.test(matcher);
+    if (!isLiveness) {
+      count++;
+    }
+  }
+
+  const assertJThrownRe = /\bassertThatThrownBy\s*\(/g;
+  while (assertJThrownRe.exec(noComments) !== null) {
+    count++;
+  }
+
+  for (const tc of extractJavaThrowComparisonExpressions(sourceText)) {
+    if (!tc.isNullCheckOnly) {
+      count++;
+    }
+  }
+
+  const javaAssertRe = /\bassert\s+([^;:]+)(?::[^;]+)?;/g;
+  let jam: RegExpExecArray | null;
+  while ((jam = javaAssertRe.exec(noComments)) !== null) {
+    const { hasComparison, isNullCheckOnly } = isJavaValueComparisonExpr(jam[1]!);
+    if (hasComparison && !isNullCheckOnly) {
+      count++;
+    }
+  }
+
+  return count;
 }
 
 // ============================================================================
