@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
+import { analyzeDocClaims } from "./doc-claims.js";
 import { computeDiffComparison, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { installCodefogSkill } from "./skill-installer.js";
@@ -559,10 +560,6 @@ export async function runCli(
       return 1;
     }
 
-    if (failOn === "doc-returned") {
-      docsMode = true;
-    }
-
     const report = await analyzeRepository({
       rootDir,
       coveragePath: coveragePaths.length > 0 ? coveragePaths : undefined,
@@ -608,15 +605,23 @@ export async function runCli(
     if (failOn === "contested" && report.summary.metrics.contestedOracles > 0) {
       return 1;
     }
-    if (
-      failOn === "doc-returned" &&
-      ((report.summary.docClaimsByState?.["fog-returned"] ?? 0) > 0 ||
-        report.findings.some((f) => f.tags?.includes("doc-fog-returned")))
-    ) {
-      return 1;
-    }
     if (failOn === "returned" && report.summary.locByState["fog-returned"] > 0) {
       return 1;
+    }
+    if (failOn === "doc-returned") {
+      const docReturnedCount =
+        report.summary.docClaimsByState !== undefined
+          ? report.summary.docClaimsByState["fog-returned"]
+          : (
+              await analyzeDocClaims({
+                rootDir,
+                checkExternalLinks: checkExternalLinks || undefined,
+                runDocs: runDocs || undefined,
+              })
+            ).docClaimsByState["fog-returned"];
+      if (docReturnedCount > 0) {
+        return 1;
+      }
     }
     if (
       failOn === "regression" &&
