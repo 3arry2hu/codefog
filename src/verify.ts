@@ -5,13 +5,24 @@ import { promisify } from "node:util";
 import ts from "typescript";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import {
+  analyzeDocClaims,
+  buildRepoSymbolIndex,
+  extractSymbolsFromSource,
+  isInstructionFile,
+  loadPackageManifestInfo,
+  type DocBlock,
+  type ParsedDocFile,
+  type RepoSymbolIndex,
+} from "./doc-claims.js";
+import { createGitTimelineSession, type GitTimelineSession } from "./git-freshness.js";
+import {
   extractPolyglotFunctionSpans,
   getPolyglotAdapter,
   isCompilerErrorOutput,
   isPolyglotSourceFile,
 } from "./polyglot.js";
 import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
-import type { SurvivingMutant } from "./types.js";
+import type { DeletedDocClaimEvent, DocClaim, DocReferent, SurvivingMutant } from "./types.js";
 
 const execAsync = promisify(exec);
 
@@ -26,6 +37,8 @@ export interface VerifyOptions {
   oracle?: boolean;
   expectationsPath?: string;
   defectsPath?: string;
+  runDocs?: boolean;
+  checkExternalLinks?: boolean;
 }
 
 export interface VerifyResult {
@@ -320,7 +333,574 @@ async function detectDefaultTestCommand(
   return `node --test${testTargets}`;
 }
 
+export function isDocVerifyTarget(filePath: string): boolean {
+  const norm = filePath.replace(/\\/g, "/");
+  return /\.(?:md|mdc|markdown)$/i.test(norm) || isInstructionFile(norm);
+}
+
+interface AlignedBlockHunk {
+  headBlocks: DocBlock[];
+  curBlocks: DocBlock[];
+}
+
+export function alignDocBlockHunks(
+  headDoc: ParsedDocFile,
+  curDoc: ParsedDocFile,
+): AlignedBlockHunk[] {
+  const H = headDoc.blocks.filter((b) => !b.ignored);
+  const C = curDoc.blocks.filter((b) => !b.ignored);
+  const m = H.length;
+  const n = C.length;
+
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (H[i]!.kind === C[j]!.kind && H[i]!.normalizedText === C[j]!.normalizedText) {
+        dp[i]![j] = 1 + dp[i + 1]![j + 1]!;
+      } else {
+        dp[i]![j] = Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
+      }
+    }
+  }
+
+  const anchors: Array<{ hi: number; ci: number }> = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (H[i]!.kind === C[j]!.kind && H[i]!.normalizedText === C[j]!.normalizedText) {
+      anchors.push({ hi: i, ci: j });
+      i++;
+      j++;
+    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+
+  const hunks: AlignedBlockHunk[] = [];
+  let prevH = 0;
+  let prevC = 0;
+  for (const anchor of anchors) {
+    if (anchor.hi > prevH || anchor.ci > prevC) {
+      hunks.push({
+        headBlocks: H.slice(prevH, anchor.hi),
+        curBlocks: C.slice(prevC, anchor.ci),
+      });
+    }
+    prevH = anchor.hi + 1;
+    prevC = anchor.ci + 1;
+  }
+  if (prevH < m || prevC < n) {
+    hunks.push({
+      headBlocks: H.slice(prevH, m),
+      curBlocks: C.slice(prevC, n),
+    });
+  }
+
+  return hunks;
+}
+
+async function findHistoricalSiblingSymbols(
+  gitSession: GitTimelineSession,
+  file: string,
+  targetSymbol: string,
+): Promise<Set<string>> {
+  if (!gitSession.isGitRepo) return new Set();
+  const commits = await gitSession.getFileCommits(file);
+  for (const c of commits) {
+    const text = await gitSession.getFileTextAtCommit(c.sha, file);
+    if (!text) continue;
+    const syms = extractSymbolsFromSource(text, file);
+    if (syms.some((s) => s.name === targetSymbol)) {
+      return new Set(syms.filter((s) => s.name !== targetSymbol).map((s) => s.name));
+    }
+  }
+  return new Set();
+}
+
+async function resolveExistingReferentsForClaim(
+  claim: DocClaim,
+  symbolIndex: RepoSymbolIndex,
+  gitSession: GitTimelineSession,
+  rootDir: string,
+  pkgInfo: Awaited<ReturnType<typeof loadPackageManifestInfo>>,
+  curDoc?: ParsedDocFile,
+): Promise<DocReferent[]> {
+  const refs =
+    claim.referents.length > 0
+      ? claim.referents
+      : claim.referent
+        ? [claim.referent]
+        : [];
+  const active: DocReferent[] = [];
+
+  for (const ref of refs) {
+    if (ref.kind === "symbol") {
+      const symName = ref.symbol ?? claim.text;
+      const byName = symbolIndex.byName.get(symName) ?? [];
+      const inSameFile = ref.file ? byName.filter((s) => s.file === ref.file) : [];
+      const matched = inSameFile.length > 0 ? inSameFile : byName;
+      if (matched.length > 0) {
+        for (const s of matched) {
+          active.push({
+            kind: "symbol",
+            file: s.file,
+            symbol: s.name,
+            startLine: s.startLine,
+            endLine: s.endLine,
+            runtimeFingerprint: s.runtimeFingerprint,
+          });
+        }
+        continue;
+      }
+
+      // Check if symbol was renamed in ref.file (or moved with identical runtimeFingerprint)
+      if (ref.file) {
+        const curFileSyms = symbolIndex.byFile.get(ref.file) ?? [];
+        const histSiblings = await findHistoricalSiblingSymbols(gitSession, ref.file, symName);
+        const newSymsInFile = curFileSyms.filter((s) => !histSiblings.has(s.name));
+
+        const fpMatches = ref.runtimeFingerprint
+          ? newSymsInFile.filter((s) => s.runtimeFingerprint === ref.runtimeFingerprint)
+          : [];
+        if (fpMatches.length > 0) {
+          for (const s of fpMatches) {
+            active.push({
+              kind: "symbol",
+              file: s.file,
+              symbol: s.name,
+              startLine: s.startLine,
+              endLine: s.endLine,
+              runtimeFingerprint: s.runtimeFingerprint,
+            });
+          }
+          continue;
+        }
+
+        if (ref.startLine !== undefined && ref.endLine !== undefined) {
+          const lineOverlapMatches = newSymsInFile.filter(
+            (s) => s.startLine <= ref.endLine! && s.endLine >= ref.startLine!,
+          );
+          for (const s of lineOverlapMatches) {
+            active.push({
+              kind: "symbol",
+              file: s.file,
+              symbol: s.name,
+              startLine: s.startLine,
+              endLine: s.endLine,
+              runtimeFingerprint: s.runtimeFingerprint,
+            });
+          }
+        }
+      }
+    } else if (ref.kind === "script" && ref.script) {
+      if (pkgInfo.scripts.has(ref.script)) {
+        active.push({
+          kind: "script",
+          file: "package.json",
+          script: ref.script,
+          scriptDefinition: pkgInfo.scripts.get(ref.script),
+        });
+      }
+    } else if (ref.kind === "file" && ref.file) {
+      try {
+        await fs.access(path.join(rootDir, ref.file));
+        active.push({ kind: "file", file: ref.file });
+      } catch {
+        // file deleted
+      }
+    } else if (ref.kind === "bin" && ref.bin) {
+      const binOk =
+        pkgInfo.binNames.has(ref.bin) &&
+        (!ref.subcommand || pkgInfo.binSubcommands.has(ref.subcommand));
+      if (binOk) {
+        active.push(ref);
+      }
+    } else if (ref.kind === "anchor" && ref.anchor) {
+      if (curDoc?.headings.some((h) => h.slug === ref.anchor)) {
+        active.push(ref);
+      }
+    }
+  }
+
+  return active;
+}
+
+function claimMatchesAnyReferent(claim: DocClaim, targets: DocReferent[]): boolean {
+  const claimRefs =
+    claim.referents.length > 0
+      ? claim.referents
+      : claim.referent
+        ? [claim.referent]
+        : [];
+  for (const cr of claimRefs) {
+    for (const tr of targets) {
+      if (cr.kind !== tr.kind) continue;
+      if (cr.kind === "symbol" && cr.file === tr.file && cr.symbol === tr.symbol) {
+        return true;
+      }
+      if (cr.kind === "file" && cr.file === tr.file) {
+        return true;
+      }
+      if (cr.kind === "script" && cr.script === tr.script) {
+        return true;
+      }
+      if (cr.kind === "bin" && cr.bin === tr.bin && cr.subcommand === tr.subcommand) {
+        return true;
+      }
+      if (cr.kind === "anchor" && cr.anchor === tr.anchor) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyResult> {
+  const rootDir = path.resolve(options.rootDir);
+  const absTarget = path.resolve(rootDir, options.targetFile);
+  const relTarget = path.relative(rootDir, absTarget).replace(/\\/g, "/");
+
+  const [gitSession, curSymbolIndex, pkgInfo] = await Promise.all([
+    createGitTimelineSession(rootDir),
+    buildRepoSymbolIndex(rootDir),
+    loadPackageManifestInfo(rootDir),
+  ]);
+
+  const headText = gitSession.isGitRepo
+    ? await gitSession.getFileTextAtCommit("HEAD", relTarget)
+    : null;
+
+  const [headAnalysis, curAnalysis] = await Promise.all([
+    headText !== null
+      ? analyzeDocClaims({
+          rootDir,
+          docFileOverrides: new Map([[relTarget, headText]]),
+          extraDocFiles: [relTarget],
+        })
+      : Promise.resolve(null),
+    analyzeDocClaims({
+      rootDir,
+      runDocs: options.runDocs,
+      checkExternalLinks: options.checkExternalLinks,
+      extraDocFiles: [relTarget],
+    }),
+  ]);
+
+  const curDoc = curAnalysis.parsedDocs.find((d) => d.file === relTarget);
+  const headDoc = headAnalysis?.parsedDocs.find((d) => d.file === relTarget);
+  const curFileClaims = curAnalysis.docClaims.filter((c) => c.file === relTarget);
+  const headFileClaims = (headAnalysis?.docClaims ?? []).filter((c) => c.file === relTarget);
+
+  const violations: string[] = [];
+
+  const inRange = (start: number, end: number): boolean => {
+    if (options.startLine !== undefined && end < options.startLine) return false;
+    if (options.endLine !== undefined && start > options.endLine) return false;
+    return true;
+  };
+
+  if (!options.allowSourceChange && gitSession.isGitRepo) {
+    const referentFiles = new Set<string>();
+    for (const c of [...headFileClaims, ...curFileClaims]) {
+      if (!inRange(c.blockStartLine, c.blockEndLine) && !inRange(c.startLine, c.endLine)) {
+        continue;
+      }
+      const refs =
+        c.referents.length > 0 ? c.referents : c.referent ? [c.referent] : [];
+      for (const r of refs) {
+        if (r.file && r.file !== relTarget && r.kind !== "generated-artifact") {
+          referentFiles.add(r.file);
+        }
+      }
+    }
+
+    for (const refFile of Array.from(referentFiles).sort()) {
+      const headRefText = await gitSession.getFileTextAtCommit("HEAD", refFile);
+      let curRefText: string | null = null;
+      try {
+        curRefText = (await fs.readFile(path.join(rootDir, refFile), "utf8")).trim();
+      } catch {
+        curRefText = null;
+      }
+      if (headRefText !== null && curRefText !== headRefText.trim()) {
+        violations.push(
+          `Anti-gaming gate triggered: referent source file '${refFile}' has uncommitted changes relative to HEAD while verifying ${relTarget}. Pass --allow-source-change if modifying source code is intentional.`,
+        );
+      }
+    }
+  }
+
+  if (headDoc && curDoc) {
+    const hunks = alignDocBlockHunks(headDoc, curDoc);
+    let checkedAnyModifiedBlock = false;
+    const checkedClaimIds = new Set<string>();
+
+    for (const hunk of hunks) {
+      const hunkInRange =
+        hunk.headBlocks.some((b) => inRange(b.startLine, b.endLine)) ||
+        hunk.curBlocks.some((b) => inRange(b.startLine, b.endLine));
+      if (!hunkInRange) continue;
+      checkedAnyModifiedBlock = true;
+
+      const pairCount =
+        hunk.headBlocks.length === hunk.curBlocks.length ? hunk.headBlocks.length : 0;
+
+      for (let idx = 0; idx < hunk.headBlocks.length; idx++) {
+        const hb = hunk.headBlocks[idx]!;
+        const pairedCurBlocks =
+          pairCount > 0 ? [hunk.curBlocks[idx]!] : hunk.curBlocks;
+        if (
+          !inRange(hb.startLine, hb.endLine) &&
+          !pairedCurBlocks.some((cb) => inRange(cb.startLine, cb.endLine))
+        ) {
+          continue;
+        }
+
+        const hbClaims = headFileClaims.filter(
+          (c) => c.blockStartLine === hb.startLine && c.blockEndLine === hb.endLine,
+        );
+        const cbClaims = curFileClaims.filter((c) =>
+          pairedCurBlocks.some(
+            (cb) => c.blockStartLine === cb.startLine && c.blockEndLine === cb.endLine,
+          ),
+        );
+
+        for (const hc of hbClaims) {
+          if (hc.state !== "fog-returned") continue;
+          const activeRefs = await resolveExistingReferentsForClaim(
+            hc,
+            curSymbolIndex,
+            gitSession,
+            rootDir,
+            pkgInfo,
+            curDoc,
+          );
+          if (activeRefs.length === 0) continue;
+
+          const kept = cbClaims.some(
+            (cc) => cc.state !== "fog-returned" && claimMatchesAnyReferent(cc, activeRefs),
+          );
+          if (!kept) {
+            const refDesc = activeRefs
+              .map((r) => (r.file && r.symbol ? `${r.file} (${r.symbol})` : r.file ?? r.symbol ?? hc.text))
+              .join(", ");
+            violations.push(
+              `Anti-gaming gate triggered: fog-returned doc claim '${hc.text}' at ${relTarget}:${hc.startLine} was deleted or rewritten into vague text while referent ${refDesc} still exists.`,
+            );
+          }
+        }
+
+        // Also check if a deleted referent's dead symbol token is still kept in the modified block
+        for (const hc of hbClaims) {
+          if (hc.state !== "fog-returned" || hc.kind !== "symbol") continue;
+          const activeRefs = await resolveExistingReferentsForClaim(
+            hc,
+            curSymbolIndex,
+            gitSession,
+            rootDir,
+            pkgInfo,
+            curDoc,
+          );
+          if (activeRefs.length > 0) continue;
+          const rawCodeToken = `\`${hc.rawText}\``;
+          if (pairedCurBlocks.some((cb) => cb.rawText.includes(rawCodeToken))) {
+            violations.push(
+              `Unresolvable doc claim '${hc.text}' (${hc.kind}) in modified block at ${relTarget}:${hc.startLine}.`,
+            );
+          }
+        }
+      }
+
+      // Rule 3: All claims in modified blocks must be resolvable (and code blocks must pass under --run-docs)
+      for (const cb of hunk.curBlocks) {
+        if (!inRange(cb.startLine, cb.endLine)) continue;
+        const cbClaims = curFileClaims.filter(
+          (c) => c.blockStartLine === cb.startLine && c.blockEndLine === cb.endLine,
+        );
+        for (const cc of cbClaims) {
+          if (cc.state === "fog-returned" && !checkedClaimIds.has(cc.id)) {
+            checkedClaimIds.add(cc.id);
+            if (cc.kind === "code-block" && cc.executionOutput) {
+              violations.push(
+                `Doc code block at ${relTarget}:${cc.startLine}-${cc.endLine} failed execution: ${cc.executionOutput}`,
+              );
+            } else {
+              violations.push(
+                `Unresolvable doc claim '${cc.text}' (${cc.kind}) in modified block at ${relTarget}:${cc.startLine}.`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    if (options.runDocs) {
+      for (const cc of curFileClaims) {
+        if (
+          cc.kind === "code-block" &&
+          cc.state === "fog-returned" &&
+          inRange(cc.blockStartLine, cc.blockEndLine) &&
+          !checkedClaimIds.has(cc.id)
+        ) {
+          checkedClaimIds.add(cc.id);
+          violations.push(
+            `Doc code block at ${relTarget}:${cc.startLine}-${cc.endLine} failed execution: ${cc.executionOutput ?? "execution failed"}`,
+          );
+        }
+      }
+    }
+
+    if (!checkedAnyModifiedBlock) {
+      for (const cc of curFileClaims) {
+        if (
+          cc.state === "fog-returned" &&
+          inRange(cc.blockStartLine, cc.blockEndLine) &&
+          !checkedClaimIds.has(cc.id)
+        ) {
+          checkedClaimIds.add(cc.id);
+          violations.push(
+            `Unresolved or fog-returned doc claim '${cc.text}' (${cc.kind}) at ${relTarget}:${cc.startLine}.`,
+          );
+        }
+      }
+    }
+  } else {
+    for (const cc of curFileClaims) {
+      if (cc.state === "fog-returned" && inRange(cc.blockStartLine, cc.blockEndLine)) {
+        violations.push(
+          `Unresolvable doc claim '${cc.text}' (${cc.kind}) at ${relTarget}:${cc.startLine}.`,
+        );
+      }
+    }
+  }
+
+  if (violations.length > 0) {
+    return {
+      passed: false,
+      exitCode: 1,
+      summary:
+        `Verification FAILED for ${relTarget}:\n` +
+        violations.map((v) => `  - ${v}`).join("\n"),
+      totalMutants: 0,
+      killedMutants: 0,
+      survivingMutants: [],
+      violations,
+    };
+  }
+
+  return {
+    passed: true,
+    exitCode: 0,
+    summary: `VERIFIED ${relTarget}: All doc verification gates passed.`,
+    totalMutants: 0,
+    killedMutants: 0,
+    survivingMutants: [],
+    violations: [],
+  };
+}
+
+export async function detectDeletedDocClaimsAgainstRef(
+  rootDir: string,
+  baseRef: string,
+): Promise<DeletedDocClaimEvent[]> {
+  const absRoot = path.resolve(rootDir);
+  const [gitSession, curSymbolIndex, pkgInfo, curAnalysis] = await Promise.all([
+    createGitTimelineSession(absRoot),
+    buildRepoSymbolIndex(absRoot),
+    loadPackageManifestInfo(absRoot),
+    analyzeDocClaims({ rootDir: absRoot }),
+  ]);
+
+  if (!gitSession.isGitRepo) return [];
+
+  const overrides = new Map<string, string>();
+  for (const curDoc of curAnalysis.parsedDocs) {
+    const baseText = await gitSession.getFileTextAtCommit(baseRef, curDoc.file);
+    if (baseText !== null && baseText !== curDoc.content) {
+      overrides.set(curDoc.file, baseText);
+    }
+  }
+
+  if (overrides.size === 0) return [];
+
+  const baseAtCurrentAnalysis = await analyzeDocClaims({
+    rootDir: absRoot,
+    docFileOverrides: overrides,
+  });
+
+  const deletedEvents: DeletedDocClaimEvent[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const [docFile] of overrides.entries()) {
+    const baseDoc = baseAtCurrentAnalysis.parsedDocs.find((d) => d.file === docFile);
+    const curDoc = curAnalysis.parsedDocs.find((d) => d.file === docFile);
+    if (!baseDoc || !curDoc) continue;
+
+    const baseFileClaims = baseAtCurrentAnalysis.docClaims.filter((c) => c.file === docFile);
+    const curFileClaims = curAnalysis.docClaims.filter((c) => c.file === docFile);
+    const hunks = alignDocBlockHunks(baseDoc, curDoc);
+
+    for (const hunk of hunks) {
+      const pairCount =
+        hunk.headBlocks.length === hunk.curBlocks.length ? hunk.headBlocks.length : 0;
+
+      for (let idx = 0; idx < hunk.headBlocks.length; idx++) {
+        const hb = hunk.headBlocks[idx]!;
+        const pairedCurBlocks =
+          pairCount > 0 ? [hunk.curBlocks[idx]!] : hunk.curBlocks;
+
+        const hbClaims = baseFileClaims.filter(
+          (c) => c.blockStartLine === hb.startLine && c.blockEndLine === hb.endLine,
+        );
+        const cbClaims = curFileClaims.filter((c) =>
+          pairedCurBlocks.some(
+            (cb) => c.blockStartLine === cb.startLine && c.blockEndLine === cb.endLine,
+          ),
+        );
+
+        for (const hc of hbClaims) {
+          if (hc.state !== "fog-returned") continue;
+          const activeRefs = await resolveExistingReferentsForClaim(
+            hc,
+            curSymbolIndex,
+            gitSession,
+            absRoot,
+            pkgInfo,
+            curDoc,
+          );
+          if (activeRefs.length === 0) continue;
+
+          const kept = cbClaims.some(
+            (cc) => cc.state !== "fog-returned" && claimMatchesAnyReferent(cc, activeRefs),
+          );
+          if (!kept) {
+            const dedupKey = `${hc.file}:${hc.startLine}:${hc.rawText}`;
+            if (!seenKeys.has(dedupKey)) {
+              seenKeys.add(dedupKey);
+              deletedEvents.push({
+                file: hc.file,
+                claimText: hc.text,
+                rawText: hc.rawText,
+                kind: hc.kind,
+                line: hc.startLine,
+                referent: activeRefs[0]!,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return deletedEvents;
+}
+
 export async function verifyTargetWithMutants(options: VerifyOptions): Promise<VerifyResult> {
+  if (isDocVerifyTarget(options.targetFile)) {
+    return verifyDocTarget(options);
+  }
   const rootDir = path.resolve(options.rootDir);
   const absTarget = path.resolve(rootDir, options.targetFile);
   const relTarget = path.relative(rootDir, absTarget).replace(/\\/g, "/");

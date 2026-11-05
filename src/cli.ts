@@ -255,11 +255,15 @@ export async function runCli(
       let oracle = false;
       let expectationsPath: string | undefined;
       let defectsPath: string | undefined;
+      let runDocs = false;
+      let checkExternalLinks = false;
 
       if (process.env.npm_command === "exec") {
         if (process.env.npm_config_mutants === "true") mutants = true;
         if (process.env.npm_config_oracle === "true") oracle = true;
         if (process.env.npm_config_allow_source_change === "true") allowSourceChange = true;
+        if (process.env.npm_config_run_docs === "true") runDocs = true;
+        if (process.env.npm_config_check_external_links === "true") checkExternalLinks = true;
         const envExpectations = process.env.npm_config_expectations;
         if (envExpectations && envExpectations !== "true" && envExpectations !== "false") {
           expectationsPath = envExpectations;
@@ -293,6 +297,10 @@ export async function runCli(
           defectsPath = argv[++i];
         } else if (arg === "--allow-source-change") {
           allowSourceChange = true;
+        } else if (arg === "--run-docs") {
+          runDocs = true;
+        } else if (arg === "--check-external-links") {
+          checkExternalLinks = true;
         } else if (arg === "--root") {
           rootDir = path.resolve(argv[++i] ?? ".");
         } else if (arg === "--lines") {
@@ -333,6 +341,8 @@ export async function runCli(
         oracle,
         expectationsPath,
         defectsPath,
+        runDocs,
+        checkExternalLinks,
       });
 
       if (verifyRes.passed) {

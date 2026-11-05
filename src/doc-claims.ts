@@ -1241,21 +1241,33 @@ export async function analyzeDocClaims(options: {
   rootDir: string;
   checkExternalLinks?: boolean;
   runDocs?: boolean;
+  docFileOverrides?: Map<string, string>;
+  extraDocFiles?: string[];
 }): Promise<DocAnalysisResult> {
   const rootDir = path.resolve(options.rootDir);
-  const [docFiles, symbolIndex, gitignoreMatchers, pkgInfo, gitSession] = await Promise.all([
-    discoverDocFiles(rootDir),
-    buildRepoSymbolIndex(rootDir),
-    loadGitignoreMatchers(rootDir),
-    loadPackageManifestInfo(rootDir),
-    createGitTimelineSession(rootDir),
-  ]);
+  const [discoveredDocFiles, symbolIndex, gitignoreMatchers, pkgInfo, gitSession] =
+    await Promise.all([
+      discoverDocFiles(rootDir),
+      buildRepoSymbolIndex(rootDir),
+      loadGitignoreMatchers(rootDir),
+      loadPackageManifestInfo(rootDir),
+      createGitTimelineSession(rootDir),
+    ]);
+  const docFileSet = new Set<string>(discoveredDocFiles);
+  for (const extra of options.extraDocFiles ?? []) {
+    docFileSet.add(toPosix(extra));
+  }
+  const docFiles = Array.from(docFileSet).sort((a, b) => a.localeCompare(b));
   const parsedDocs: ParsedDocFile[] = [];
   const parsedDocsByPath = new Map<string, ParsedDocFile>();
 
   for (const relPath of docFiles) {
     try {
-      const content = await fs.readFile(path.join(rootDir, relPath), "utf8");
+      const overrideContent = options.docFileOverrides?.get(relPath);
+      const content =
+        overrideContent !== undefined
+          ? overrideContent
+          : await fs.readFile(path.join(rootDir, relPath), "utf8");
       const parsed = parseMarkdownDoc(relPath, content);
       parsedDocs.push(parsed);
       parsedDocsByPath.set(relPath, parsed);
@@ -1457,16 +1469,31 @@ export async function analyzeDocClaims(options: {
     const hasNormalized = (parsed: ParsedDocFile | null): boolean =>
       Boolean(parsed?.blocks.some((b) => b.normalizedText === block.normalizedText));
 
+    let startIdx = 0;
     if (!hasNormalized(headDoc)) {
-      return {
-        sha: "WORKTREE",
-        shortSha: gitSession.commits[0]?.shortSha ?? "0000000",
-        isoDate: new Date().toISOString(),
-        index: -1,
-      };
+      if (!options.docFileOverrides?.has(docFile)) {
+        return {
+          sha: "WORKTREE",
+          shortSha: gitSession.commits[0]?.shortSha ?? "0000000",
+          isoDate: new Date().toISOString(),
+          index: -1,
+        };
+      }
+      let foundIdx = -1;
+      for (let i = 1; i < docCommits.length; i++) {
+        const d = await getParsedDocAtCommit(docCommits[i]!.sha, docFile);
+        if (hasNormalized(d)) {
+          foundIdx = i;
+          break;
+        }
+      }
+      if (foundIdx === -1) {
+        return docCommits[docCommits.length - 1]!;
+      }
+      startIdx = foundIdx;
     }
 
-    for (let i = 0; i < docCommits.length; i++) {
+    for (let i = startIdx; i < docCommits.length; i++) {
       const cur = docCommits[i]!;
       const next = docCommits[i + 1];
       if (!next) return cur;

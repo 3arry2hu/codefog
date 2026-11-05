@@ -73,12 +73,12 @@ export function normalizeSkillAgents(
 export function renderCodefogSkillMarkdown(): string {
   return `---
 name: codefog
-description: Evaluate repository code quality and test trust with codefog, produce a structured five-state diagnosis (fog-returned, fog, self-proof-fog, weak-evidence, verified), and run a continuous test-strengthening and mutation-verification loop until the target Trust Score or zero-fog goal is reached. Use when the user asks to evaluate code or test quality, measure Trust Score, clear code fog, fix pseudo-tested or weak-evidence methods, or iteratively optimize repository verification.
+description: Evaluate repository code quality and test trust with codefog, produce a structured five-state diagnosis (fog-returned, fog, self-proof-fog, weak-evidence, verified), and run a continuous test-strengthening, mutation-verification, and documentation-synchronization loop until the target Trust Score, Doc Trust Score, or zero-fog goal is reached. Use when the user asks to evaluate code or test quality, measure Trust Score or Doc Trust Score, clear code or doc fog, fix pseudo-tested or weak-evidence methods, or iteratively optimize repository verification.
 ---
 
 # Codefog Quality Evaluation & Continuous Optimization Loop
 
-Drive the repository from unverified or degraded test coverage to verified behavioral trust using \`@barryzhu/codefog\`. Execute the loop below in order: **Baseline Evaluation → Structured Conclusion → Iterative Optimization & Mutation Verification → Goal Convergence**.
+Drive the repository from unverified or degraded test coverage to verified behavioral trust using \`@barryzhu/codefog\`. Execute the loop below in order: **Baseline Evaluation → Structured Conclusion → Iterative Optimization & Mutation Verification → Documentation Synchronization → Goal Convergence**.
 
 ---
 
@@ -89,17 +89,17 @@ Drive the repository from unverified or degraded test coverage to verified behav
    - **Go**: \`go test -coverprofile=coverage.out ./...\`
    - **Rust**: \`cargo llvm-cov --lcov --output-path coverage/lcov.info\`
    - **Java**: \`mvn test jacoco:report\` (or \`./gradlew test jacocoTestReport\`)
-2. **Execute \`codefog\`** to compute the five-state Fog Map and JSON report:
+2. **Execute \`codefog\`** to compute the five-state Fog Map and JSON report (add \`--docs\` when evaluating documentation claims):
    \`\`\`bash
-   npx --yes @barryzhu/codefog@latest --fail-on none
+   npx --yes @barryzhu/codefog@latest --docs --fail-on none
    \`\`\`
    To inspect machine-readable findings (\`CF-xxxx\`), run:
    \`\`\`bash
-   npx --yes @barryzhu/codefog@latest --json --fail-on none
+   npx --yes @barryzhu/codefog@latest --docs --json --fail-on none
    \`\`\`
    *(Note: \`.codefog/report.html\` is automatically generated on default runs.)*
 
-**Completion criterion**: You have the current \`Trust Score\`, metrics breakdown, five-state LOC counts, and the ranked list of \`findings\`.
+**Completion criterion**: You have the current \`Trust Score\`, \`Doc Trust Score\`, metrics breakdown, five-state LOC and Doc Claim counts, and the ranked list of \`findings\`.
 
 ---
 
@@ -111,6 +111,7 @@ Before editing any tests, present a concise evaluation conclusion to the user us
 ## Codefog 评测结论 (Evaluation Summary)
 
 - **Trust Score（信任分）**: <score>/100 （目标: <target>/100）
+- **Doc Trust Score（文档信任分）**: <docScore>/100
 - **核心指标**:的行覆盖 <line>% | 分支覆盖 <branch>% | 检验覆盖 (Checked) <checked>% | 伪测试方法 (Pseudo-tested): <count>
 - **五态分布 (LOC)**:
   - \`fog-returned\` (回雾/高危退化): <n>
@@ -127,7 +128,7 @@ Before editing any tests, present a concise evaluation conclusion to the user us
 
 ### Target Goal Definition
 Unless the user specifies a custom threshold, set the optimization target to:
-1. **Zero \`fog-returned\`** (\`locByState["fog-returned"] === 0\`)
+1. **Zero \`fog-returned\`** (\`locByState["fog-returned"] === 0\` and \`docClaimsByState["fog-returned"] === 0\`)
 2. **Zero \`pseudoTestedMethods\`** (\`metrics.pseudoTestedMethods === 0\`)
 3. **\`Trust Score >= 85\`** (or resolve all high-risk findings with \`riskScore >= 5.0\`)
 4. **Zero Oracle Contests** (\`metrics.contestedOracles === 0\`)
@@ -167,13 +168,35 @@ After verifying the target file(s):
 
 ---
 
-## Step 4: Final Convergence Report
+## Step 4: Documentation Synchronization Phase (文档同步阶段)
 
-Once the target goal is achieved (and \`npx --yes @barryzhu/codefog@latest --fail-on returned\` exits \`0\`), report the before/after comparison:
+Once the code verification loop converges, enter the **文档同步 (Documentation Synchronization)** phase to resolve outdated documentation claims (\`doc-fog-returned\`) and conflicting AI instructions (\`instruction-conflict\`):
+
+1. **Inspect documentation findings**:
+   \`\`\`bash
+   npx --yes @barryzhu/codefog@latest --docs --json --fail-on none
+   \`\`\`
+2. **Strict anti-gaming rules for documentation edits**:
+   - 在文档同步阶段，Agent **只能修改文档**（严禁为了消除文档回雾而反向修改业务代码文件）。
+   - 引用对象仍存在时，严禁直接删除 \`fog-returned\` 声明或将其改写为模糊描述（如“相关函数”）；若引用对象已改名，必须在同一块内替换为新名称。仅当引用对象确实已被删除时才允许删除对应声明。
+   - 被修改块中的所有声明必须可解析；若开启 \`--run-docs\`，可执行代码块必须跑通。
+3. **Run the Documentation Verification Gate (\`codefog verify <doc.md>\`)**:
+   Every modified documentation file must pass \`codefog verify <doc.md>\`:
+   \`\`\`bash
+   npx --yes @barryzhu/codefog@latest verify <doc.md> --lines <startLine>-<endLine>
+   \`\`\`
+   *(Or run \`codefog verify <doc.md>\` on the whole document; add \`--run-docs\` when verifying runnable code blocks.)*
+
+---
+
+## Step 5: Final Convergence Report
+
+Once the target goal is achieved (and \`npx --yes @barryzhu/codefog@latest --docs --fail-on returned\` and \`--fail-on doc-returned\` exit \`0\`), report the before/after comparison:
 
 - **Trust Score Delta**: \`<before> → <after> (+<delta>)\`
+- **Doc Trust Score Delta**: \`<before> → <after> (+<delta>)\`
 - **Checked Coverage Delta**: \`<before>% → <after>%\`
-- **Findings Resolved**: list each \`CF-xxxx\` finding transitions (e.g. \`fog-returned → verified\`) and the mutation kill rate verified by \`codefog verify --mutants\`.
+- **Findings Resolved**: list each \`CF-xxxx\` code and documentation finding transition (e.g. \`fog-returned → verified\` / \`weak-evidence\`) and the verification results from \`codefog verify\`.
 - **Visual Fog Map**: remind the user they can open \`.codefog/report.html\` (or run \`npx @barryzhu/codefog@latest --open\`) to inspect the updated interactive Fog Map.
 `;
 }
