@@ -178,7 +178,7 @@ export async function runCli(
           "  --pr-comment [dir]    Write PR comment Markdown and SVG artifacts",
           "  --json                Output full JSON report to stdout",
           "  --open                Open HTML Fog Map in default browser",
-          "  --fail-on <policy>    Exit gate policy: returned | regression | any-fog | contested | none (default: returned)",
+          "  --fail-on <policy>    Exit gate policy: returned | doc-returned | regression | any-fog | contested | none (default: returned)",
           "  --install-skill [ag]  Install AI agent skill for codex, claude-code, codebuddy, cursor (default: all)",
           "  -g, --global          Install AI skill into user home directory (~/.cursor/skills, ~/.claude/skills, etc.)",
           "  -v, --version         Print version",
@@ -421,7 +421,14 @@ export async function runCli(
       }
     }
 
-    const validFailOnPolicies = new Set(["none", "returned", "regression", "any-fog", "contested"]);
+    const validFailOnPolicies = new Set([
+      "none",
+      "returned",
+      "doc-returned",
+      "regression",
+      "any-fog",
+      "contested",
+    ]);
 
     // Recover options if `npm exec` / `npx` consumed `--<flag>=<val>` into `npm_config_*` env vars
     if (process.env.npm_command === "exec") {
@@ -547,9 +554,13 @@ export async function runCli(
 
     if (!validFailOnPolicies.has(failOn)) {
       io.stderr(
-        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, regression, any-fog, contested, none.\n`,
+        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, doc-returned, regression, any-fog, contested, none.\n`,
       );
       return 1;
+    }
+
+    if (failOn === "doc-returned") {
+      docsMode = true;
     }
 
     const report = await analyzeRepository({
@@ -595,6 +606,13 @@ export async function runCli(
 
     if (failOn === "none") return 0;
     if (failOn === "contested" && report.summary.metrics.contestedOracles > 0) {
+      return 1;
+    }
+    if (
+      failOn === "doc-returned" &&
+      ((report.summary.docClaimsByState?.["fog-returned"] ?? 0) > 0 ||
+        report.findings.some((f) => f.tags?.includes("doc-fog-returned")))
+    ) {
       return 1;
     }
     if (failOn === "returned" && report.summary.locByState["fog-returned"] > 0) {
