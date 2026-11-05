@@ -586,51 +586,12 @@ function isRepoSourceFile(relPath: string): boolean {
 
 export function extractSymbolsFromSource(sourceText: string, filePath: string): RepoSymbol[] {
   const relPath = toPosix(filePath);
-  const symbols: RepoSymbol[] = [];
-
-  if (isPolyglotSourceFile(relPath)) {
-    const adapter = getPolyglotAdapter(relPath);
-    const fnSpans = adapter?.extractFunctionSpans(sourceText, relPath) ?? [];
-    for (const span of fnSpans) {
-      symbols.push({
-        name: span.name,
-        kind: "function",
-        file: relPath,
-        startLine: span.startLine,
-        endLine: span.endLine,
-        runtimeFingerprint: span.runtimeFingerprint,
-      });
-    }
-
-    const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
-    const lines = masked.split("\n");
-    const noCommentLines = noComments.split("\n");
-    const typeRe =
-      relPath.endsWith(".go")
-        ? /^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)\b/
-        : relPath.endsWith(".rs")
-          ? /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait)\s+([A-Za-z_][A-Za-z0-9_]*)\b/
-          : /^\s*(?:(?:public|protected|private|abstract|final|static)\s+)*(?:class|enum|record|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\b/;
-
-    for (let idx = 0; idx < lines.length; idx++) {
-      const m = typeRe.exec(lines[idx]!);
-      if (m && m[1]) {
-        const typeName = m[1];
-        const lineNum = idx + 1;
-        symbols.push({
-          name: typeName,
-          kind: "class",
-          file: relPath,
-          startLine: lineNum,
-          endLine: lineNum,
-          runtimeFingerprint: `class:${typeName}:${(noCommentLines[idx] ?? "").trim()}`,
-        });
-      }
-    }
-
-    return symbols.sort((a, b) => a.startLine - b.startLine);
+  const polyAdapter = getPolyglotAdapter(relPath);
+  if (polyAdapter) {
+    return polyAdapter.extractSymbols(sourceText, relPath);
   }
 
+  const symbols: RepoSymbol[] = [];
   const sf = ts.createSourceFile(
     relPath,
     sourceText,
@@ -662,6 +623,12 @@ export function extractSymbolsFromSource(sourceText: string, filePath: string): 
         if (ts.isMethodDeclaration(member) && member.name) {
           const mName = member.name.getText(sf);
           memberFps.push(`${mName}:${fnFingerprints.get(mName) ?? ""}`);
+        } else if (ts.isPropertyDeclaration(member) && member.name) {
+          const pName = member.name.getText(sf);
+          const initText = member.initializer ? member.initializer.getText(sf).replace(/\s+/g, "") : "";
+          memberFps.push(`prop:${pName}=${initText}`);
+        } else if (ts.isConstructorDeclaration(member) && member.body) {
+          memberFps.push(`ctor:${member.body.getText(sf).replace(/\s+/g, "")}`);
         }
       }
       symbols.push({
@@ -714,6 +681,24 @@ export function extractSymbolsFromSource(sourceText: string, filePath: string): 
   return symbols.sort((a, b) => a.startLine - b.startLine);
 }
 
+function addSymbolToIndex(
+  sym: RepoSymbol,
+  byName: Map<string, RepoSymbol[]>,
+  byQualifiedName: Map<string, RepoSymbol[]>,
+): void {
+  const list = byName.get(sym.name) ?? [];
+  list.push(sym);
+  byName.set(sym.name, list);
+  if (sym.qualifiedName) {
+    const qKeys = new Set([sym.qualifiedName, sym.qualifiedName.replace(/::|#/g, ".")]);
+    for (const qk of qKeys) {
+      const qList = byQualifiedName.get(qk) ?? [];
+      qList.push(sym);
+      byQualifiedName.set(qk, qList);
+    }
+  }
+}
+
 export async function buildRepoSymbolIndex(rootDir: string): Promise<RepoSymbolIndex> {
   const sourceFiles = new Set<string>();
   await collectFilesUnderDir(
@@ -738,14 +723,7 @@ export async function buildRepoSymbolIndex(rootDir: string): Promise<RepoSymbolI
     const fileSymbols = extractSymbolsFromSource(sourceText, relPath);
     byFile.set(relPath, fileSymbols);
     for (const sym of fileSymbols) {
-      const list = byName.get(sym.name) ?? [];
-      list.push(sym);
-      byName.set(sym.name, list);
-      if (sym.qualifiedName) {
-        const qList = byQualifiedName.get(sym.qualifiedName) ?? [];
-        qList.push(sym);
-        byQualifiedName.set(sym.qualifiedName, qList);
-      }
+      addSymbolToIndex(sym, byName, byQualifiedName);
     }
   }
 
@@ -769,7 +747,7 @@ function parseCandidateSymbolToken(code: string): {
   if (/^[A-Za-z_$][A-Za-z0-9_$]*\.[A-Za-z_$][A-Za-z0-9_$]*$/.test(normalized)) {
     const parts = normalized.split(".");
     return {
-      qualifiedName: normalized,
+      qualifiedName: withoutCall,
       bareName: parts[parts.length - 1],
     };
   }
@@ -782,10 +760,12 @@ function resolveSymbolInIndex(
   symbolIndex: RepoSymbolIndex,
 ): RepoSymbol[] {
   if (candidate.qualifiedName) {
-    const byQual = symbolIndex.byQualifiedName.get(candidate.qualifiedName);
+    const byQual =
+      symbolIndex.byQualifiedName.get(candidate.qualifiedName) ??
+      symbolIndex.byQualifiedName.get(candidate.qualifiedName.replace(/::|#/g, "."));
     if (byQual && byQual.length > 0) return byQual;
   }
-  if (candidate.bareName && ! candidate.qualifiedName) {
+  if (candidate.bareName) {
     return symbolIndex.byName.get(candidate.bareName) ?? [];
   }
   return [];
@@ -1480,14 +1460,7 @@ export async function analyzeDocClaims(options: {
           const fileSyms = await getFileSymbolsAtCommit(sha, relPath);
           byFile.set(relPath, fileSyms);
           for (const sym of fileSyms) {
-            const list = byName.get(sym.name) ?? [];
-            list.push(sym);
-            byName.set(sym.name, list);
-            if (sym.qualifiedName) {
-              const qList = byQualifiedName.get(sym.qualifiedName) ?? [];
-              qList.push(sym);
-              byQualifiedName.set(sym.qualifiedName, qList);
-            }
+            addSymbolToIndex(sym, byName, byQualifiedName);
           }
         }
 

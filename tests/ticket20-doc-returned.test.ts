@@ -524,4 +524,100 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     );
     expect(exitCodeReturned).toBe(0);
   });
+
+  it("flags Go/Rust/Java struct and class symbol claims as fog-returned when body members change without updating the first declaration line", async () => {
+    const goFile = path.join(tmpDir, "src", "config.go");
+    const rustFile = path.join(tmpDir, "src", "settings.rs");
+    const javaFile = path.join(tmpDir, "src", "Limits.java");
+    const readmeFile = path.join(tmpDir, "README.md");
+
+    // Commit A: define Go struct, Rust struct, and Java class, and reference them in README.md
+    await fs.writeFile(
+      goFile,
+      [
+        "package config",
+        "",
+        "type FeeConfig struct {",
+        "  RateBps int",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      rustFile,
+      [
+        "pub struct RetrySettings {",
+        "  pub max_retries: u32,",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      javaFile,
+      [
+        "package com.acme;",
+        "public class OrderLimits {",
+        "  public int maxCents = 1000;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      readmeFile,
+      [
+        "# Types",
+        "",
+        "Configure `FeeConfig`, `RetrySettings`, and `OrderLimits`.",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "."]);
+    await git(tmpDir, ["commit", "-m", "feat: add Go/Rust/Java types and README"]);
+
+    const reportA = await analyzeRepository({ rootDir: tmpDir, docs: true });
+    expect(reportA.docClaims?.find((c) => c.rawText === "FeeConfig")?.state).toBe("weak-evidence");
+    expect(reportA.docClaims?.find((c) => c.rawText === "RetrySettings")?.state).toBe("weak-evidence");
+    expect(reportA.docClaims?.find((c) => c.rawText === "OrderLimits")?.state).toBe("weak-evidence");
+
+    // Commit B: modify struct/class body members (keeping the first declaration line identical!)
+    await fs.writeFile(
+      goFile,
+      [
+        "package config",
+        "",
+        "type FeeConfig struct {",
+        "  RateBps int",
+        "  MinFee  int",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      rustFile,
+      [
+        "pub struct RetrySettings {",
+        "  pub max_retries: u64,",
+        "  pub backoff_ms: u64,",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      javaFile,
+      [
+        "package com.acme;",
+        "public class OrderLimits {",
+        "  public int maxCents = 5000;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "src/config.go", "src/settings.rs", "src/Limits.java"]);
+    await git(tmpDir, ["commit", "-m", "feat: update struct/class member fields"]);
+
+    const reportB = await analyzeRepository({ rootDir: tmpDir, docs: true });
+    expect(reportB.docClaims?.find((c) => c.rawText === "FeeConfig")?.state).toBe("fog-returned");
+    expect(reportB.docClaims?.find((c) => c.rawText === "RetrySettings")?.state).toBe("fog-returned");
+    expect(reportB.docClaims?.find((c) => c.rawText === "OrderLimits")?.state).toBe("fog-returned");
+  });
 });

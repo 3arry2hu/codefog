@@ -117,12 +117,39 @@ describe("Ticket 19: Doc Claims extraction, deterministic resolution & Doc Trust
     );
 
     await fs.writeFile(
+      path.join(tmpDir, "src", "validator.rs"),
+      [
+        "pub struct TokenValidator;",
+        "impl TokenValidator {",
+        "  pub fn validate(raw: &str) -> bool {",
+        "    !raw.is_empty()",
+        "  }",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
+      path.join(tmpDir, "src", "OrderService.java"),
+      [
+        "package com.acme;",
+        "public class OrderService {",
+        "  public int submitOrder(int id) {",
+        "    return id;",
+        "  }",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
       path.join(tmpDir, "README.md"),
       [
         "# API",
         "",
         "Call `analyzeRepository` or `FeeCalculator` or `compute`.",
-        "Both modules define `parseToken`.",
+        "Both modules define `parseToken`, and Go defines `auth.parseToken`.",
+        "Rust defines `TokenValidator::validate` and Java defines `OrderService.submitOrder` (or instance call `svc.submitOrder`).",
         "Flags like `--json`, literals like `true`, findings like `CF-xxxx`, and prose `unknownIdentifier` are not claims.",
       ].join("\n"),
       "utf8",
@@ -131,17 +158,33 @@ describe("Ticket 19: Doc Claims extraction, deterministic resolution & Doc Trust
     const report = await analyzeRepository({ rootDir: tmpDir, docs: true });
     const claims = report.docClaims ?? [];
 
-    expect(claims.map((c) => c.target)).toEqual([
+    expect(claims.map((c) => c.rawText)).toEqual([
       "analyzeRepository",
       "FeeCalculator",
       "compute",
       "parseToken",
+      "auth.parseToken",
+      "TokenValidator::validate",
+      "OrderService.submitOrder",
+      "svc.submitOrder",
     ]);
 
     for (const c of claims) {
       expect(c.kind).toBe("symbol");
       expect(c.state).toBe("weak-evidence");
     }
+
+    const goQualClaim = claims.find((c) => c.rawText === "auth.parseToken");
+    expect(goQualClaim?.referents.map((r) => r.file)).toEqual(["src/auth.go"]);
+
+    const rustQualClaim = claims.find((c) => c.rawText === "TokenValidator::validate");
+    expect(rustQualClaim?.referents.map((r) => r.file)).toEqual(["src/validator.rs"]);
+
+    const javaQualClaim = claims.find((c) => c.rawText === "OrderService.submitOrder");
+    expect(javaQualClaim?.referents.map((r) => r.file)).toEqual(["src/OrderService.java"]);
+
+    const bareFallbackClaim = claims.find((c) => c.rawText === "svc.submitOrder");
+    expect(bareFallbackClaim?.referents.map((r) => r.file)).toEqual(["src/OrderService.java"]);
 
     const parseTokenClaim = claims.find((c) => c.target === "parseToken");
     expect(parseTokenClaim?.referents.map((r) => r.file).sort()).toEqual([
