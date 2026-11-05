@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import ts from "typescript";
 import {
@@ -1588,13 +1589,20 @@ export async function analyzeDocClaims(options: {
   }
 
   const docClaims: DocClaim[] = [];
+  let sharedCargoTargetDir: string | undefined;
 
+  try {
   for (const doc of parsedDocs) {
     if (doc.ignoredFile) continue;
 
     for (const block of doc.blocks) {
       if (block.ignored) continue;
       if (block.kind === "code-block") {
+        if (options.runDocs && (block.language ?? "").trim().toLowerCase() === "rust" && !sharedCargoTargetDir) {
+          sharedCargoTargetDir = await fs.mkdtemp(
+            path.join(os.tmpdir(), "codefog-rundocs-rust-target-"),
+          );
+        }
         const codeClaim = await evaluateDocCodeBlockClaim({
           rootDir,
           docFile: doc.file,
@@ -1602,6 +1610,7 @@ export async function analyzeDocClaims(options: {
           runDocs: Boolean(options.runDocs),
           symbolIndex,
           pkgInfo,
+          ...(sharedCargoTargetDir ? { cargoTargetDir: sharedCargoTargetDir } : {}),
         });
         if (codeClaim) {
           docClaims.push(codeClaim);
@@ -2171,6 +2180,11 @@ export async function analyzeDocClaims(options: {
           }
         }
       }
+    }
+  }
+  } finally {
+    if (sharedCargoTargetDir) {
+      await fs.rm(sharedCargoTargetDir, { recursive: true, force: true });
     }
   }
 

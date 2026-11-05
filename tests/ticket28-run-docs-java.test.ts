@@ -2,17 +2,21 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "../src/analyzer.js";
 import { runCli } from "../src/cli.js";
 
 const execFileAsync = promisify(execFile);
+const hasJavac =
+  spawnSync("javac", ["-version"]).status === 0 &&
+  spawnSync("java", ["-version"]).status === 0;
 
 describe("Ticket 28: Executable docs — Java code block execution evidence (--run-docs)", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
+    if (!hasJavac) return;
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "codefog-t28-java-"));
     const javaSrcDir = path.join(tmpDir, "src", "main", "java", "com", "acme", "order");
     const targetClassesDir = path.join(tmpDir, "target", "classes");
@@ -40,7 +44,7 @@ describe("Ticket 28: Executable docs — Java code block execution evidence (--r
       "utf8",
     );
 
-    await execFileAsync("/usr/bin/javac", ["-d", targetClassesDir, javaSrcFile], {
+    await execFileAsync("javac", ["-d", targetClassesDir, javaSrcFile], {
       cwd: tmpDir,
     });
 
@@ -63,10 +67,14 @@ describe("Ticket 28: Executable docs — Java code block execution evidence (--r
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    if (tmpDir) {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
-  it("wraps classless Java code blocks in a main class against target/classes: marks passing explicit value-comparison throw as verified and System.out.println-only as weak-evidence", async () => {
+  it.skipIf(!hasJavac)(
+    "wraps classless Java code blocks in a main class against target/classes: marks passing explicit value-comparison throw as verified and System.out.println-only as weak-evidence",
+    async () => {
     await fs.writeFile(
       path.join(tmpDir, "README.md"),
       [
@@ -133,163 +141,239 @@ describe("Ticket 28: Executable docs — Java code block execution evidence (--r
     expect(report.findings.filter((f) => f.subjectType === "doc")).toEqual([]);
   });
 
-  it("marks Java code blocks with compilation errors or runtime assertion failures as fog-returned with failure summary in Finding", async () => {
-    await fs.writeFile(
-      path.join(tmpDir, "README.md"),
-      [
-        "# Broken Java Examples",
-        "",
-        "```java",
-        "import com.acme.order.OrderCalculator;",
-        "",
-        "OrderCalculator calc = new OrderCalculator();",
-        "System.out.println(calc.nonExistentMethod(200));",
-        "```",
-        "",
-        "```java",
-        "import com.acme.order.OrderCalculator;",
-        "",
-        "OrderCalculator calc = new OrderCalculator();",
-        "if (calc.calculateTax(200) != 999) {",
-        '    throw new IllegalStateException("Expected 999");',
-        "}",
-        "```",
-      ].join("\n"),
-      "utf8",
-    );
+  it.skipIf(!hasJavac)(
+    "marks Java code blocks with compilation errors, missing imports, or runtime assertion failures as fog-returned with failure summary in Finding",
+    async () => {
+      await fs.writeFile(
+        path.join(tmpDir, "README.md"),
+        [
+          "# Broken Java Examples",
+          "",
+          "```java",
+          "import com.acme.order.OrderCalculator;",
+          "",
+          "OrderCalculator calc = new OrderCalculator();",
+          "System.out.println(calc.nonExistentMethod(200));",
+          "```",
+          "",
+          "```java",
+          "import com.acme.order.OrderCalculator;",
+          "",
+          "OrderCalculator calc = new OrderCalculator();",
+          "if (calc.calculateTax(200) != 999) {",
+          '    throw new IllegalStateException("Expected 999");',
+          "}",
+          "```",
+          "",
+          "```java",
+          "// Missing import com.acme.order.OrderCalculator must fail compilation (no auto-imported repo packages)",
+          "OrderCalculator calc = new OrderCalculator();",
+          "System.out.println(calc.calculateTax(200));",
+          "```",
+        ].join("\n"),
+        "utf8",
+      );
 
-    const report = await analyzeRepository({
-      rootDir: tmpDir,
-      docs: true,
-      runDocs: true,
-    });
+      const report = await analyzeRepository({
+        rootDir: tmpDir,
+        docs: true,
+        runDocs: true,
+      });
 
-    const codeClaims = (report.docClaims ?? []).filter(
-      (c) => c.kind === "code-block",
-    );
-    expect(codeClaims.length).toBe(2);
-    expect(codeClaims[0]?.state).toBe("fog-returned");
-    expect(codeClaims[1]?.state).toBe("fog-returned");
+      const codeClaims = (report.docClaims ?? []).filter(
+        (c) => c.kind === "code-block",
+      );
+      expect(codeClaims.length).toBe(3);
+      expect(codeClaims[0]?.state).toBe("fog-returned");
+      expect(codeClaims[1]?.state).toBe("fog-returned");
+      expect(codeClaims[2]?.state).toBe("fog-returned");
 
-    expect(codeClaims[0]?.executionOutput).toMatch(/cannot find symbol|nonExistentMethod/);
-    expect(codeClaims[1]?.executionOutput).toMatch(/IllegalStateException|Expected 999/);
+      expect(codeClaims[0]?.executionOutput).toMatch(/cannot find symbol|nonExistentMethod/);
+      expect(codeClaims[1]?.executionOutput).toMatch(/IllegalStateException|Expected 999/);
+      expect(codeClaims[2]?.executionOutput).toMatch(/cannot find symbol|OrderCalculator/);
 
-    expect(report.summary.docTrustScore).toBe(0);
-    expect(report.docTrustScore).toBe(0);
+      expect(report.summary.docTrustScore).toBe(0);
+      expect(report.docTrustScore).toBe(0);
 
-    const docFindings = report.findings.filter((f) => f.subjectType === "doc");
-    expect(docFindings.length).toBe(2);
+      const docFindings = report.findings.filter((f) => f.subjectType === "doc");
+      expect(docFindings.length).toBe(3);
 
-    const compileFinding = docFindings.find(
-      (f) => f.location.startLine === codeClaims[0]?.startLine,
-    );
-    const runtimeFinding = docFindings.find(
-      (f) => f.location.startLine === codeClaims[1]?.startLine,
-    );
+      const compileFinding = docFindings.find(
+        (f) => f.location.startLine === codeClaims[0]?.startLine,
+      );
+      const runtimeFinding = docFindings.find(
+        (f) => f.location.startLine === codeClaims[1]?.startLine,
+      );
 
-    expect(compileFinding?.state).toBe("fog-returned");
-    expect(compileFinding?.tags).toContain("doc-fog-returned");
-    expect(compileFinding?.reason).toMatch(/cannot find symbol|nonExistentMethod/);
+      expect(compileFinding?.state).toBe("fog-returned");
+      expect(compileFinding?.tags).toContain("doc-fog-returned");
+      expect(compileFinding?.reason).toMatch(/cannot find symbol|nonExistentMethod/);
 
-    expect(runtimeFinding?.state).toBe("fog-returned");
-    expect(runtimeFinding?.tags).toContain("doc-fog-returned");
-    expect(runtimeFinding?.reason).toMatch(/IllegalStateException|Expected 999/);
-  });
+      expect(runtimeFinding?.state).toBe("fog-returned");
+      expect(runtimeFinding?.tags).toContain("doc-fog-returned");
+      expect(runtimeFinding?.reason).toMatch(/IllegalStateException|Expected 999/);
+    },
+  );
 
-  it("supports Gradle build/classes/java/main classpath, JUnit assertEquals & AssertJ assertThat(x).isEqualTo(y) Outcome Assertions vs Liveness Checks, and runCli --run-docs", async () => {
-    // Replace Maven target/classes with Gradle build/classes/java/main
-    await fs.rm(path.join(tmpDir, "target", "classes"), {
-      recursive: true,
-      force: true,
-    });
-    const gradleClassesDir = path.join(
-      tmpDir,
-      "build",
-      "classes",
-      "java",
-      "main",
-    );
-    await fs.mkdir(gradleClassesDir, { recursive: true });
-    const javaSrcFile = path.join(
-      tmpDir,
-      "src",
-      "main",
-      "java",
-      "com",
-      "acme",
-      "order",
-      "OrderCalculator.java",
-    );
-    await execFileAsync("/usr/bin/javac", ["-d", gradleClassesDir, javaSrcFile], {
-      cwd: tmpDir,
-    });
+  it.skipIf(!hasJavac)(
+    "supports Gradle build/classes/java/main classpath, JUnit assertEquals & AssertJ assertThat(x).isEqualTo(y) Outcome Assertions vs Liveness Checks, and runCli --run-docs",
+    async () => {
+      // Replace Maven target/classes with Gradle build/classes/java/main and build/classes/java/test
+      await fs.rm(path.join(tmpDir, "target", "classes"), {
+        recursive: true,
+        force: true,
+      });
+      const gradleClassesDir = path.join(
+        tmpDir,
+        "build",
+        "classes",
+        "java",
+        "main",
+      );
+      const gradleTestClassesDir = path.join(
+        tmpDir,
+        "build",
+        "classes",
+        "java",
+        "test",
+      );
+      await fs.mkdir(gradleClassesDir, { recursive: true });
+      await fs.mkdir(gradleTestClassesDir, { recursive: true });
+      const javaSrcFile = path.join(
+        tmpDir,
+        "src",
+        "main",
+        "java",
+        "com",
+        "acme",
+        "order",
+        "OrderCalculator.java",
+      );
 
-    const sideEffectFile = path.join(tmpDir, "shell-side-effect.txt");
-    await fs.writeFile(
-      path.join(tmpDir, "README.md"),
-      [
-        "# Gradle Classpath & Assertion Styles",
-        "",
-        "```bash",
-        `echo "pwned" > "${sideEffectFile.replace(/\\/g, "/")}"`,
-        "```",
-        "",
-        "```java",
-        "import static org.junit.jupiter.api.Assertions.assertEquals;",
-        "",
-        "OrderCalculator calc = new OrderCalculator();",
-        "assertEquals(20, calc.calculateTax(200));",
-        "```",
-        "",
-        "```java",
-        "import static org.assertj.core.api.Assertions.assertThat;",
-        "",
-        "OrderCalculator calc = new OrderCalculator();",
-        "assertThat(calc.calculateTax(200)).isEqualTo(20);",
-        "```",
-        "",
-        "```java",
-        "OrderCalculator calc = new OrderCalculator();",
-        "assertNotNull(calc);",
-        "```",
-      ].join("\n"),
-      "utf8",
-    );
+      // Provide JUnit and AssertJ classes in the fixture's test classpath (not injected by the runner)
+      const junitStubDir = path.join(tmpDir, "junit-stub");
+      const assertjStubDir = path.join(tmpDir, "assertj-stub");
+      await fs.mkdir(junitStubDir, { recursive: true });
+      await fs.mkdir(assertjStubDir, { recursive: true });
+      const junitStubFile = path.join(junitStubDir, "Assertions.java");
+      const assertjStubFile = path.join(assertjStubDir, "Assertions.java");
+      await fs.writeFile(
+        junitStubFile,
+        [
+          "package org.junit.jupiter.api;",
+          "public class Assertions {",
+          "  public static void assertEquals(int expected, int actual) {",
+          '    if (expected != actual) throw new AssertionError("Expected " + expected + " but got " + actual);',
+          "  }",
+          "  public static void assertNotNull(Object obj) {",
+          '    if (obj == null) throw new AssertionError("Expected non-null");',
+          "  }",
+          "}",
+        ].join("\n"),
+        "utf8",
+      );
+      await fs.writeFile(
+        assertjStubFile,
+        [
+          "package org.assertj.core.api;",
+          "public class Assertions {",
+          "  public static final class IntAssert {",
+          "    private final int actual;",
+          "    public IntAssert(int actual) { this.actual = actual; }",
+          "    public IntAssert isEqualTo(int expected) {",
+          '      if (this.actual != expected) throw new AssertionError("Expected " + expected + " but got " + this.actual);',
+          "      return this;",
+          "    }",
+          "  }",
+          "  public static IntAssert assertThat(int actual) {",
+          "    return new IntAssert(actual);",
+          "  }",
+          "}",
+        ].join("\n"),
+        "utf8",
+      );
 
-    let stdoutBuf = "";
-    const exitCode = await runCli(
-      ["--root", tmpDir, "--docs", "--run-docs", "--json", "--fail-on", "none"],
-      {
-        stdout: (s) => {
-          stdoutBuf += s;
+      await execFileAsync("javac", ["-d", gradleClassesDir, javaSrcFile], {
+        cwd: tmpDir,
+      });
+      await execFileAsync(
+        "javac",
+        ["-d", gradleTestClassesDir, junitStubFile, assertjStubFile],
+        { cwd: tmpDir },
+      );
+
+      const sideEffectFile = path.join(tmpDir, "shell-side-effect.txt");
+      await fs.writeFile(
+        path.join(tmpDir, "README.md"),
+        [
+          "# Gradle Classpath & Assertion Styles",
+          "",
+          "```bash",
+          `echo "pwned" > "${sideEffectFile.replace(/\\/g, "/")}"`,
+          "```",
+          "",
+          "```java",
+          "import com.acme.order.OrderCalculator;",
+          "import static org.junit.jupiter.api.Assertions.assertEquals;",
+          "",
+          "OrderCalculator calc = new OrderCalculator();",
+          "assertEquals(20, calc.calculateTax(200));",
+          "```",
+          "",
+          "```java",
+          "import com.acme.order.OrderCalculator;",
+          "import static org.assertj.core.api.Assertions.assertThat;",
+          "",
+          "OrderCalculator calc = new OrderCalculator();",
+          "assertThat(calc.calculateTax(200)).isEqualTo(20);",
+          "```",
+          "",
+          "```java",
+          "import com.acme.order.OrderCalculator;",
+          "import static org.junit.jupiter.api.Assertions.assertNotNull;",
+          "",
+          "OrderCalculator calc = new OrderCalculator();",
+          "assertNotNull(calc);",
+          "```",
+        ].join("\n"),
+        "utf8",
+      );
+
+      let stdoutBuf = "";
+      const exitCode = await runCli(
+        ["--root", tmpDir, "--docs", "--run-docs", "--json", "--fail-on", "none"],
+        {
+          stdout: (s) => {
+            stdoutBuf += s;
+          },
+          stderr: () => {},
         },
-        stderr: () => {},
-      },
-    );
+      );
 
-    expect(exitCode).toBe(0);
+      expect(exitCode).toBe(0);
 
-    let sideEffectExists = false;
-    try {
-      await fs.access(sideEffectFile);
-      sideEffectExists = true;
-    } catch {
-      sideEffectExists = false;
-    }
-    expect(sideEffectExists).toBe(false);
+      let sideEffectExists = false;
+      try {
+        await fs.access(sideEffectFile);
+        sideEffectExists = true;
+      } catch {
+        sideEffectExists = false;
+      }
+      expect(sideEffectExists).toBe(false);
 
-    const parsed = JSON.parse(stdoutBuf);
-    const claims = parsed.docClaims.filter(
-      (c: { kind: string }) => c.kind === "code-block",
-    );
-    expect(claims.length).toBe(3);
-    expect(claims[0].state).toBe("verified");
-    expect(claims[1].state).toBe("verified");
-    // assertNotNull is a Liveness Check -> weak-evidence
-    expect(claims[2].state).toBe("weak-evidence");
+      const parsed = JSON.parse(stdoutBuf);
+      const claims = parsed.docClaims.filter(
+        (c: { kind: string }) => c.kind === "code-block",
+      );
+      expect(claims.length).toBe(3);
+      expect(claims[0].state).toBe("verified");
+      expect(claims[1].state).toBe("verified");
+      // assertNotNull is a Liveness Check -> weak-evidence
+      expect(claims[2].state).toBe("weak-evidence");
 
-    // 2 verified (2.0) + 1 weak-evidence (0.4) = 2.4 / 3 = 0.8 -> 80
-    expect(parsed.summary.docTrustScore).toBe(80);
-    expect(parsed.docTrustScore).toBe(80);
-  });
+      // 2 verified (2.0) + 1 weak-evidence (0.4) = 2.4 / 3 = 0.8 -> 80
+      expect(parsed.summary.docTrustScore).toBe(80);
+      expect(parsed.docTrustScore).toBe(80);
+    },
+  );
 });
