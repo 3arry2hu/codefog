@@ -519,8 +519,6 @@ export const tsJsDocCodeBlockRunner: DocCodeBlockRunner = {
 import {
   countGoOutcomeAssertions,
   findFilesByExtensionInRepo,
-  findMatchingDelimiter,
-  stripCommentsAndMaskStrings,
 } from "./polyglot.js";
 
 const GO_STDLIB_BY_QUALIFIER: ReadonlyMap<string, string> = new Map([
@@ -984,13 +982,760 @@ export const goDocCodeBlockRunner: DocCodeBlockRunner = {
 // Rust Doc Code Block Runner Slot (#27)
 // ============================================================================
 
-// Ticket #27 adds `rustDocCodeBlockRunner` (`id: "rust"`, `languages: ["rust"]`) here.
+import { createHash } from "node:crypto";
+import * as fsSync from "node:fs";
+import { countRustOutcomeAssertions, hasRustMainFunction } from "./polyglot.js";
+
+interface RustCargoManifestMeta {
+  packageName: string;
+  libName: string;
+  edition: string;
+  libPath: string;
+}
+
+const rustWorkspaceLocks = new Map<string, Promise<void>>();
+const rustWorkDirsToClean = new Set<string>();
+let rustExitCleanupRegistered = false;
+
+function registerRustWorkDirCleanup(dir: string): void {
+  rustWorkDirsToClean.add(dir);
+  if (rustExitCleanupRegistered) return;
+  rustExitCleanupRegistered = true;
+  process.once("exit", () => {
+    for (const d of rustWorkDirsToClean) {
+      try {
+        fsSync.rmSync(d, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup errors on exit
+      }
+    }
+  });
+}
+
+async function withRustWorkspaceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = rustWorkspaceLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  rustWorkspaceLocks.set(
+    key,
+    prev.then(() => next),
+  );
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+async function resolveCargoBinary(): Promise<string> {
+  const preferred = "/root/.cargo/bin/cargo";
+  try {
+    await fs.access(preferred);
+    return preferred;
+  } catch {
+    return "cargo";
+  }
+}
+
+async function parseRustCargoManifest(rootDir: string): Promise<RustCargoManifestMeta> {
+  let packageName = "rust_crate";
+  let libName: string | undefined;
+  let edition = "2021";
+  let libPath = "src/lib.rs";
+
+  try {
+    const raw = await fs.readFile(path.join(rootDir, "Cargo.toml"), "utf8");
+    let currentSection = "";
+    for (const rawLine of raw.split(/\r?\n/)) {
+      const line = rawLine.replace(/#.*$/, "").trim();
+      if (!line) continue;
+      const secMatch = /^\[([^\]]+)\]$/.exec(line);
+      if (secMatch) {
+        currentSection = secMatch[1]!.trim();
+        continue;
+      }
+      const kvMatch = /^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"/.exec(line);
+      if (!kvMatch) continue;
+      const [, key, val] = kvMatch;
+      if (currentSection === "package") {
+        if (key === "name" && val) packageName = val;
+        if (key === "edition" && val) edition = val;
+      } else if (currentSection === "lib") {
+        if (key === "name" && val) libName = val;
+        if (key === "path" && val) libPath = val;
+      }
+    }
+  } catch {
+    // Fallback defaults when Cargo.toml is absent
+  }
+
+  const resolvedLibName = (libName ?? packageName).replace(/[^A-Za-z0-9_]/g, "_");
+  return {
+    packageName,
+    libName: resolvedLibName,
+    edition,
+    libPath,
+  };
+}
+
+function wrapRustDocCodeBlock(
+  rawCode: string,
+  libName: string,
+  pubModules: string[],
+): string {
+  // Un-hide rustdoc `# ` setup lines while preserving `#[...]` and `#![...]` attributes
+  const unhiddenLines = rawCode.split(/\r?\n/).map((line) => {
+    const m = /^(\s*)#(?:\s+(.*)|$)/.exec(line);
+    if (m) {
+      return `${m[1] ?? ""}${m[2] ?? ""}`;
+    }
+    return line;
+  });
+
+  const innerAttrs: string[] = [];
+  const bodyLines: string[] = [];
+  for (const line of unhiddenLines) {
+    if (/^\s*#!\[/.test(line)) {
+      innerAttrs.push(line);
+    } else {
+      bodyLines.push(line);
+    }
+  }
+
+  const bodyCode = bodyLines.join("\n");
+  const modImports = pubModules.map(
+    (modName) => `#[allow(unused_imports)]\nuse ${libName}::${modName}::*;`,
+  );
+
+  const prelude = [
+    "#![allow(unused_imports, dead_code, unused_variables, unused_mut, unused_must_use)]",
+    ...innerAttrs,
+    `extern crate ${libName};`,
+    `#[allow(unused_imports)]`,
+    `pub use ${libName}::*;`,
+    ...modImports,
+  ].join("\n");
+
+  if (hasRustMainFunction(bodyCode)) {
+    return `${prelude}\n${bodyCode}\n`;
+  }
+
+  return [
+    prelude,
+    "fn main() {",
+    "    let _ = {",
+    bodyCode,
+    "    };",
+    "}",
+    "",
+  ].join("\n");
+}
+
+function summarizeRustExecutionFailure(rawOutput: string): string {
+  const lines = rawOutput
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return "Rust code block execution failed with non-zero exit code.";
+  }
+  const priorityIdx = lines.findIndex((l) =>
+    /(?:^error(?:\[E\d+\])?:|panicked at|assertion .* failed)/i.test(l),
+  );
+  const summary =
+    priorityIdx >= 0
+      ? lines.slice(priorityIdx, priorityIdx + 4).join(" | ")
+      : lines.slice(0, 3).join(" | ");
+  return summary.slice(0, 300);
+}
+
+export const rustDocCodeBlockRunner: DocCodeBlockRunner = {
+  id: "rust",
+  languages: ["rust"],
+  detectOutcomeAssertions: (code) => countRustOutcomeAssertions(code),
+  runCodeBlock: async (ctx) => {
+    const assertionsOnOutcome = countRustOutcomeAssertions(ctx.code);
+    const timeoutMs = ctx.timeoutMs ?? 20000;
+    const rootAbs = path.resolve(ctx.rootDir);
+    const rootHash = createHash("sha1").update(rootAbs).digest("hex").slice(0, 12);
+    const workDir = path.join(os.tmpdir(), `codefog-rundocs-rust-${rootHash}`);
+    registerRustWorkDirCleanup(workDir);
+
+    return withRustWorkspaceLock(rootHash, async () => {
+      try {
+        const cargoBin = await resolveCargoBinary();
+        const manifest = await parseRustCargoManifest(rootAbs);
+        const targetDir = path.join(workDir, "target");
+        const runnerDir = path.join(workDir, "runner");
+        await fs.mkdir(path.join(runnerDir, "src"), { recursive: true });
+
+        let depCratePath = rootAbs;
+        const pubModules: string[] = [];
+        const libAbsPath = path.join(rootAbs, manifest.libPath);
+
+        let hasLibRs = false;
+        try {
+          await fs.access(libAbsPath);
+          hasLibRs = true;
+        } catch {
+          hasLibRs = false;
+        }
+
+        if (hasLibRs) {
+          try {
+            const libSrc = await fs.readFile(libAbsPath, "utf8");
+            const modRe = /\bpub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/g;
+            let mm: RegExpExecArray | null;
+            while ((mm = modRe.exec(libSrc)) !== null) {
+              if (mm[1]) pubModules.push(mm[1]);
+            }
+          } catch {
+            // ignore
+          }
+        } else {
+          // Synthesize a library wrapper when the repo has src/*.rs without src/lib.rs
+          const synthDir = path.join(workDir, "synth_lib");
+          await fs.mkdir(path.join(synthDir, "src"), { recursive: true });
+          const synthLibLines: string[] = [];
+          try {
+            const srcDir = path.join(rootAbs, "src");
+            const entries = await fs.readdir(srcDir, { withFileTypes: true });
+            for (const entry of entries) {
+              if (
+                entry.isFile() &&
+                entry.name.endsWith(".rs") &&
+                entry.name !== "lib.rs" &&
+                entry.name !== "main.rs"
+              ) {
+                const stem = entry.name.replace(/\.rs$/, "");
+                const fullRsPath = toPosix(path.join(srcDir, entry.name));
+                synthLibLines.push(`#[path = "${fullRsPath}"]`);
+                synthLibLines.push(`pub mod ${stem};`);
+                synthLibLines.push(`pub use ${stem}::*;`);
+                pubModules.push(stem);
+              }
+            }
+          } catch {
+            // ignore
+          }
+          await fs.writeFile(
+            path.join(synthDir, "Cargo.toml"),
+            [
+              "[package]",
+              `name = "${manifest.packageName}"`,
+              'version = "0.1.0"',
+              `edition = "${manifest.edition}"`,
+              "",
+              "[lib]",
+              `name = "${manifest.libName}"`,
+              'path = "src/lib.rs"',
+            ].join("\n") + "\n",
+            "utf8",
+          );
+          await fs.writeFile(
+            path.join(synthDir, "src", "lib.rs"),
+            synthLibLines.join("\n") + "\n",
+            "utf8",
+          );
+          depCratePath = synthDir;
+        }
+
+        const runnerCargoToml =
+          [
+            "[package]",
+            'name = "__codefog_rust_doc_runner__"',
+            'version = "0.1.0"',
+            `edition = "${manifest.edition}"`,
+            "",
+            "[dependencies]",
+            `${manifest.packageName} = { path = ${JSON.stringify(toPosix(depCratePath))} }`,
+          ].join("\n") + "\n";
+
+        await fs.writeFile(path.join(runnerDir, "Cargo.toml"), runnerCargoToml, "utf8");
+
+        const wrappedMainRs = wrapRustDocCodeBlock(
+          ctx.code,
+          manifest.libName,
+          pubModules,
+        );
+        await fs.writeFile(path.join(runnerDir, "src", "main.rs"), wrappedMainRs, "utf8");
+
+        const cargoPathDir = "/root/.cargo/bin";
+        const currentPath = process.env.PATH ?? "";
+        const envPath = currentPath.includes(cargoPathDir)
+          ? currentPath
+          : `${cargoPathDir}:${currentPath}`;
+
+        await execFileAsync(
+          cargoBin,
+          ["run", "--offline", "--quiet", "--target-dir", targetDir],
+          {
+            cwd: runnerDir,
+            timeout: timeoutMs,
+            env: {
+              ...process.env,
+              PATH: envPath,
+            },
+          },
+        );
+
+        return {
+          passed: true,
+          assertionsOnOutcome,
+        };
+      } catch (err: any) {
+        const stderr = typeof err?.stderr === "string" ? err.stderr : "";
+        const stdout = typeof err?.stdout === "string" ? err.stdout : "";
+        const message = typeof err?.message === "string" ? err.message : String(err);
+        const killed = Boolean(err?.killed) || err?.signal === "SIGTERM";
+        const rawOut = killed
+          ? `Execution timed out after ${timeoutMs}ms. ${stderr || stdout || message}`
+          : stderr || stdout || message;
+        return {
+          passed: false,
+          assertionsOnOutcome,
+          executionOutput: summarizeRustExecutionFailure(rawOut),
+        };
+      }
+    });
+  },
+};
 
 // ============================================================================
 // Java Doc Code Block Runner Slot (#28)
 // ============================================================================
 
-// Ticket #28 adds `javaDocCodeBlockRunner` (`id: "java"`, `languages: ["java"]`) here.
+import {
+  countJavaOutcomeAssertions,
+  findMatchingDelimiter,
+  stripCommentsAndMaskStrings,
+} from "./polyglot.js";
+
+async function resolveJavaToolchain(): Promise<{ javacBin: string; javaBin: string }> {
+  for (const cand of ["/usr/bin/javac", "javac"]) {
+    try {
+      const realJavac = await fs.realpath(cand);
+      const siblingJava = path.join(path.dirname(realJavac), "java");
+      try {
+        await fs.access(siblingJava);
+        return { javacBin: realJavac, javaBin: siblingJava };
+      } catch {
+        return { javacBin: realJavac, javaBin: "/usr/bin/java" };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return { javacBin: "javac", javaBin: "java" };
+}
+
+async function collectPackagesFromClassDir(
+  baseDir: string,
+  curDir: string,
+  packages: Set<string>,
+): Promise<void> {
+  let entries;
+  try {
+    entries = await fs.readdir(curDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  let hasClassFile = false;
+  for (const entry of entries) {
+    const full = path.join(curDir, entry.name);
+    if (entry.isDirectory()) {
+      await collectPackagesFromClassDir(baseDir, full, packages);
+    } else if (entry.isFile() && entry.name.endsWith(".class")) {
+      hasClassFile = true;
+    }
+  }
+  if (hasClassFile) {
+    const rel = toPosix(path.relative(baseDir, curDir));
+    if (rel && rel !== "." && !rel.startsWith("..")) {
+      const segs = rel.split("/");
+      if (segs.every((s) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s))) {
+        packages.add(segs.join("."));
+      }
+    }
+  }
+}
+
+async function discoverJavaClasspathsAndPackages(rootDir: string): Promise<{
+  classpathDirs: string[];
+  packages: string[];
+}> {
+  const classpathSet = new Set<string>();
+  const directCandidates = [
+    path.join(rootDir, "target", "classes"),
+    path.join(rootDir, "target", "test-classes"),
+    path.join(rootDir, "build", "classes", "java", "main"),
+    path.join(rootDir, "build", "classes", "java", "test"),
+  ];
+
+  for (const cand of directCandidates) {
+    try {
+      const st = await fs.stat(cand);
+      if (st.isDirectory()) {
+        classpathSet.add(cand);
+      }
+    } catch {
+      // ignore missing
+    }
+  }
+
+  async function scanSubmodules(dirAbs: string, depth: number): Promise<void> {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = await fs.readdir(dirAbs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (
+        !entry.isDirectory() ||
+        entry.name === ".git" ||
+        entry.name === "node_modules" ||
+        entry.name === ".codefog" ||
+        entry.name === "dist" ||
+        entry.name === "coverage" ||
+        entry.name === "vendor" ||
+        entry.name === ".gradle" ||
+        entry.name === ".idea" ||
+        entry.name === ".vscode" ||
+        entry.name === "src"
+      ) {
+        continue;
+      }
+      const subDir = path.join(dirAbs, entry.name);
+      for (const relCand of [
+        path.join("target", "classes"),
+        path.join("build", "classes", "java", "main"),
+      ]) {
+        const fullCand = path.join(subDir, relCand);
+        try {
+          const st = await fs.stat(fullCand);
+          if (st.isDirectory()) {
+            classpathSet.add(fullCand);
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (entry.name !== "target" && entry.name !== "build") {
+        await scanSubmodules(subDir, depth + 1);
+      }
+    }
+  }
+
+  await scanSubmodules(rootDir, 0);
+
+  const classpathDirs = Array.from(classpathSet);
+  const packages = new Set<string>();
+  for (const cpDir of classpathDirs) {
+    await collectPackagesFromClassDir(cpDir, cpDir, packages);
+  }
+
+  return {
+    classpathDirs,
+    packages: Array.from(packages).sort(),
+  };
+}
+
+const JAVA_DOC_ASSERTION_HELPERS = [
+  "  private static void assertEquals(Object expected, Object actual) {",
+  "    if (!java.util.Objects.equals(expected, actual)) {",
+  '      throw new AssertionError("Expected <" + expected + "> but was <" + actual + ">");',
+  "    }",
+  "  }",
+  "  private static void assertEquals(long expected, long actual) {",
+  "    if (expected != actual) {",
+  '      throw new AssertionError("Expected <" + expected + "> but was <" + actual + ">");',
+  "    }",
+  "  }",
+  "  private static void assertEquals(double expected, double actual) {",
+  "    if (Double.compare(expected, actual) != 0) {",
+  '      throw new AssertionError("Expected <" + expected + "> but was <" + actual + ">");',
+  "    }",
+  "  }",
+  "  private static void assertEquals(boolean expected, boolean actual) {",
+  "    if (expected != actual) {",
+  '      throw new AssertionError("Expected <" + expected + "> but was <" + actual + ">");',
+  "    }",
+  "  }",
+  "  private static void assertNotEquals(Object unexpected, Object actual) {",
+  "    if (java.util.Objects.equals(unexpected, actual)) {",
+  '      throw new AssertionError("Expected not equal to <" + unexpected + ">");',
+  "    }",
+  "  }",
+  "  private static void assertTrue(boolean condition) {",
+  "    if (!condition) {",
+  '      throw new AssertionError("Expected true but was false");',
+  "    }",
+  "  }",
+  "  private static void assertFalse(boolean condition) {",
+  "    if (condition) {",
+  '      throw new AssertionError("Expected false but was true");',
+  "    }",
+  "  }",
+  "  private static void assertNotNull(Object actual) {",
+  "    if (actual == null) {",
+  '      throw new AssertionError("Expected non-null value");',
+  "    }",
+  "  }",
+  "  private static final class __CodefogAssertThat<T> {",
+  "    private final T actual;",
+  "    __CodefogAssertThat(T actual) { this.actual = actual; }",
+  "    public __CodefogAssertThat<T> isEqualTo(Object expected) {",
+  "      if (!java.util.Objects.equals(this.actual, expected)) {",
+  '        throw new AssertionError("Expected <" + expected + "> but was <" + this.actual + ">");',
+  "      }",
+  "      return this;",
+  "    }",
+  "    public __CodefogAssertThat<T> isNotEqualTo(Object unexpected) {",
+  "      if (java.util.Objects.equals(this.actual, unexpected)) {",
+  '        throw new AssertionError("Expected not equal to <" + unexpected + ">");',
+  "      }",
+  "      return this;",
+  "    }",
+  "    public __CodefogAssertThat<T> isNotNull() {",
+  "      if (this.actual == null) {",
+  '        throw new AssertionError("Expected non-null value");',
+  "      }",
+  "      return this;",
+  "    }",
+  "    public __CodefogAssertThat<T> isTrue() {",
+  "      if (!Boolean.TRUE.equals(this.actual)) {",
+  '        throw new AssertionError("Expected true but was " + this.actual);',
+  "      }",
+  "      return this;",
+  "    }",
+  "    public __CodefogAssertThat<T> isFalse() {",
+  "      if (!Boolean.FALSE.equals(this.actual)) {",
+  '        throw new AssertionError("Expected false but was " + this.actual);',
+  "      }",
+  "      return this;",
+  "    }",
+  "  }",
+  "  private static <T> __CodefogAssertThat<T> assertThat(T actual) {",
+  "    return new __CodefogAssertThat<T>(actual);",
+  "  }",
+].join("\n");
+
+function findTopLevelJavaClass(
+  sourceText: string,
+): { className: string; closeBraceIdx: number } | null {
+  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  let depth = 0;
+  const classRe =
+    /\b(?:(public)\s+)?(?:(?:protected|private|abstract|final|static|strictfp)\s+)*(?:class|record|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+  const candidates: Array<{ isPublic: boolean; className: string; closeBraceIdx: number }> = [];
+
+  let scanIdx = 0;
+  let m: RegExpExecArray | null;
+  while ((m = classRe.exec(masked)) !== null) {
+    while (scanIdx < m.index) {
+      if (masked[scanIdx] === "{") depth++;
+      else if (masked[scanIdx] === "}") depth = Math.max(0, depth - 1);
+      scanIdx++;
+    }
+    if (depth === 0) {
+      const openBraceIdx = masked.indexOf("{", m.index + m[0].length);
+      if (openBraceIdx !== -1) {
+        const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+        if (closeBraceIdx !== -1) {
+          candidates.push({
+            isPublic: Boolean(m[1]),
+            className: m[2]!,
+            closeBraceIdx,
+          });
+        }
+      }
+    }
+  }
+
+  if (candidates.length === 0) return null;
+  return candidates.find((c) => c.isPublic) ?? candidates[0]!;
+}
+
+function prepareJavaCodeBlockSource(
+  rawCode: string,
+  discoveredPackages: string[],
+): {
+  className: string;
+  qualifiedMainClass: string;
+  sourceCode: string;
+} {
+  const lines = rawCode.split(/\r?\n/);
+  let declaredPackage = "";
+  const userImports: string[] = [];
+  const bodyLines: string[] = [];
+
+  for (const line of lines) {
+    const pkgMatch = /^\s*package\s+([A-Za-z_$][A-Za-z0-9_$.]*)\s*;\s*(?:\/\/.*)?$/.exec(line);
+    if (pkgMatch && !declaredPackage && bodyLines.every((l) => l.trim() === "")) {
+      declaredPackage = pkgMatch[1]!;
+      continue;
+    }
+    const impMatch = /^\s*import\s+(?:static\s+)?([A-Za-z_$][A-Za-z0-9_$.*]*)\s*;\s*(?:\/\/.*)?$/.exec(
+      line,
+    );
+    if (impMatch) {
+      const impSpec = impMatch[1]!;
+      if (impSpec.startsWith("org.junit.") || impSpec.startsWith("org.assertj.")) {
+        continue;
+      }
+      userImports.push(line.trim());
+      continue;
+    }
+    bodyLines.push(line);
+  }
+
+  const bodyText = bodyLines.join("\n");
+  const autoImports: string[] = ["import java.util.*;"];
+  for (const pkg of discoveredPackages) {
+    if (pkg !== declaredPackage) {
+      const wildcard = `import ${pkg}.*;`;
+      if (!userImports.includes(wildcard)) {
+        autoImports.push(wildcard);
+      }
+    }
+  }
+
+  const pkgHeader = declaredPackage ? `package ${declaredPackage};\n` : "";
+  const importHeader = [...autoImports, ...userImports].join("\n");
+
+  const topClass = findTopLevelJavaClass(bodyText);
+  if (topClass) {
+    const className = topClass.className;
+    const qualifiedMainClass = declaredPackage
+      ? `${declaredPackage}.${className}`
+      : className;
+    const injectedBody =
+      bodyText.slice(0, topClass.closeBraceIdx) +
+      "\n" +
+      JAVA_DOC_ASSERTION_HELPERS +
+      "\n" +
+      bodyText.slice(topClass.closeBraceIdx);
+    return {
+      className,
+      qualifiedMainClass,
+      sourceCode: [pkgHeader, importHeader, injectedBody].filter(Boolean).join("\n\n") + "\n",
+    };
+  }
+
+  const className = "CodefogDocSnippet";
+  const qualifiedMainClass = declaredPackage
+    ? `${declaredPackage}.${className}`
+    : className;
+  const { masked: bodyMasked } = stripCommentsAndMaskStrings(bodyText);
+  const hasMainMethod = /\bstatic\s+void\s+main\s*\(/.test(bodyMasked);
+
+  const wrappedClassBody = hasMainMethod
+    ? [
+        `public class ${className} {`,
+        bodyText,
+        JAVA_DOC_ASSERTION_HELPERS,
+        "}",
+      ].join("\n")
+    : [
+        `public class ${className} {`,
+        "  public static void main(String[] args) throws Throwable {",
+        bodyText,
+        "  }",
+        JAVA_DOC_ASSERTION_HELPERS,
+        "}",
+      ].join("\n");
+
+  return {
+    className,
+    qualifiedMainClass,
+    sourceCode: [pkgHeader, importHeader, wrappedClassBody].filter(Boolean).join("\n\n") + "\n",
+  };
+}
+
+function summarizeJavaExecutionFailure(rawOutput: string): string {
+  const lines = rawOutput
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => Boolean(l) && !/^\^+$/.test(l));
+  if (lines.length === 0) {
+    return "Java code block execution failed with non-zero exit code.";
+  }
+  const priorityIdx = lines.findIndex((l) =>
+    /(?:error:|AssertionError|Exception|Error)/i.test(l),
+  );
+  const slice =
+    priorityIdx >= 0
+      ? lines.slice(priorityIdx, priorityIdx + 4)
+      : lines.slice(0, 4);
+  return slice.join(" | ").slice(0, 300);
+}
+
+export const javaDocCodeBlockRunner: DocCodeBlockRunner = {
+  id: "java",
+  languages: ["java"],
+  detectOutcomeAssertions: (code) => countJavaOutcomeAssertions(code),
+  runCodeBlock: async (ctx) => {
+    const assertionsOnOutcome = countJavaOutcomeAssertions(ctx.code);
+    const timeoutMs = ctx.timeoutMs ?? 15000;
+    const execDir = await fs.mkdtemp(path.join(os.tmpdir(), "codefog-rundocs-java-"));
+
+    try {
+      const [{ javacBin, javaBin }, { classpathDirs, packages }] = await Promise.all([
+        resolveJavaToolchain(),
+        discoverJavaClasspathsAndPackages(ctx.rootDir),
+      ]);
+
+      const prepared = prepareJavaCodeBlockSource(ctx.code, packages);
+      const javaFilePath = path.join(execDir, `${prepared.className}.java`);
+      await fs.writeFile(javaFilePath, prepared.sourceCode, "utf8");
+
+      const classpath = [execDir, ...classpathDirs].join(path.delimiter);
+
+      await execFileAsync(
+        javacBin,
+        ["-cp", classpath, "-d", execDir, javaFilePath],
+        {
+          cwd: ctx.rootDir,
+          timeout: timeoutMs,
+        },
+      );
+
+      await execFileAsync(
+        javaBin,
+        ["-ea", "-cp", classpath, prepared.qualifiedMainClass],
+        {
+          cwd: ctx.rootDir,
+          timeout: timeoutMs,
+        },
+      );
+
+      return {
+        passed: true,
+        assertionsOnOutcome,
+      };
+    } catch (err: any) {
+      const stderr = typeof err?.stderr === "string" ? err.stderr : "";
+      const stdout = typeof err?.stdout === "string" ? err.stdout : "";
+      const message = typeof err?.message === "string" ? err.message : String(err);
+      const killed = Boolean(err?.killed) || err?.signal === "SIGTERM";
+      const rawOut = killed
+        ? `Execution timed out after ${timeoutMs}ms. ${stderr || stdout || message}`
+        : stderr || stdout || message;
+      return {
+        passed: false,
+        assertionsOnOutcome,
+        executionOutput: summarizeJavaExecutionFailure(rawOut),
+      };
+    } finally {
+      await fs.rm(execDir, { recursive: true, force: true });
+    }
+  },
+};
 
 // ============================================================================
 // Runner Registry & Dispatcher
@@ -999,6 +1744,8 @@ export const goDocCodeBlockRunner: DocCodeBlockRunner = {
 export const DOC_CODE_BLOCK_RUNNERS: DocCodeBlockRunner[] = [
   tsJsDocCodeBlockRunner,
   goDocCodeBlockRunner,
+  rustDocCodeBlockRunner,
+  javaDocCodeBlockRunner,
 ];
 
 export function registerDocCodeBlockRunner(runner: DocCodeBlockRunner): void {
