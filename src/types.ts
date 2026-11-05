@@ -55,6 +55,8 @@ export interface Finding {
   id: string;
   title: string;
   state: EvidenceState;
+  subjectType?: "code" | "doc";
+  tags?: string[];
   riskScore: number;
   agentReady: boolean;
   location: {
@@ -156,6 +158,65 @@ export interface DiffComparison {
   };
 }
 
+export type DocBlockKind =
+  | "paragraph"
+  | "table-row"
+  | "list-item"
+  | "code-block"
+  | "heading";
+
+export type DocClaimKind =
+  | "symbol"
+  | "path"
+  | "command"
+  | "link"
+  | "anchor"
+  | "code-block";
+
+export interface DocReferent {
+  kind:
+    | "symbol"
+    | "file"
+    | "script"
+    | "bin"
+    | "anchor"
+    | "external-url"
+    | "generated-artifact";
+  file?: string;
+  symbol?: string;
+  startLine?: number;
+  endLine?: number;
+  anchor?: string;
+  script?: string;
+  scriptDefinition?: string;
+  bin?: string;
+  subcommand?: string;
+  url?: string;
+  runtimeFingerprint?: string;
+  lastModifiedCommit?: string;
+  lastModifiedAt?: string;
+}
+
+export interface DocClaim {
+  id: string;
+  file: string;
+  kind: DocClaimKind;
+  text: string;
+  rawText: string;
+  target: string;
+  startLine: number;
+  endLine: number;
+  blockKind: DocBlockKind;
+  blockStartLine: number;
+  blockEndLine: number;
+  state: EvidenceState;
+  referents: DocReferent[];
+  referent?: DocReferent;
+  existedAtClaimCommit?: boolean;
+  commandIntent?: "install" | "build" | "test" | "lint" | "typecheck";
+  executionOutput?: string;
+}
+
 export interface CodefogReport {
   $schema: "https://codefog.dev/schemas/v1/report.json";
   version: "1.0.0";
@@ -168,6 +229,9 @@ export interface CodefogReport {
   };
   summary: {
     trustScore: number;
+    docTrustScore?: number;
+    totalDocClaims?: number;
+    docClaimsByState?: LocByState;
     totalFiles: number;
     totalLoc: number;
     metrics: {
@@ -180,6 +244,8 @@ export interface CodefogReport {
     };
     locByState: LocByState;
   };
+  docTrustScore?: number;
+  docClaims?: DocClaim[];
   modules: ModuleSummary[];
   findings: Finding[];
   files: FileSummary[];
@@ -197,6 +263,9 @@ export interface AnalyzeOptions {
   expectationsPath?: string;
   defectsPath?: string;
   diffBase?: string;
+  docs?: boolean;
+  checkExternalLinks?: boolean;
+  runDocs?: boolean;
   sarifPath?: string | string[];
   knipPath?: string | string[];
   libyearPath?: string | string[];

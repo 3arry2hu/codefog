@@ -9,6 +9,7 @@ export * from "./verify.js";
 export * from "./html-report.js";
 export * from "./diff-pr.js";
 export * from "./oracle.js";
+export * from "./doc-claims.js";
 export * from "./external.js";
 export * from "./skill-installer.js";
 export * from "./analyzer.js";

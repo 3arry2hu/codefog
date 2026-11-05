@@ -8,6 +8,7 @@ import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidenc
 import { analyzeFileGitFreshness } from "./git-freshness.js";
 import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
 import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
+import { analyzeDocClaims } from "./doc-claims.js";
 import { loadExternalOverlay, matchRegionExternalIssues } from "./external.js";
 import {
   extractPolyglotFunctionSpans,
@@ -574,6 +575,22 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     });
   }
 
+  const docResult = options.docs
+    ? await analyzeDocClaims({
+        rootDir,
+        checkExternalLinks: options.checkExternalLinks,
+        runDocs: options.runDocs,
+      })
+    : undefined;
+
+  if (docResult) {
+    for (const f of findings) {
+      f.subjectType = "code";
+      f.tags = [];
+    }
+    findings.push(...docResult.docFindings);
+  }
+
   modules.sort((a, b) => b.maxRiskScore - a.maxRiskScore || a.trustScore - b.trustScore);
   findings.sort((a, b) => b.riskScore - a.riskScore || a.id.localeCompare(b.id));
   files.sort((a, b) => b.riskScore - a.riskScore || a.path.localeCompare(b.path));
@@ -604,6 +621,13 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     },
     summary: {
       trustScore: computeTrustScore(repoLocByState),
+      ...(docResult
+        ? {
+            docTrustScore: docResult.docTrustScore,
+            totalDocClaims: docResult.totalDocClaims,
+            docClaimsByState: docResult.docClaimsByState,
+          }
+        : {}),
       totalFiles: files.length,
       totalLoc,
       metrics: {
@@ -616,6 +640,12 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       },
       locByState: repoLocByState,
     },
+    ...(docResult
+      ? {
+          docTrustScore: docResult.docTrustScore,
+          docClaims: docResult.docClaims,
+        }
+      : {}),
     modules,
     findings,
     files,

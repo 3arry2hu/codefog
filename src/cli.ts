@@ -86,11 +86,21 @@ export function formatLevel1Summary(report: CodefogReport): string {
   const fogPct =
     summary.totalLoc > 0 ? Math.round((unverifiedLoc / summary.totalLoc) * 100) : 0;
 
+  const docTrustPart =
+    summary.docTrustScore !== undefined
+      ? ` | Doc Trust Score: ${summary.docTrustScore}/100`
+      : "";
+
   const lines: string[] = [
     `codefog | ${repository.name} (${repository.branch} @ ${repository.commit})`,
-    `Trust Score: ${summary.trustScore}/100 | Files: ${summary.totalFiles} | LOC: ${summary.totalLoc} | Unverified (Fog): ${fogPct}%`,
+    `Trust Score: ${summary.trustScore}/100${docTrustPart} | Files: ${summary.totalFiles} | LOC: ${summary.totalLoc} | Unverified (Fog): ${fogPct}%`,
     `Metrics: Line ${summary.metrics.lineCoveragePct}% | Branch ${summary.metrics.branchCoveragePct}% | Checked ${summary.metrics.checkedCoveragePct}% | Mutation ${summary.metrics.mutationScorePct}% | Pseudo-tested: ${summary.metrics.pseudoTestedMethods} | Contested: ${summary.metrics.contestedOracles}`,
     `States: Returned=${summary.locByState["fog-returned"]} Fog=${summary.locByState.fog} Self-proof=${summary.locByState["self-proof-fog"]} Weak=${summary.locByState["weak-evidence"]} Verified=${summary.locByState.verified}`,
+    ...(summary.docClaimsByState
+      ? [
+          `Doc Claims (${summary.totalDocClaims ?? 0}): Returned=${summary.docClaimsByState["fog-returned"]} Fog=${summary.docClaimsByState.fog} Weak=${summary.docClaimsByState["weak-evidence"]} Verified=${summary.docClaimsByState.verified}`,
+        ]
+      : []),
     "",
     "Modules by Fog:",
   ];
@@ -157,6 +167,9 @@ export async function runCli(
           "  --stryker <path>      Alias for --mutation-report",
           "  --expectations <path> Independent expectation manifest (default: oracles/expectations.json when present)",
           "  --defects <path>      Historical defect manifest (default: oracles/defects.json when present)",
+          "  --docs                Scan Markdown & AI instruction files for Doc Claims and compute Doc Trust Score",
+          "  --check-external-links Check external HTTP(S) links when --docs is enabled",
+          "  --run-docs            Execute runnable code blocks in Markdown when --docs is enabled",
           "  --sarif <path>        Import SARIF 2.1.0 report(s) as external overlay (repeatable)",
           "  --knip <path>         Import Knip JSON report(s) as external overlay (repeatable)",
           "  --libyear <path>      Import libyear JSON report(s) as repository dependency overlay (repeatable)",
@@ -342,6 +355,9 @@ export async function runCli(
     let failOn = "returned";
     let expectationsPath: string | undefined;
     let defectsPath: string | undefined;
+    let docsMode = false;
+    let checkExternalLinks = false;
+    let runDocs = false;
     const sarifPaths: string[] = [];
     const knipPaths: string[] = [];
     const libyearPaths: string[] = [];
@@ -352,6 +368,12 @@ export async function runCli(
       const arg = argv[i]!;
       if (arg === "--json") {
         jsonMode = true;
+      } else if (arg === "--docs") {
+        docsMode = true;
+      } else if (arg === "--check-external-links") {
+        checkExternalLinks = true;
+      } else if (arg === "--run-docs") {
+        runDocs = true;
       } else if (arg === "--root") {
         rootDir = path.resolve(argv[++i] ?? ".");
       } else if (arg === "--coverage") {
@@ -439,6 +461,9 @@ export async function runCli(
       if (envFailOn) failOn = envFailOn;
       if (process.env.npm_config_json === "true") jsonMode = true;
       if (process.env.npm_config_open === "true") openBrowser = true;
+      if (process.env.npm_config_docs === "true") docsMode = true;
+      if (process.env.npm_config_check_external_links === "true") checkExternalLinks = true;
+      if (process.env.npm_config_run_docs === "true") runDocs = true;
     }
 
     // Classify positional arguments so that `npm exec` / `npx` stripping `--coverage`,
@@ -536,6 +561,9 @@ export async function runCli(
       expectationsPath,
       defectsPath,
       diffBase,
+      docs: docsMode || undefined,
+      checkExternalLinks: checkExternalLinks || undefined,
+      runDocs: runDocs || undefined,
       sarifPath: sarifPaths.length > 0 ? sarifPaths : undefined,
       knipPath: knipPaths.length > 0 ? knipPaths : undefined,
       libyearPath: libyearPaths.length > 0 ? libyearPaths : undefined,
