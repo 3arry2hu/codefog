@@ -3,12 +3,73 @@ import * as path from "node:path";
 
 export type SupportedLanguageId = "ts" | "go" | "rust" | "java";
 
+export const REPO_IGNORED_DIRS: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".git",
+  "vendor",
+  "dist",
+  "coverage",
+  ".codefog",
+  "target",
+  "build",
+  ".idea",
+  ".vscode",
+  ".gradle",
+]);
+
+export function isIgnoredRepoDir(dirName: string): boolean {
+  return REPO_IGNORED_DIRS.has(dirName);
+}
+
+export function isIgnoredRepoRelPath(relPath: string): boolean {
+  return relPath
+    .replace(/\\/g, "/")
+    .split("/")
+    .some((seg) => REPO_IGNORED_DIRS.has(seg));
+}
+
+export async function walkRepoFiles(
+  dirAbs: string,
+  rootDir: string,
+  onFile: (relPath: string, entryName: string, fullPath: string) => void | Promise<void>,
+): Promise<void> {
+  let entries;
+  try {
+    entries = await fs.readdir(dirAbs, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (isIgnoredRepoDir(entry.name)) {
+      continue;
+    }
+    const fullPath = path.join(dirAbs, entry.name);
+    if (entry.isDirectory()) {
+      await walkRepoFiles(fullPath, rootDir, onFile);
+    } else if (entry.isFile()) {
+      const relPath = path.relative(rootDir, fullPath).replace(/\\/g, "/");
+      await onFile(relPath, entry.name, fullPath);
+    }
+  }
+}
+
 export interface PolyglotFunctionSpan {
   name: string;
+  receiverType?: string;
   startLine: number;
   endLine: number;
   cyclomaticComplexity: number;
   returnSignature: string;
+  runtimeFingerprint: string;
+}
+
+export interface PolyglotExtractedSymbol {
+  name: string;
+  qualifiedName?: string;
+  kind: "function" | "class" | "method";
+  file: string;
+  startLine: number;
+  endLine: number;
   runtimeFingerprint: string;
 }
 
@@ -42,6 +103,7 @@ export interface LanguageAdapter {
   isSourceFile(filePath: string): boolean;
   isTestFile(filePath: string): boolean;
   extractFunctionSpans(sourceText: string, filePath: string): PolyglotFunctionSpan[];
+  extractSymbols(sourceText: string, filePath: string): PolyglotExtractedSymbol[];
   extractRuntimeFingerprints(sourceText: string, filePath: string): Map<string, string>;
   generateCandidateMutations(
     sourceText: string,
@@ -353,35 +415,11 @@ export async function findFilesByExtensionInRepo(
   ext: string,
   out: string[] = [],
 ): Promise<string[]> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (
-      entry.name === "node_modules" ||
-      entry.name === ".git" ||
-      entry.name === "vendor" ||
-      entry.name === "target" ||
-      entry.name === "build" ||
-      entry.name === "dist" ||
-      entry.name === "coverage" ||
-      entry.name === ".codefog" ||
-      entry.name === ".idea" ||
-      entry.name === ".vscode" ||
-      entry.name === ".gradle"
-    ) {
-      continue;
+  await walkRepoFiles(dir, rootDir, (relPath, entryName) => {
+    if (entryName.endsWith(ext)) {
+      out.push(relPath);
     }
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await findFilesByExtensionInRepo(full, rootDir, ext, out);
-    } else if (entry.name.endsWith(ext)) {
-      out.push(path.relative(rootDir, full).replace(/\\/g, "/"));
-    }
-  }
+  });
   return out;
 }
 
@@ -402,9 +440,15 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
     let cursor = funcStartIdx + match[0].length;
 
     while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor++;
+    let receiverType: string | undefined;
     if (masked[cursor] === "(") {
       const closeRecv = findMatchingDelimiter(masked, cursor, "(", ")");
       if (closeRecv === -1) continue;
+      const recvInner = noComments.slice(cursor + 1, closeRecv).trim();
+      const recvMatch = /\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*$/.exec(recvInner);
+      if (recvMatch?.[1]) {
+        receiverType = recvMatch[1];
+      }
       cursor = closeRecv + 1;
     }
 
@@ -443,6 +487,7 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
 
     spans.push({
       name: fnName,
+      ...(receiverType ? { receiverType } : {}),
       startLine,
       endLine,
       cyclomaticComplexity: countComplexityInMaskedSlice(bodyMasked, "go"),
@@ -454,6 +499,69 @@ export function extractGoFunctionSpans(sourceText: string): PolyglotFunctionSpan
   }
 
   return spans;
+}
+
+export function extractGoSymbols(
+  sourceText: string,
+  filePath: string,
+): PolyglotExtractedSymbol[] {
+  const relPath = filePath.replace(/\\/g, "/");
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const lineStarts = buildLineStarts(sourceText);
+  const pkgMatch = /^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)\b/m.exec(noComments);
+  const pkgName = pkgMatch?.[1];
+
+  const symbols: PolyglotExtractedSymbol[] = [];
+  for (const span of extractGoFunctionSpans(sourceText)) {
+    const qualifiedName = span.receiverType
+      ? `${span.receiverType}.${span.name}`
+      : pkgName
+        ? `${pkgName}.${span.name}`
+        : undefined;
+    symbols.push({
+      name: span.name,
+      ...(qualifiedName ? { qualifiedName } : {}),
+      kind: span.receiverType ? "method" : "function",
+      file: relPath,
+      startLine: span.startLine,
+      endLine: span.endLine,
+      runtimeFingerprint: span.runtimeFingerprint,
+    });
+  }
+
+  const typeRe = /^[ \t]*type[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+(?:struct|interface)\b/gm;
+  let m: RegExpExecArray | null;
+  while ((m = typeRe.exec(masked)) !== null) {
+    const typeName = m[1]!;
+    const declStart = m.index;
+    const lineEnd = masked.indexOf("\n", declStart);
+    const searchEnd = lineEnd === -1 ? masked.length : lineEnd;
+    const openBraceIdx = masked.indexOf("{", declStart + m[0].length);
+    let endOffset = searchEnd;
+    if (openBraceIdx !== -1 && openBraceIdx <= searchEnd) {
+      const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+      if (closeBraceIdx !== -1) {
+        endOffset = closeBraceIdx + 1;
+      }
+    }
+    const startLine = offsetToLine(lineStarts, declStart);
+    const endLine = offsetToLine(lineStarts, Math.max(declStart, endOffset - 1));
+    const bodyFp = noComments
+      .slice(declStart, endOffset)
+      .replace(/\s+/g, " ")
+      .trim();
+    symbols.push({
+      name: typeName,
+      ...(pkgName ? { qualifiedName: `${pkgName}.${typeName}` } : {}),
+      kind: "class",
+      file: relPath,
+      startLine,
+      endLine,
+      runtimeFingerprint: `class:${typeName}:${bodyFp}`,
+    });
+  }
+
+  return symbols.sort((a, b) => a.startLine - b.startLine);
 }
 
 function isGoErrorOnlyReturn(returnSignature: string): boolean {
@@ -1245,6 +1353,100 @@ export function extractRustFunctionSpans(sourceText: string): PolyglotFunctionSp
     .map(({ isTest: _t, startOffset: _s, endOffset: _e, ...rest }) => rest);
 }
 
+export function extractRustSymbols(
+  sourceText: string,
+  filePath: string,
+): PolyglotExtractedSymbol[] {
+  const relPath = filePath.replace(/\\/g, "/");
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const lineStarts = buildLineStarts(sourceText);
+  const inlineTestRanges = findRustInlineTestByteRanges(masked);
+  const isInTest = (offset: number): boolean =>
+    inlineTestRanges.some((r) => offset >= r.start && offset < r.end);
+
+  const baseName = path.posix.basename(relPath, ".rs");
+  const modStem = baseName !== "lib" && baseName !== "main" && baseName !== "mod" ? baseName : undefined;
+
+  const implRanges: Array<{ typeName: string; start: number; end: number }> = [];
+  const implRe =
+    /\bimpl(?:\s*<[^>]*>)?\s+(?:[A-Za-z_][A-Za-z0-9_:<>]*\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)/g;
+  let im: RegExpExecArray | null;
+  while ((im = implRe.exec(masked)) !== null) {
+    if (isInTest(im.index)) continue;
+    const openBraceIdx = masked.indexOf("{", im.index + im[0].length);
+    if (openBraceIdx === -1) continue;
+    const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+    if (closeBraceIdx === -1) continue;
+    implRanges.push({
+      typeName: im[1]!,
+      start: openBraceIdx,
+      end: closeBraceIdx + 1,
+    });
+  }
+
+  const symbols: PolyglotExtractedSymbol[] = [];
+  for (const fn of parseAllRustFunctions(sourceText)) {
+    if (fn.isTest) continue;
+    const enclosingImpl = implRanges.find(
+      (r) => fn.startOffset >= r.start && fn.endOffset <= r.end,
+    );
+    const qualifiedName = enclosingImpl
+      ? `${enclosingImpl.typeName}::${fn.name}`
+      : modStem
+        ? `${modStem}::${fn.name}`
+        : undefined;
+    symbols.push({
+      name: fn.name,
+      ...(qualifiedName ? { qualifiedName } : {}),
+      kind: enclosingImpl ? "method" : "function",
+      file: relPath,
+      startLine: fn.startLine,
+      endLine: fn.endLine,
+      runtimeFingerprint: fn.runtimeFingerprint,
+    });
+  }
+
+  const typeRe =
+    /^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm;
+  let tm: RegExpExecArray | null;
+  while ((tm = typeRe.exec(masked)) !== null) {
+    if (isInTest(tm.index)) continue;
+    const typeName = tm[1]!;
+    const declStart = tm.index;
+    const afterName = declStart + tm[0].length;
+    const nextBrace = masked.indexOf("{", afterName);
+    const nextSemi = masked.indexOf(";", afterName);
+    let endOffset: number;
+    if (nextBrace !== -1 && (nextSemi === -1 || nextBrace < nextSemi)) {
+      const closeBrace = findMatchingDelimiter(masked, nextBrace, "{", "}");
+      endOffset = closeBrace !== -1 ? closeBrace + 1 : nextBrace + 1;
+    } else if (nextSemi !== -1) {
+      endOffset = nextSemi + 1;
+    } else {
+      const lineEnd = masked.indexOf("\n", declStart);
+      endOffset = lineEnd === -1 ? masked.length : lineEnd;
+    }
+
+    const startLine = offsetToLine(lineStarts, declStart);
+    const endLine = offsetToLine(lineStarts, Math.max(declStart, endOffset - 1));
+    const bodyFp = noComments
+      .slice(declStart, endOffset)
+      .replace(/\s+/g, " ")
+      .trim();
+    symbols.push({
+      name: typeName,
+      ...(modStem ? { qualifiedName: `${modStem}::${typeName}` } : {}),
+      kind: "class",
+      file: relPath,
+      startLine,
+      endLine,
+      runtimeFingerprint: `class:${typeName}:${bodyFp}`,
+    });
+  }
+
+  return symbols.sort((a, b) => a.startLine - b.startLine);
+}
+
 export function buildRustZeroReturnBody(returnSignature: string): string {
   const sig = returnSignature.trim();
   if (!sig || sig === "()") return "{}";
@@ -1721,6 +1923,71 @@ export function extractJavaFunctionSpans(sourceText: string): PolyglotFunctionSp
   }
 
   return spans;
+}
+
+export function extractJavaSymbols(
+  sourceText: string,
+  filePath: string,
+): PolyglotExtractedSymbol[] {
+  const relPath = filePath.replace(/\\/g, "/");
+  const { noComments, masked } = stripCommentsAndMaskStrings(sourceText);
+  const lineStarts = buildLineStarts(sourceText);
+
+  const symbols: PolyglotExtractedSymbol[] = [];
+  const classRanges: Array<{ typeName: string; startLine: number; endLine: number }> = [];
+
+  const typeRe =
+    /^[ \t]*(?:@[A-Za-z0-9_$.]+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|abstract|final|static|strictfp)\s+)*(?:class|enum|record|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm;
+  let tm: RegExpExecArray | null;
+  while ((tm = typeRe.exec(masked)) !== null) {
+    const typeName = tm[1]!;
+    const declStart = tm.index;
+    const openBraceIdx = masked.indexOf("{", declStart + tm[0].length);
+    let endOffset: number;
+    if (openBraceIdx !== -1) {
+      const closeBraceIdx = findMatchingDelimiter(masked, openBraceIdx, "{", "}");
+      endOffset = closeBraceIdx !== -1 ? closeBraceIdx + 1 : openBraceIdx + 1;
+    } else {
+      const lineEnd = masked.indexOf("\n", declStart);
+      endOffset = lineEnd === -1 ? masked.length : lineEnd;
+    }
+
+    const startLine = offsetToLine(lineStarts, declStart);
+    const endLine = offsetToLine(lineStarts, Math.max(declStart, endOffset - 1));
+    const bodyFp = noComments
+      .slice(declStart, endOffset)
+      .replace(/\s+/g, " ")
+      .trim();
+    classRanges.push({ typeName, startLine, endLine });
+    symbols.push({
+      name: typeName,
+      kind: "class",
+      file: relPath,
+      startLine,
+      endLine,
+      runtimeFingerprint: `class:${typeName}:${bodyFp}`,
+    });
+  }
+
+  const fallbackClassName = path.posix.basename(relPath, ".java");
+  for (const span of extractJavaFunctionSpans(sourceText)) {
+    const enclosing =
+      classRanges
+        .filter((c) => span.startLine >= c.startLine && span.endLine <= c.endLine)
+        .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0]?.typeName ??
+      fallbackClassName;
+    symbols.push({
+      name: span.name,
+      ...(enclosing ? { qualifiedName: `${enclosing}.${span.name}` } : {}),
+      kind: "method",
+      file: relPath,
+      startLine: span.startLine,
+      endLine: span.endLine,
+      runtimeFingerprint: span.runtimeFingerprint,
+    });
+  }
+
+  return symbols.sort((a, b) => a.startLine - b.startLine);
 }
 
 export function buildJavaZeroReturnBody(returnSignature: string): string {
@@ -2229,6 +2496,7 @@ export const goLanguageAdapter: LanguageAdapter = {
     !f.endsWith("_gen.go"),
   isTestFile: (f) => f.endsWith("_test.go"),
   extractFunctionSpans: (src) => extractGoFunctionSpans(src),
+  extractSymbols: (src, filePath) => extractGoSymbols(src, filePath),
   extractRuntimeFingerprints: (src) => {
     const map = new Map<string, string>();
     for (const s of extractGoFunctionSpans(src)) map.set(s.name, s.runtimeFingerprint);
@@ -2245,6 +2513,7 @@ export const rustLanguageAdapter: LanguageAdapter = {
   isSourceFile: (f) => f.endsWith(".rs") && !/(?:^|\/)tests\//.test(f.replace(/\\/g, "/")),
   isTestFile: (f) => f.endsWith(".rs") && /(?:^|\/)tests\//.test(f.replace(/\\/g, "/")),
   extractFunctionSpans: (src) => extractRustFunctionSpans(src),
+  extractSymbols: (src, filePath) => extractRustSymbols(src, filePath),
   extractRuntimeFingerprints: (src) => {
     const map = new Map<string, string>();
     for (const s of extractRustFunctionSpans(src)) map.set(s.name, s.runtimeFingerprint);
@@ -2264,6 +2533,10 @@ export const rustLanguageAdapter: LanguageAdapter = {
   },
   extractInlineTestBlockFingerprints: (src) => {
     const map = new Map<string, string>();
+    const rawBlockFp = extractRustInlineTestFingerprint(src);
+    if (rawBlockFp) {
+      map.set("__inline_test_blocks__", rawBlockFp);
+    }
     for (const f of parseAllRustFunctions(src)) {
       if (f.isTest) {
         map.set(f.name, f.runtimeFingerprint);
@@ -2284,6 +2557,7 @@ export const javaLanguageAdapter: LanguageAdapter = {
     );
   },
   extractFunctionSpans: (src) => extractJavaFunctionSpans(src),
+  extractSymbols: (src, filePath) => extractJavaSymbols(src, filePath),
   extractRuntimeFingerprints: (src) => {
     const map = new Map<string, string>();
     for (const s of extractJavaFunctionSpans(src)) map.set(s.name, s.runtimeFingerprint);

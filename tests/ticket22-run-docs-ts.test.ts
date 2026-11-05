@@ -18,7 +18,7 @@ describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--
       path.join(tmpDir, "package.json"),
       JSON.stringify(
         {
-          name: "@barryzhu/codefog",
+          name: "acme-fee-lib",
           version: "1.0.0",
           type: "module",
         },
@@ -33,6 +33,16 @@ describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--
       [
         "export function calculateFee(amount: number): number {",
         "  return Math.round(amount * 0.03);",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
+      path.join(tmpDir, "src", "internal.ts"),
+      [
+        "export function internalOnlyHelper(): number {",
+        "  return 42;",
         "}",
       ].join("\n"),
       "utf8",
@@ -83,12 +93,12 @@ describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--
         "",
         "```ts",
         'import assert from "node:assert";',
-        'import { calculateFee } from "@barryzhu/codefog";',
+        'import { calculateFee } from "acme-fee-lib";',
         "assert.equal(calculateFee(100), 3);",
         "```",
         "",
         "```js",
-        'import { calculateFee } from "@barryzhu/codefog";',
+        'import { calculateFee } from "acme-fee-lib";',
         "console.log(calculateFee(100)); // => 3",
         "```",
         "",
@@ -126,12 +136,12 @@ describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--
         "",
         "```ts",
         'import assert from "node:assert";',
-        'import { calculateFee } from "@barryzhu/codefog";',
+        'import { calculateFee } from "acme-fee-lib";',
         "assert.equal(calculateFee(100), 3);",
         "```",
         "",
         "```javascript",
-        'import { calculateFee } from "@barryzhu/codefog";',
+        'import { calculateFee } from "acme-fee-lib";',
         "console.log(calculateFee(100)) // => 3",
         "```",
       ].join("\n"),
@@ -164,7 +174,7 @@ describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--
     expect(report.findings.filter((f) => f.subjectType === "doc")).toEqual([]);
   });
 
-  it("marks code blocks with failing assertions or imports of non-existent symbols as fog-returned and includes failure output summary in Finding", async () => {
+  it("marks code blocks with failing assertions, missing imports (no auto-injected assert or repo symbols), non-entry exports, or wrong package name as fog-returned", async () => {
     await fs.writeFile(
       path.join(tmpDir, "README.md"),
       [
@@ -172,13 +182,36 @@ describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--
         "",
         "```typescript",
         'import assert from "node:assert";',
-        'import { calculateFee } from "@barryzhu/codefog";',
+        'import { calculateFee } from "acme-fee-lib";',
         "assert.equal(calculateFee(100), 999);",
         "```",
         "",
         "```ts",
-        'import { nonExistentSymbol } from "@barryzhu/codefog";',
+        'import { nonExistentSymbol } from "acme-fee-lib";',
         "console.log(nonExistentSymbol);",
+        "```",
+        "",
+        "```ts",
+        '// Missing import assert from "node:assert" must fail (no auto-injected assert)',
+        'import { calculateFee } from "acme-fee-lib";',
+        "assert.equal(calculateFee(100), 3);",
+        "```",
+        "",
+        "```ts",
+        "// Missing import of calculateFee must fail (no auto-import of repo symbols)",
+        "console.log(calculateFee(100));",
+        "```",
+        "",
+        "```ts",
+        "// Importing from non-entry module via package root must fail (no re-export of non-entry modules)",
+        'import { internalOnlyHelper } from "acme-fee-lib";',
+        "console.log(internalOnlyHelper());",
+        "```",
+        "",
+        "```ts",
+        "// Hardcoded @barryzhu/codefog must not resolve when fixture package.json name is acme-fee-lib",
+        'import { calculateFee } from "@barryzhu/codefog";',
+        "console.log(calculateFee(100));",
         "```",
       ].join("\n"),
       "utf8",
@@ -191,15 +224,16 @@ describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--
     });
 
     const codeClaims = (report.docClaims ?? []).filter((c) => c.kind === "code-block");
-    expect(codeClaims.length).toBe(2);
-    expect(codeClaims[0]?.state).toBe("fog-returned");
-    expect(codeClaims[1]?.state).toBe("fog-returned");
+    expect(codeClaims.length).toBe(6);
+    for (const c of codeClaims) {
+      expect(c.state).toBe("fog-returned");
+    }
 
     expect(codeClaims[0]?.executionOutput).toMatch(/AssertionError|999/);
     expect(codeClaims[1]?.executionOutput).toMatch(/nonExistentSymbol/);
 
     const docFindings = report.findings.filter((f) => f.subjectType === "doc");
-    expect(docFindings.length).toBe(2);
+    expect(docFindings.length).toBe(6);
 
     const assertionFinding = docFindings.find(
       (f) => f.location.startLine === codeClaims[0]?.startLine,
@@ -240,7 +274,7 @@ describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--
         "",
         "```ts",
         'import assert from "node:assert";',
-        'import { calculateFee } from "@barryzhu/codefog";',
+        'import { calculateFee } from "acme-fee-lib";',
         "assert.equal(calculateFee(100), 3);",
         "```",
       ].join("\n"),

@@ -224,7 +224,7 @@ export interface DocClaim {
   kind: DocClaimKind;
   text: string;
   rawText: string;
-  target: string;
+  referentText: string;
   startLine: number;
   endLine: number;
   blockKind: DocBlockKind;
@@ -234,7 +234,7 @@ export interface DocClaim {
   referents: DocReferent[];
   referent?: DocReferent;
   existedAtClaimCommit?: boolean;
-  commandIntent?: "install" | "build" | "test" | "lint" | "typecheck";
+  commandIntent?: "install" | "build" | "test" | "lint";
   executionOutput?: string;
 }
 
@@ -305,5 +305,4 @@ export interface AnalyzeOptions {
   sarifPath?: string | string[];
   knipPath?: string | string[];
   libyearPath?: string | string[];
-  externalReportPath?: string | string[];
 }

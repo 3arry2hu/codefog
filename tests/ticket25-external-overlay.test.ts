@@ -495,8 +495,15 @@ describe("Ticket #25: External SARIF / Knip / libyear overlay and Risk Score mul
     });
     expect(report.external?.libyear).toEqual(report.libyear);
 
-    // Level 4 HTML contains source tool, ruleId, and message
+    // Level 1 HTML contains repo-level libyear summary
     const html = await fs.readFile(htmlOut, "utf8");
+    const level1Match = /<section id="view-level-1"[\s\S]*?<\/section>/.exec(html);
+    expect(level1Match).not.toBeNull();
+    expect(level1Match![0]).toContain("3.75");
+    expect(level1Match![0]).toContain("lodash");
+    expect(level1Match![0]).toContain("typescript");
+
+    // Level 4 HTML contains source tool, ruleId, and message
     expect(html).toContain("qlty/smell-boolean-complexity");
     expect(html).toContain("Simplify negative amount guard");
     expect(html).toContain("semgrep/float-rounding");

@@ -171,14 +171,14 @@ export async function computeDiffComparison(
     const baseReturnedKeys = new Set<string>();
     for (const bc of baseReport.docClaims ?? []) {
       if (bc.state === "fog-returned") {
-        baseReturnedKeys.add(`${bc.file}:${bc.target}`);
+        baseReturnedKeys.add(`${bc.file}:${bc.referentText}`);
         baseReturnedKeys.add(`${bc.file}:${bc.rawText}`);
       }
     }
     newDocFogReturnedClaims = (currentReport.docClaims ?? []).filter(
       (c) =>
         c.state === "fog-returned" &&
-        !baseReturnedKeys.has(`${c.file}:${c.target}`) &&
+        !baseReturnedKeys.has(`${c.file}:${c.referentText}`) &&
         !baseReturnedKeys.has(`${c.file}:${c.rawText}`),
     );
     deletedDocClaims = await detectDeletedDocClaimsAgainstRef(rootDir, baseRef);
@@ -307,7 +307,7 @@ export function renderPrCommentDocSection(
     section.push(`- **New Doc Fog Returned (${newReturned.length})**:`);
     for (const c of newReturned) {
       const ref = c.referent ?? c.referents[0];
-      const refPath = ref?.file ?? ref?.url ?? c.target;
+      const refPath = ref?.file ?? ref?.url ?? c.referentText;
       const refCommit = ref?.lastModifiedCommit ? ` @ \`${ref.lastModifiedCommit}\`` : "";
       section.push(
         `  - **[${c.id}] \`${c.file}:${c.startLine}\` (\`${c.text}\`, ${c.kind})** — \`fog-returned\` [RETURNED] · Referent: \`${refPath}\`${refCommit}`,
@@ -321,9 +321,9 @@ export function renderPrCommentDocSection(
   if (deletedClaims.length > 0) {
     section.push(`- **Deleted Doc Claims (${deletedClaims.length})**:`);
     for (const d of deletedClaims) {
-      const refTarget = d.referent.file ?? d.referent.symbol ?? d.claimText;
+      const referentDesc = d.referent.file ?? d.referent.symbol ?? d.claimText;
       section.push(
-        `  - \`${d.file}:${d.line}\` (\`${d.claimText}\`, ${d.kind}) — Referent \`${refTarget}\` still exists`,
+        `  - \`${d.file}:${d.line}\` (\`${d.claimText}\`, ${d.kind}) — Referent \`${referentDesc}\` still exists`,
       );
     }
   }

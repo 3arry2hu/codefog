@@ -89,8 +89,8 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
 
     // Same commit: both claims are synchronized -> weak-evidence (never self-proof-fog or fog-returned)
     const reportA = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    const claimCalcA = reportA.docClaims?.find((c) => c.target === "calculateFee");
-    const claimTaxA = reportA.docClaims?.find((c) => c.target === "taxFee");
+    const claimCalcA = reportA.docClaims?.find((c) => c.referentText === "calculateFee");
+    const claimTaxA = reportA.docClaims?.find((c) => c.referentText === "taxFee");
     expect(claimCalcA?.state).toBe("weak-evidence");
     expect(claimTaxA?.state).toBe("weak-evidence");
     expect(reportA.summary.docTrustScore).toBe(40);
@@ -116,10 +116,10 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await git(tmpDir, ["commit", "-m", "docs: add comments and type alias Cents"]);
 
     const reportB1 = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    expect(reportB1.docClaims?.find((c) => c.target === "calculateFee")?.state).toBe(
+    expect(reportB1.docClaims?.find((c) => c.referentText === "calculateFee")?.state).toBe(
       "weak-evidence",
     );
-    expect(reportB1.docClaims?.find((c) => c.target === "taxFee")?.state).toBe("weak-evidence");
+    expect(reportB1.docClaims?.find((c) => c.referentText === "taxFee")?.state).toBe("weak-evidence");
     expect(reportB1.summary.docTrustScore).toBe(40);
 
     // Commit B2: modify runtime logic of both calculateFee and taxFee,
@@ -156,12 +156,14 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     const commitB2Short = await git(tmpDir, ["rev-parse", "--short", "HEAD"]);
 
     const reportB2 = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    const claimCalcB2 = reportB2.docClaims?.find((c) => c.target === "calculateFee");
-    const claimTaxB2 = reportB2.docClaims?.find((c) => c.target === "taxFee");
+    const claimCalcB2 = reportB2.docClaims?.find((c) => c.referentText === "calculateFee");
+    const claimTaxB2 = reportB2.docClaims?.find((c) => c.referentText === "taxFee");
 
     expect(claimCalcB2?.state).toBe("fog-returned");
     expect(claimCalcB2?.referent?.lastModifiedCommit).toBe(commitB2Short);
+    expect(claimCalcB2?.existedAtClaimCommit).toBeUndefined();
     expect(claimTaxB2?.state).toBe("weak-evidence");
+    expect(claimTaxB2?.existedAtClaimCommit).toBeUndefined();
 
     const docFindings = reportB2.findings.filter((f) => f.subjectType === "doc");
     expect(docFindings.length).toBe(1);
@@ -206,7 +208,7 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await git(tmpDir, ["commit", "-m", "feat: change fee to 5% + 10"]);
 
     const reportB = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    expect(reportB.docClaims?.find((c) => c.target === "calculateFee")?.state).toBe("fog-returned");
+    expect(reportB.docClaims?.find((c) => c.referentText === "calculateFee")?.state).toBe("fog-returned");
 
     // Commit C1: only add spaces/line breaks inside the paragraph (pure whitespace edit)
     await fs.writeFile(
@@ -218,7 +220,7 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await git(tmpDir, ["commit", "-m", "docs: whitespace only edit in README"]);
 
     const reportC1 = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    expect(reportC1.docClaims?.find((c) => c.target === "calculateFee")?.state).toBe(
+    expect(reportC1.docClaims?.find((c) => c.referentText === "calculateFee")?.state).toBe(
       "fog-returned",
     );
     expect(reportC1.summary.docTrustScore).toBe(0);
@@ -233,7 +235,7 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await git(tmpDir, ["commit", "-m", "docs: substantively update calculateFee description"]);
 
     const reportC2 = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    expect(reportC2.docClaims?.find((c) => c.target === "calculateFee")?.state).toBe(
+    expect(reportC2.docClaims?.find((c) => c.referentText === "calculateFee")?.state).toBe(
       "weak-evidence",
     );
     expect(reportC2.summary.docTrustScore).toBe(40);
@@ -284,10 +286,10 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     const claims = report.docClaims ?? [];
 
     // neverExistedSymbol failed resolution both currently and at claim commit -> not a claim
-    expect(claims.find((c) => c.target === "neverExistedSymbol")).toBeUndefined();
+    expect(claims.find((c) => c.referentText === "neverExistedSymbol")).toBeUndefined();
 
     // calculateFee existed at claim commit (Commit A) -> becomes a symbol claim in fog-returned
-    const calcClaim = claims.find((c) => c.target === "calculateFee");
+    const calcClaim = claims.find((c) => c.referentText === "calculateFee");
     expect(calcClaim).toBeDefined();
     expect(calcClaim?.kind).toBe("symbol");
     expect(calcClaim?.state).toBe("fog-returned");
@@ -312,12 +314,16 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await fs.mkdir(path.join(tmpDir, "docs"), { recursive: true });
     await fs.writeFile(legacyDocFile, "# Legacy\n", "utf8");
 
-    // Commit A: package.json defines build and test; README references npm run build, npm test, docs/legacy.md, and docs/never.md
+    // Commit A: package.json defines build, test, and bin mycli; src/cli.ts has verify and legacy-sync subcommands;
+    // README references npm run build, npm test, mycli legacy-sync, mycli never-sub, docs/legacy.md, and docs/never.md
     await fs.writeFile(
       pkgFile,
       JSON.stringify(
         {
           name: "demo-pkg",
+          bin: {
+            mycli: "src/cli.ts",
+          },
           scripts: {
             build: "tsc -p tsconfig.json",
             test: "vitest run",
@@ -330,6 +336,17 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     );
 
     await fs.writeFile(
+      path.join(tmpDir, "src", "cli.ts"),
+      [
+        "export function runCli(argv: string[]): number {",
+        "  if (argv[0] === 'verify' || argv[0] === 'legacy-sync') return 0;",
+        "  return 1;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await fs.writeFile(
       readmeFile,
       [
         "# Scripts",
@@ -338,20 +355,25 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
         "",
         "Run `npm test` to execute unit tests.",
         "",
+        "Run `mycli legacy-sync` or `mycli never-sub`.",
+        "",
         "See `docs/legacy.md` and `docs/never.md`.",
       ].join("\n"),
       "utf8",
     );
 
     await git(tmpDir, ["add", "."]);
-    await git(tmpDir, ["commit", "-m", "feat: add package.json scripts and README"]);
+    await git(tmpDir, ["commit", "-m", "feat: add package.json scripts, cli, and README"]);
 
-    // Commit B: change build script definition in package.json and delete docs/legacy.md without updating README
+    // Commit B: change build script definition in package.json, remove legacy-sync subcommand from src/cli.ts, and delete docs/legacy.md without updating README
     await fs.writeFile(
       pkgFile,
       JSON.stringify(
         {
           name: "demo-pkg",
+          bin: {
+            mycli: "src/cli.ts",
+          },
           scripts: {
             build: "tsup src/fee.ts --format esm",
             test: "vitest run",
@@ -362,9 +384,19 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
       ),
       "utf8",
     );
+    await fs.writeFile(
+      path.join(tmpDir, "src", "cli.ts"),
+      [
+        "export function runCli(argv: string[]): number {",
+        "  if (argv[0] === 'verify') return 0;",
+        "  return 1;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
     await fs.rm(legacyDocFile);
     await git(tmpDir, ["add", "-A"]);
-    await git(tmpDir, ["commit", "-m", "build: switch build script to tsup and remove legacy doc"]);
+    await git(tmpDir, ["commit", "-m", "build: switch build script to tsup and remove legacy doc/subcommand"]);
     const commitBShort = await git(tmpDir, ["rev-parse", "--short", "HEAD"]);
 
     const report = await analyzeRepository({ rootDir: tmpDir, docs: true });
@@ -372,15 +404,25 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
 
     const buildClaim = claims.find((c) => c.rawText === "npm run build");
     const testClaim = claims.find((c) => c.rawText === "npm test");
+    const legacySubClaim = claims.find((c) => c.rawText === "mycli legacy-sync");
+    const neverSubClaim = claims.find((c) => c.rawText === "mycli never-sub");
     const legacyPathClaim = claims.find((c) => c.rawText === "docs/legacy.md");
     const neverPathClaim = claims.find((c) => c.rawText === "docs/never.md");
 
-    // build script definition changed after README block -> fog-returned
+    // build script definition changed after README block -> fog-returned, but resolution succeeded so existedAtClaimCommit is not set
     expect(buildClaim?.state).toBe("fog-returned");
     expect(buildClaim?.referent?.lastModifiedCommit).toBe(commitBShort);
+    expect(buildClaim?.existedAtClaimCommit).toBeUndefined();
 
-    // test script definition unchanged -> stays weak-evidence
+    // test script definition unchanged -> stays weak-evidence, existedAtClaimCommit is not set
     expect(testClaim?.state).toBe("weak-evidence");
+    expect(testClaim?.existedAtClaimCommit).toBeUndefined();
+
+    // Unresolved bin subcommand claims compute existedAtClaimCommit from git history
+    expect(legacySubClaim?.state).toBe("fog-returned");
+    expect(legacySubClaim?.existedAtClaimCommit).toBe(true);
+    expect(neverSubClaim?.state).toBe("fog-returned");
+    expect(neverSubClaim?.existedAtClaimCommit).toBe(false);
 
     // Both unresolved path claims are fog-returned, but existedAtClaimCommit distinguishes deleted vs never-existed
     expect(legacyPathClaim?.state).toBe("fog-returned");
@@ -481,5 +523,101 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
       },
     );
     expect(exitCodeReturned).toBe(0);
+  });
+
+  it("flags Go/Rust/Java struct and class symbol claims as fog-returned when body members change without updating the first declaration line", async () => {
+    const goFile = path.join(tmpDir, "src", "config.go");
+    const rustFile = path.join(tmpDir, "src", "settings.rs");
+    const javaFile = path.join(tmpDir, "src", "Limits.java");
+    const readmeFile = path.join(tmpDir, "README.md");
+
+    // Commit A: define Go struct, Rust struct, and Java class, and reference them in README.md
+    await fs.writeFile(
+      goFile,
+      [
+        "package config",
+        "",
+        "type FeeConfig struct {",
+        "  RateBps int",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      rustFile,
+      [
+        "pub struct RetrySettings {",
+        "  pub max_retries: u32,",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      javaFile,
+      [
+        "package com.acme;",
+        "public class OrderLimits {",
+        "  public int maxCents = 1000;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      readmeFile,
+      [
+        "# Types",
+        "",
+        "Configure `FeeConfig`, `RetrySettings`, and `OrderLimits`.",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "."]);
+    await git(tmpDir, ["commit", "-m", "feat: add Go/Rust/Java types and README"]);
+
+    const reportA = await analyzeRepository({ rootDir: tmpDir, docs: true });
+    expect(reportA.docClaims?.find((c) => c.rawText === "FeeConfig")?.state).toBe("weak-evidence");
+    expect(reportA.docClaims?.find((c) => c.rawText === "RetrySettings")?.state).toBe("weak-evidence");
+    expect(reportA.docClaims?.find((c) => c.rawText === "OrderLimits")?.state).toBe("weak-evidence");
+
+    // Commit B: modify struct/class body members (keeping the first declaration line identical!)
+    await fs.writeFile(
+      goFile,
+      [
+        "package config",
+        "",
+        "type FeeConfig struct {",
+        "  RateBps int",
+        "  MinFee  int",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      rustFile,
+      [
+        "pub struct RetrySettings {",
+        "  pub max_retries: u64,",
+        "  pub backoff_ms: u64,",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      javaFile,
+      [
+        "package com.acme;",
+        "public class OrderLimits {",
+        "  public int maxCents = 5000;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "src/config.go", "src/settings.rs", "src/Limits.java"]);
+    await git(tmpDir, ["commit", "-m", "feat: update struct/class member fields"]);
+
+    const reportB = await analyzeRepository({ rootDir: tmpDir, docs: true });
+    expect(reportB.docClaims?.find((c) => c.rawText === "FeeConfig")?.state).toBe("fog-returned");
+    expect(reportB.docClaims?.find((c) => c.rawText === "RetrySettings")?.state).toBe("fog-returned");
+    expect(reportB.docClaims?.find((c) => c.rawText === "OrderLimits")?.state).toBe("fog-returned");
   });
 });

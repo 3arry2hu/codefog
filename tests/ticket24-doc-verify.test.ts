@@ -533,4 +533,190 @@ describe("Ticket 24: Doc verification gate (codefog verify <doc.md>) & PR delete
     expect(prComment).toContain("`calculateFee`");
     expect(prComment).toContain("Referent `src/fee.ts` still exists");
   });
+
+  it("handles S2 edge cases: allows uncommitted doc referents, catches untracked code referents, ignores line-overlap-only unrelated functions on delete, catches historical symbols kept in modified blocks, and fails whole-file verify when unmodified fog-returned claims remain", async () => {
+    const feeFile = path.join(tmpDir, "src", "fee.ts");
+    const guideFile = path.join(tmpDir, "docs", "guide.md");
+    const readmeFile = path.join(tmpDir, "README.md");
+    await fs.mkdir(path.join(tmpDir, "docs"), { recursive: true });
+
+    // Commit A: legacyDiscount at lines 1-3, calculateFee at lines 5-7, taxFee at lines 9-11
+    await fs.writeFile(
+      feeFile,
+      [
+        "export function legacyDiscount(amount: number): number {",
+        "  return amount * 0.01;",
+        "}",
+        "",
+        "export function calculateFee(amount: number): number {",
+        "  return amount * 2;",
+        "}",
+        "",
+        "export function taxFee(amount: number): number {",
+        "  return amount * 10;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(guideFile, "# Guide\n\nInitial guide.\n", "utf8");
+    await fs.writeFile(
+      readmeFile,
+      [
+        "# Billing",
+        "",
+        "See [Guide](docs/guide.md) and call `calculateFee` for fees.",
+        "",
+        "Call `taxFee` for tax.",
+        "",
+        "Call `legacyDiscount` for legacy discounts.",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "."]);
+    await git(tmpDir, ["commit", "-m", "feat: initial functions and docs"]);
+
+    // Commit B: delete legacyDiscount at lines 1-3 and put an unrelated function formatLabel at lines 1-3;
+    // also change runtime logic of calculateFee and taxFee
+    await fs.writeFile(
+      feeFile,
+      [
+        "export function formatLabel(name: string): string {",
+        "  return `[${name.trim()}]`;",
+        "}",
+        "",
+        "export function calculateFee(amount: number): number {",
+        "  return amount * 3;",
+        "}",
+        "",
+        "export function taxFee(amount: number): number {",
+        "  return amount * 20;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "src/fee.ts"]);
+    await git(tmpDir, ["commit", "-m", "feat: replace legacyDiscount with formatLabel and update fee rates"]);
+
+    // Commit C (HEAD): touch a comment in src/fee.ts so legacyDiscount was already absent at HEAD
+    await fs.writeFile(
+      feeFile,
+      [
+        "// Billing helpers",
+        "export function formatLabel(name: string): string {",
+        "  return `[${name.trim()}]`;",
+        "}",
+        "",
+        "export function calculateFee(amount: number): number {",
+        "  return amount * 3;",
+        "}",
+        "",
+        "export function taxFee(amount: number): number {",
+        "  return amount * 20;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    await git(tmpDir, ["add", "src/fee.ts"]);
+    await git(tmpDir, ["commit", "-m", "chore: comment header"]);
+
+    // S2d: Modify block 1 (`calculateFee`) and remove `legacyDiscount`, but leave block 2 (`taxFee`) unmodified and still fog-returned.
+    // Whole-file verify (without --lines) MUST fail because `taxFee` is still fog-returned!
+    await fs.writeFile(
+      readmeFile,
+      [
+        "# Billing",
+        "",
+        "See [Guide](docs/guide.md) and call `calculateFee` for 3x fees.",
+        "",
+        "Call `taxFee` for tax.",
+      ].join("\n"),
+      "utf8",
+    );
+    let errS2d = "";
+    const exitS2d = await runCli(["verify", "README.md", "--root", tmpDir], {
+      stdout: () => {},
+      stderr: (s) => {
+        errS2d += s;
+      },
+    });
+    expect(exitS2d).toBe(1);
+    expect(errS2d).toContain("taxFee");
+
+    // S2c: Modify the `legacyDiscount` block to still call `legacyDiscount()` (resolves neither now nor at HEAD, but did resolve at Commit A).
+    // Even when `calculateFee` and `taxFee` are updated, keeping `legacyDiscount()` in a modified block MUST fail!
+    await fs.writeFile(
+      readmeFile,
+      [
+        "# Billing",
+        "",
+        "See [Guide](docs/guide.md) and call `calculateFee` for 3x fees.",
+        "",
+        "Call `taxFee` for 20x tax.",
+        "",
+        "Call `legacyDiscount()` when applicable.",
+      ].join("\n"),
+      "utf8",
+    );
+    let errS2c = "";
+    const exitS2c = await runCli(["verify", "README.md", "--root", tmpDir], {
+      stdout: () => {},
+      stderr: (s) => {
+        errS2c += s;
+      },
+    });
+    expect(exitS2c).toBe(1);
+    expect(errS2c).toContain("legacyDiscount");
+
+    // S2b + S2a (part 1): Delete the `legacyDiscount` block (genuine deletion despite `formatLabel` overlapping lines 1-3)
+    // AND modify `docs/guide.md` (a non-code doc referent) in the working tree -> verify README.md MUST PASS!
+    await fs.writeFile(guideFile, "# Guide\n\nUpdated guide in working tree.\n", "utf8");
+    await fs.writeFile(
+      readmeFile,
+      [
+        "# Billing",
+        "",
+        "See [Guide](docs/guide.md) and call `calculateFee` for 3x fees.",
+        "",
+        "Call `taxFee` for 20x tax.",
+      ].join("\n"),
+      "utf8",
+    );
+    let errS2ab = "";
+    const exitS2ab = await runCli(["verify", "README.md", "--root", tmpDir], {
+      stdout: () => {},
+      stderr: (s) => {
+        errS2ab += s;
+      },
+    });
+    expect(exitS2ab).toBe(0);
+    expect(errS2ab).toBe("");
+
+    // S2a (part 2): Create a new untracked source file `src/new-helper.ts` (HEAD text null) and reference it in README.md ->
+    // verify README.md without --allow-source-change MUST FAIL on `src/new-helper.ts`!
+    await fs.writeFile(
+      path.join(tmpDir, "src", "new-helper.ts"),
+      "export function extraHelper(): number {\n  return 42;\n}\n",
+      "utf8",
+    );
+    await fs.writeFile(
+      readmeFile,
+      [
+        "# Billing",
+        "",
+        "See [Guide](docs/guide.md) and call `calculateFee` or `extraHelper` in `src/new-helper.ts` for 3x fees.",
+        "",
+        "Call `taxFee` for 20x tax.",
+      ].join("\n"),
+      "utf8",
+    );
+    let errUntracked = "";
+    const exitUntracked = await runCli(["verify", "README.md", "--root", tmpDir], {
+      stdout: () => {},
+      stderr: (s) => {
+        errUntracked += s;
+      },
+    });
+    expect(exitUntracked).toBe(1);
+    expect(errUntracked).toContain("src/new-helper.ts");
+  });
 });

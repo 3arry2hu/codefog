@@ -3,7 +3,6 @@ import { promisify } from "node:util";
 import ts from "typescript";
 import {
   extractPolyglotRuntimeFingerprints,
-  extractRustInlineTestFingerprint,
   getPolyglotAdapter,
   isPolyglotSourceFile,
 } from "./polyglot.js";
@@ -417,18 +416,26 @@ export async function analyzeFileGitFreshness(params: {
   const polyAdapter = getPolyglotAdapter(relPath);
   let inlineTestCommits: CommitEntry[] | null = null;
   if (polyAdapter?.extractInlineTestBlockFingerprints && srcHistory.length > 0) {
+    const serializeInlineTestMap = (text: string | null): string => {
+      if (!text || !polyAdapter.extractInlineTestBlockFingerprints) return "";
+      const fpMap = polyAdapter.extractInlineTestBlockFingerprints(text);
+      if (fpMap.size === 0) return "";
+      return Array.from(fpMap.entries())
+        .map(([k, v]) => `${k}=${v}`)
+        .join("||");
+    };
     const inlineCommits: CommitEntry[] = [];
     for (let i = srcHistory.length - 1; i >= 0; i--) {
       const c = srcHistory[i]!;
       const curText = await getSourceTextAtCommit(c.sha);
-      const curTestFp = curText ? extractRustInlineTestFingerprint(curText) : "";
+      const curTestFp = serializeInlineTestMap(curText);
       if (!curTestFp) continue;
       if (i === srcHistory.length - 1) {
         inlineCommits.unshift(c);
       } else {
         const prevCommit = srcHistory[i + 1]!;
         const prevText = await getSourceTextAtCommit(prevCommit.sha);
-        const prevTestFp = prevText ? extractRustInlineTestFingerprint(prevText) : "";
+        const prevTestFp = serializeInlineTestMap(prevText);
         if (curTestFp !== prevTestFp) {
           inlineCommits.unshift(c);
         }
