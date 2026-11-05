@@ -15,11 +15,11 @@ function escapeHtmlServer(raw: string): string {
   return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function formatReferentServer(ref: DocReferent | undefined, fallbackTarget: string): string {
+function formatReferentServer(ref: DocReferent | undefined, fallbackReferent: string): string {
   if (!ref) {
-    return `<code>${escapeHtmlServer(fallbackTarget)}</code>`;
+    return `<code>${escapeHtmlServer(fallbackReferent)}</code>`;
   }
-  const targetPath = ref.file ?? ref.url ?? fallbackTarget;
+  const referentPath = ref.file ?? ref.url ?? fallbackReferent;
   const qualifier = ref.symbol
     ? ` (${escapeHtmlServer(ref.symbol)})`
     : ref.script
@@ -30,10 +30,10 @@ function formatReferentServer(ref: DocReferent | undefined, fallbackTarget: stri
   const commitPart = ref.lastModifiedCommit
     ? ` @ <code>${escapeHtmlServer(ref.lastModifiedCommit)}</code>`
     : "";
-  return `<code>${escapeHtmlServer(targetPath)}</code>${qualifier}${commitPart}`;
+  return `<code>${escapeHtmlServer(referentPath)}</code>${qualifier}${commitPart}`;
 }
 
-function formatClaimAnnotationServer(claim: DocClaim): string {
+function formatClaimMarkerServer(claim: DocClaim): string {
   const badge =
     claim.state === "fog-returned"
       ? '<span class="badge-returned">RETURNED</span>'
@@ -49,8 +49,8 @@ function formatClaimAnnotationServer(claim: DocClaim): string {
   }
   const refHtml =
     allRefs.length > 0
-      ? allRefs.map((r) => formatReferentServer(r, claim.target)).join(", ")
-      : formatReferentServer(undefined, claim.target);
+      ? allRefs.map((r) => formatReferentServer(r, claim.referentText)).join(", ")
+      : formatReferentServer(undefined, claim.referentText);
   return `<span class="doc-claim-inline" style="margin-left:8px;font-size:11px">${badge} · Referent: ${refHtml}</span>`;
 }
 
@@ -67,8 +67,8 @@ function renderDocFileRowsServer(docFile: DocFileSummary): string {
       const st = docFile.lineStates[ln] ?? "verified";
       const escaped = escapeHtmlServer(lineText);
       const lineClaims = claimsByLine.get(ln) ?? [];
-      const claimAnnotations = lineClaims.map((c) => formatClaimAnnotationServer(c)).join(" ");
-      return `<tr class="line-${st}"><td class="ln-col">${ln}</td><td>${escaped}${claimAnnotations ? " " + claimAnnotations : ""}</td></tr>`;
+      const claimMarkers = lineClaims.map((c) => formatClaimMarkerServer(c)).join(" ");
+      return `<tr class="line-${st}"><td class="ln-col">${ln}</td><td>${escaped}${claimMarkers ? " " + claimMarkers : ""}</td></tr>`;
     })
     .join("");
 }
@@ -709,12 +709,12 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       }
     }
 
-    function formatReferentClient(ref, fallbackTarget) {
-      if (!ref) return '<code>' + fallbackTarget + '</code>';
-      const targetPath = ref.file || ref.url || fallbackTarget;
+    function formatReferentClient(ref, fallbackReferent) {
+      if (!ref) return '<code>' + fallbackReferent + '</code>';
+      const referentPath = ref.file || ref.url || fallbackReferent;
       const qualifier = ref.symbol ? ' (' + ref.symbol + ')' : ref.script ? ' (script: ' + ref.script + ')' : ref.anchor ? '#' + ref.anchor : '';
       const commitPart = ref.lastModifiedCommit ? ' @ <code>' + ref.lastModifiedCommit + '</code>' : '';
-      return '<code>' + targetPath + '</code>' + qualifier + commitPart;
+      return '<code>' + referentPath + '</code>' + qualifier + commitPart;
     }
 
     function renderFindingDetail(f) {
@@ -731,7 +731,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       ).join("");
       const matchedClaim = (REPORT.docClaims || []).find(c => c.id === f.id);
       const claimRefHtml = matchedClaim
-        ? '<div style="font-size:12px;margin-top:4px"><strong>Referent:</strong> ' + formatReferentClient(matchedClaim.referent || (matchedClaim.referents && matchedClaim.referents[0]), matchedClaim.target) + '</div>'
+        ? '<div style="font-size:12px;margin-top:4px"><strong>Referent:</strong> ' + formatReferentClient(matchedClaim.referent || (matchedClaim.referents && matchedClaim.referents[0]), matchedClaim.referentText) + '</div>'
         : '';
       detailEl.innerHTML =
         '<div class="finding-card active">' +
@@ -787,7 +787,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         const lineClaims = claimsByLine[ln] || [];
         const claimInlineHtml = lineClaims.map(c => {
           const badge = c.state === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : '<span>[' + c.state + ']</span>';
-          const refHtml = formatReferentClient(c.referent || (c.referents && c.referents[0]), c.target);
+          const refHtml = formatReferentClient(c.referent || (c.referents && c.referents[0]), c.referentText);
           return ' <span class="doc-claim-inline" style="margin-left:8px;font-size:11px">' + badge + ' · Referent: ' + refHtml + '</span>';
         }).join("");
         const lineMutants = mutantsByLine[ln] || [];

@@ -224,7 +224,7 @@ export interface DocClaim {
   kind: DocClaimKind;
   text: string;
   rawText: string;
-  target: string;
+  referentText: string;
   startLine: number;
   endLine: number;
   blockKind: DocBlockKind;

@@ -70,9 +70,9 @@ describe("Ticket 19: Doc Claims extraction, deterministic resolution & Doc Trust
     const report = await analyzeRepository({ rootDir: tmpDir, docs: true });
 
     expect(report.docClaims).toBeDefined();
-    const guideClaim = report.docClaims?.find((c) => c.target === "docs/guide.md");
-    const anchorClaim = report.docClaims?.find((c) => c.target === "#quick-start");
-    const missingClaim = report.docClaims?.find((c) => c.target === "docs/missing.md");
+    const guideClaim = report.docClaims?.find((c) => c.referentText === "docs/guide.md");
+    const anchorClaim = report.docClaims?.find((c) => c.referentText === "#quick-start");
+    const missingClaim = report.docClaims?.find((c) => c.referentText === "docs/missing.md");
 
     expect(guideClaim?.state).toBe("verified");
     expect(guideClaim?.referent?.file).toBe("docs/guide.md");
@@ -186,7 +186,7 @@ describe("Ticket 19: Doc Claims extraction, deterministic resolution & Doc Trust
     const bareFallbackClaim = claims.find((c) => c.rawText === "svc.submitOrder");
     expect(bareFallbackClaim?.referents.map((r) => r.file)).toEqual(["src/OrderService.java"]);
 
-    const parseTokenClaim = claims.find((c) => c.target === "parseToken");
+    const parseTokenClaim = claims.find((c) => c.referentText === "parseToken");
     expect(parseTokenClaim?.referents.map((r) => r.file).sort()).toEqual([
       "src/auth.go",
       "src/billing.ts",
@@ -348,11 +348,11 @@ describe("Ticket 19: Doc Claims extraction, deterministic resolution & Doc Trust
     expect(docsReport.summary.trustScore).toBe(baselineReport.summary.trustScore);
 
     // Exempted claims must not appear in docClaims or findings
-    const claimTargets = (docsReport.docClaims ?? []).map((c) => c.target);
-    expect(claimTargets).not.toContain("docs/deleted-legacy.md");
-    expect(claimTargets).not.toContain("npm run deleted-script");
-    expect(claimTargets).not.toContain("docs/intentionally-missing.md");
-    expect(claimTargets).not.toContain("npm run bad-script");
+    const claimReferentTexts = (docsReport.docClaims ?? []).map((c) => c.referentText);
+    expect(claimReferentTexts).not.toContain("docs/deleted-legacy.md");
+    expect(claimReferentTexts).not.toContain("npm run deleted-script");
+    expect(claimReferentTexts).not.toContain("docs/intentionally-missing.md");
+    expect(claimReferentTexts).not.toContain("npm run bad-script");
 
     // Non-exempted claims:
     // 1. AGENTS.md: `docs/guide.md` -> verified (+1.0)
@@ -409,8 +409,8 @@ describe("Ticket 19: Doc Claims extraction, deterministic resolution & Doc Trust
     // 1 verified (docs/guide.md: +1.0) + 1 fog (external link: 0.0) -> round((1.0 / 2) * 100) = 50
     expect(parsedDocs.summary.docTrustScore).toBe(50);
     expect(parsedDocs.docTrustScore).toBe(50);
-    const extClaimUnchecked = parsedDocs.docClaims.find((c: { target: string }) =>
-      c.target.startsWith("http://127.0.0.1:1/"),
+    const extClaimUnchecked = parsedDocs.docClaims.find((c: { referentText: string }) =>
+      c.referentText.startsWith("http://127.0.0.1:1/"),
     );
     expect(extClaimUnchecked?.state).toBe("fog");
 
@@ -426,8 +426,8 @@ describe("Ticket 19: Doc Claims extraction, deterministic resolution & Doc Trust
       },
     );
     const parsedExtChecked = JSON.parse(jsonExtChecked);
-    const extClaimChecked = parsedExtChecked.docClaims.find((c: { target: string }) =>
-      c.target.startsWith("http://127.0.0.1:1/"),
+    const extClaimChecked = parsedExtChecked.docClaims.find((c: { referentText: string }) =>
+      c.referentText.startsWith("http://127.0.0.1:1/"),
     );
     expect(extClaimChecked?.state).toBe("weak-evidence");
     // 1 verified (+1.0) + 1 weak-evidence (+0.4) -> round((1.4 / 2) * 100) = 70
@@ -473,19 +473,19 @@ describe("Ticket 19: Doc Claims extraction, deterministic resolution & Doc Trust
     const report = await analyzeRepository({ rootDir: tmpDir, docs: true });
     const claims = report.docClaims ?? [];
 
-    const paraClaim = claims.find((c) => c.target === "analyzeRepository");
+    const paraClaim = claims.find((c) => c.referentText === "analyzeRepository");
     expect(paraClaim?.blockKind).toBe("paragraph");
     expect(paraClaim?.startLine).toBe(4);
     expect(paraClaim?.blockStartLine).toBe(3);
     expect(paraClaim?.blockEndLine).toBe(4);
 
-    const listClaim = claims.find((c) => c.target === "docs/guide.md");
+    const listClaim = claims.find((c) => c.referentText === "docs/guide.md");
     expect(listClaim?.blockKind).toBe("list-item");
     expect(listClaim?.startLine).toBe(7);
     expect(listClaim?.blockStartLine).toBe(6);
     expect(listClaim?.blockEndLine).toBe(7);
 
-    const tableClaim = claims.find((c) => c.target === "docs/missing.md");
+    const tableClaim = claims.find((c) => c.referentText === "docs/missing.md");
     expect(tableClaim?.blockKind).toBe("table-row");
     expect(tableClaim?.startLine).toBe(11);
     expect(tableClaim?.blockStartLine).toBe(11);

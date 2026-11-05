@@ -1032,7 +1032,7 @@ async function resolveInlineCommandClaim(
   pkgInfo: PackageManifestInfo,
   isInstruction = false,
 ): Promise<{
-  target: string;
+  referentText: string;
   state: EvidenceState;
   referent?: DocReferent;
   commandIntent?: "install" | "build" | "test" | "lint";
@@ -1062,7 +1062,7 @@ async function resolveInlineCommandClaim(
         }
       : undefined;
     return {
-      target: trimmed,
+      referentText: trimmed,
       state: exists ? "weak-evidence" : "fog-returned",
       ...(referent ? { referent } : {}),
       ...(commandIntent ? { commandIntent } : {}),
@@ -1087,7 +1087,7 @@ async function resolveInlineCommandClaim(
           }
         : undefined;
     return {
-      target: trimmed,
+      referentText: trimmed,
       state: exists ? "weak-evidence" : "fog-returned",
       ...(referent ? { referent } : {}),
       ...(commandIntent ? { commandIntent } : {}),
@@ -1111,7 +1111,7 @@ async function resolveInlineCommandClaim(
         ? { kind: "file", file: fileArg }
         : undefined;
       return {
-        target: trimmed,
+        referentText: trimmed,
         state: exists ? "weak-evidence" : "fog-returned",
         ...(referent ? { referent } : {}),
         ...(commandIntent ? { commandIntent } : {}),
@@ -1138,7 +1138,7 @@ async function resolveInlineCommandClaim(
           bin: binToken,
         };
         return {
-          target: trimmed,
+          referentText: trimmed,
           state: "weak-evidence",
           referent,
           ...(commandIntent ? { commandIntent } : {}),
@@ -1155,7 +1155,7 @@ async function resolveInlineCommandClaim(
             }
           : undefined;
         return {
-          target: trimmed,
+          referentText: trimmed,
           state: validSub ? "weak-evidence" : "fog-returned",
           ...(referent ? { referent } : {}),
           ...(commandIntent ? { commandIntent } : {}),
@@ -1167,7 +1167,7 @@ async function resolveInlineCommandClaim(
   // 5. In AI instruction files, commands matching the fixed intent table (including third-party tools like vitest, tsc, go test, cargo, mvn) participate in intent comparison without existence failure
   if (isInstruction && commandIntent) {
     return {
-      target: trimmed,
+      referentText: trimmed,
       state: "weak-evidence",
       commandIntent,
     };
@@ -1625,8 +1625,8 @@ export async function analyzeDocClaims(options: {
         const lineNum = block.startLine + lineIdx;
         const lineWithoutComments = rawLine.replace(/<!--[\s\S]*?-->/g, "");
 
-        // 1. Extract Markdown links [label](target) (excluding images ![alt](src))
-        const linkTargetsOnLine = new Set<string>();
+        // 1. Extract Markdown links [label](href) (excluding images ![alt](src))
+        const linkReferentsOnLine = new Set<string>();
         const linkRe = /(?<!\!)\[([^\]]*)\]\(([^)]+)\)/g;
         let lm: RegExpExecArray | null;
         while ((lm = linkRe.exec(lineWithoutComments)) !== null) {
@@ -1634,7 +1634,7 @@ export async function analyzeDocClaims(options: {
           if (!rawHref || /^(?:mailto:|tel:|javascript:|data:)/i.test(rawHref)) {
             continue;
           }
-          linkTargetsOnLine.add(rawHref);
+          linkReferentsOnLine.add(rawHref);
 
           if (/^https?:\/\//i.test(rawHref)) {
             let extState: EvidenceState = "fog";
@@ -1648,7 +1648,7 @@ export async function analyzeDocClaims(options: {
               kind: "link",
               text: rawHref,
               rawText: rawHref,
-              target: rawHref,
+              referentText: rawHref,
               startLine: lineNum,
               endLine: lineNum,
               blockKind: block.kind,
@@ -1698,7 +1698,7 @@ export async function analyzeDocClaims(options: {
               kind: "anchor",
               text: rawHref,
               rawText: rawHref,
-              target: rawHref,
+              referentText: rawHref,
               startLine: lineNum,
               endLine: lineNum,
               blockKind: block.kind,
@@ -1728,7 +1728,7 @@ export async function analyzeDocClaims(options: {
               kind: "link",
               text: rawHref,
               rawText: rawHref,
-              target: rawHref,
+              referentText: rawHref,
               startLine: lineNum,
               endLine: lineNum,
               blockKind: block.kind,
@@ -1744,18 +1744,18 @@ export async function analyzeDocClaims(options: {
           const exists = await pathExists(path.join(rootDir, resolvedRel));
           let anchorValid = true;
           if (exists && anchorPart) {
-            let targetDoc = parsedDocsByPath.get(resolvedRel);
-            if (!targetDoc && resolvedRel.toLowerCase().endsWith(".md")) {
+            let referentDoc = parsedDocsByPath.get(resolvedRel);
+            if (!referentDoc && resolvedRel.toLowerCase().endsWith(".md")) {
               try {
-                const targetContent = await fs.readFile(path.join(rootDir, resolvedRel), "utf8");
-                targetDoc = parseMarkdownDoc(resolvedRel, targetContent);
-                parsedDocsByPath.set(resolvedRel, targetDoc);
+                const referentContent = await fs.readFile(path.join(rootDir, resolvedRel), "utf8");
+                referentDoc = parseMarkdownDoc(resolvedRel, referentContent);
+                parsedDocsByPath.set(resolvedRel, referentDoc);
               } catch {
                 anchorValid = false;
               }
             }
-            if (targetDoc) {
-              anchorValid = targetDoc.headings.some(
+            if (referentDoc) {
+              anchorValid = referentDoc.headings.some(
                 (h) => h.slug === anchorPart.toLowerCase(),
               );
             }
@@ -1813,7 +1813,7 @@ export async function analyzeDocClaims(options: {
             kind: "link",
             text: rawHref,
             rawText: rawHref,
-            target: rawHref,
+            referentText: rawHref,
             startLine: lineNum,
             endLine: lineNum,
             blockKind: block.kind,
@@ -1831,7 +1831,7 @@ export async function analyzeDocClaims(options: {
         let im: RegExpExecArray | null;
         while ((im = inlineRe.exec(lineWithoutComments)) !== null) {
           const code = im[1]!.trim();
-          if (!code || linkTargetsOnLine.has(code)) continue;
+          if (!code || linkReferentsOnLine.has(code)) continue;
 
           // Command claim
           const cmdClaim = await resolveInlineCommandClaim(
@@ -1877,7 +1877,7 @@ export async function analyzeDocClaims(options: {
               const lookupSha =
                 blockCommit.sha === "WORKTREE" ? gitSession.commits[0]?.sha : blockCommit.sha;
               if (lookupSha) {
-                const firstSeg = cmdClaim.target.split(/\s*(?:&&|\|\||;)\s*/)[0] ?? cmdClaim.target;
+                const firstSeg = cmdClaim.referentText.split(/\s*(?:&&|\|\||;)\s*/)[0] ?? cmdClaim.referentText;
                 const pmRunM =
                   /^(?:npm|pnpm|yarn|bun)\s+run(?:-script)?\s+([A-Za-z0-9_:.-]+)/.exec(firstSeg);
                 const pmAliasM =
@@ -1922,7 +1922,7 @@ export async function analyzeDocClaims(options: {
               kind: "command",
               text: code,
               rawText: code,
-              target: cmdClaim.target,
+              referentText: cmdClaim.referentText,
               startLine: lineNum,
               endLine: lineNum,
               blockKind: block.kind,
@@ -1977,7 +1977,7 @@ export async function analyzeDocClaims(options: {
               kind: "anchor",
               text: code,
               rawText: code,
-              target: code,
+              referentText: code,
               startLine: lineNum,
               endLine: lineNum,
               blockKind: block.kind,
@@ -2005,7 +2005,7 @@ export async function analyzeDocClaims(options: {
                 kind: "path",
                 text: code,
                 rawText: code,
-                target: code,
+                referentText: code,
                 startLine: lineNum,
                 endLine: lineNum,
                 blockKind: block.kind,
@@ -2058,7 +2058,7 @@ export async function analyzeDocClaims(options: {
               kind: "path",
               text: code,
               rawText: code,
-              target: code,
+              referentText: code,
               startLine: lineNum,
               endLine: lineNum,
               blockKind: block.kind,
@@ -2077,7 +2077,7 @@ export async function analyzeDocClaims(options: {
           if (symCandidate) {
             const matchedSymbols = resolveSymbolInIndex(symCandidate, symbolIndex);
             if (matchedSymbols.length > 0) {
-              const targetName = symCandidate.qualifiedName ?? symCandidate.bareName ?? code;
+              const referentName = symCandidate.qualifiedName ?? symCandidate.bareName ?? code;
               const referents: DocReferent[] = [];
               let staleReferent: DocReferent | undefined;
 
@@ -2108,9 +2108,9 @@ export async function analyzeDocClaims(options: {
                 id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
                 file: doc.file,
                 kind: "symbol",
-                text: targetName,
+                text: referentName,
                 rawText: code,
-                target: targetName,
+                referentText: referentName,
                 startLine: lineNum,
                 endLine: lineNum,
                 blockKind: block.kind,
@@ -2139,7 +2139,7 @@ export async function analyzeDocClaims(options: {
                 }
               }
               if (histMatches.length > 0) {
-                const targetName = symCandidate.qualifiedName ?? symCandidate.bareName ?? code;
+                const referentName = symCandidate.qualifiedName ?? symCandidate.bareName ?? code;
                 const referents: DocReferent[] = [];
                 for (const hs of histMatches) {
                   const removalCommit = await findSymbolRemovalCommit(hs);
@@ -2162,9 +2162,9 @@ export async function analyzeDocClaims(options: {
                   id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
                   file: doc.file,
                   kind: "symbol",
-                  text: targetName,
+                  text: referentName,
                   rawText: code,
-                  target: targetName,
+                  referentText: referentName,
                   startLine: lineNum,
                   endLine: lineNum,
                   blockKind: block.kind,
@@ -2219,8 +2219,8 @@ export async function analyzeDocClaims(options: {
         const b = intentClaims[j]!;
         if (
           a.file !== b.file &&
-          normalizeCommandForConflict(a.target) !==
-            normalizeCommandForConflict(b.target)
+          normalizeCommandForConflict(a.referentText) !==
+            normalizeCommandForConflict(b.referentText)
         ) {
           hasCrossFileConflict = true;
           break;
@@ -2246,10 +2246,10 @@ export async function analyzeDocClaims(options: {
       symbol: c.text,
       startLine: c.startLine,
       endLine: c.endLine,
-      command: c.target,
+      command: c.referentText,
     }));
     const conflictSummary = sortedClaims
-      .map((c) => `${c.file}:${c.startLine} ('${c.target}')`)
+      .map((c) => `${c.file}:${c.startLine} ('${c.referentText}')`)
       .join(" vs ");
     const locationRangeSummary = sortedClaims
       .map((c) => `${c.file}:${c.startLine}-${c.endLine}`)
@@ -2258,7 +2258,7 @@ export async function analyzeDocClaims(options: {
     docFindings.push({
       id: createDeterministicFindingId(
         primary.file,
-        `instruction-conflict:${intent}:${sortedClaims.map((c) => `${c.file}:${c.startLine}:${c.target}`).join("|")}`,
+        `instruction-conflict:${intent}:${sortedClaims.map((c) => `${c.file}:${c.startLine}:${c.referentText}`).join("|")}`,
       ),
       title: `instruction-conflict (${intent}): ${conflictSummary}`,
       state: "weak-evidence",

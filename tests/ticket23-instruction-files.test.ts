@@ -88,9 +88,9 @@ describe("Ticket 23: AI instruction files command verification & instruction-con
     const conflictReport = await analyzeRepository({ rootDir: tmpDir, docs: true });
     const claims = conflictReport.docClaims ?? [];
 
-    const agentsClaim = claims.find((c) => c.file === "AGENTS.md" && c.target === "npm test");
+    const agentsClaim = claims.find((c) => c.file === "AGENTS.md" && c.referentText === "npm test");
     const claudeClaim = claims.find(
-      (c) => c.file === "CLAUDE.md" && c.target === "npx vitest run",
+      (c) => c.file === "CLAUDE.md" && c.referentText === "npx vitest run",
     );
 
     expect(agentsClaim).toBeDefined();
@@ -186,10 +186,10 @@ describe("Ticket 23: AI instruction files command verification & instruction-con
     const report = await analyzeRepository({ rootDir: tmpDir, docs: true });
     const claims = report.docClaims ?? [];
     const agentsLint = claims.find(
-      (c) => c.file === "AGENTS.md" && c.target === "npm run lint",
+      (c) => c.file === "AGENTS.md" && c.referentText === "npm run lint",
     );
     const claudeLint = claims.find(
-      (c) => c.file === "CLAUDE.md" && c.target === "npx eslint .",
+      (c) => c.file === "CLAUDE.md" && c.referentText === "npx eslint .",
     );
 
     expect(agentsLint?.state).toBe("fog-returned");
@@ -287,9 +287,9 @@ describe("Ticket 23: AI instruction files command verification & instruction-con
     const claims = report.docClaims ?? [];
 
     // Third-party commands `go test ./...`, `mvn test`, `npx tsc --noEmit` are weak-evidence (not fog-returned)
-    const goTestClaim = claims.find((c) => c.target === "go test ./...");
-    const mvnTestClaim = claims.find((c) => c.target === "mvn test");
-    const tscBuildClaim = claims.find((c) => c.target === "npx tsc --noEmit");
+    const goTestClaim = claims.find((c) => c.referentText === "go test ./...");
+    const mvnTestClaim = claims.find((c) => c.referentText === "mvn test");
+    const tscBuildClaim = claims.find((c) => c.referentText === "npx tsc --noEmit");
     expect(goTestClaim?.state).toBe("weak-evidence");
     expect(goTestClaim?.commandIntent).toBe("test");
     expect(mvnTestClaim?.state).toBe("weak-evidence");
@@ -298,8 +298,8 @@ describe("Ticket 23: AI instruction files command verification & instruction-con
     expect(tscBuildClaim?.commandIntent).toBe("build");
 
     // Unrecognized-intent commands (`npm run seed`, `npm run migrate`) only do existence check, ignoring "## Test" heading
-    const seedClaim = claims.find((c) => c.target === "npm run seed");
-    const migrateClaim = claims.find((c) => c.target === "npm run migrate");
+    const seedClaim = claims.find((c) => c.referentText === "npm run seed");
+    const migrateClaim = claims.find((c) => c.referentText === "npm run migrate");
     expect(seedClaim?.commandIntent).toBeUndefined();
     expect(seedClaim?.state).toBe("weak-evidence");
     expect(migrateClaim?.commandIntent).toBeUndefined();

@@ -403,7 +403,7 @@ export function alignDocBlockHunks(
 async function findHistoricalSiblingSymbols(
   gitSession: GitTimelineSession,
   file: string,
-  targetSymbol: string,
+  referentSymbol: string,
 ): Promise<Set<string>> {
   if (!gitSession.isGitRepo) return new Set();
   const commits = await gitSession.getFileCommits(file);
@@ -411,8 +411,8 @@ async function findHistoricalSiblingSymbols(
     const text = await gitSession.getFileTextAtCommit(c.sha, file);
     if (!text) continue;
     const syms = extractSymbolsFromSource(text, file);
-    if (syms.some((s) => s.name === targetSymbol)) {
-      return new Set(syms.filter((s) => s.name !== targetSymbol).map((s) => s.name));
+    if (syms.some((s) => s.name === referentSymbol)) {
+      return new Set(syms.filter((s) => s.name !== referentSymbol).map((s) => s.name));
     }
   }
   return new Set();
@@ -524,7 +524,7 @@ async function resolveExistingReferentsForClaim(
   return active;
 }
 
-function claimMatchesAnyReferent(claim: DocClaim, targets: DocReferent[]): boolean {
+function claimMatchesAnyReferent(claim: DocClaim, referents: DocReferent[]): boolean {
   const claimRefs =
     claim.referents.length > 0
       ? claim.referents
@@ -532,7 +532,7 @@ function claimMatchesAnyReferent(claim: DocClaim, targets: DocReferent[]): boole
         ? [claim.referent]
         : [];
   for (const cr of claimRefs) {
-    for (const tr of targets) {
+    for (const tr of referents) {
       if (cr.kind !== tr.kind) continue;
       if (cr.kind === "symbol" && cr.file === tr.file && cr.symbol === tr.symbol) {
         return true;

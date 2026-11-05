@@ -1284,7 +1284,7 @@ export async function evaluateDocCodeBlockClaim(params: {
     docFile,
     `${block.startLine}:code-block:${lang}`,
   );
-  const target = `${lang}:${block.startLine}-${block.endLine}`;
+  const referentText = `${lang}:${block.startLine}-${block.endLine}`;
   const text = `${lang} code block (${docFile}:${block.startLine}-${block.endLine})`;
 
   if (!runDocs) {
@@ -1294,7 +1294,7 @@ export async function evaluateDocCodeBlockClaim(params: {
       kind: "code-block",
       text,
       rawText: block.rawText,
-      target,
+      referentText,
       startLine: block.startLine,
       endLine: block.endLine,
       blockKind: "code-block",
@@ -1333,7 +1333,7 @@ export async function evaluateDocCodeBlockClaim(params: {
     kind: "code-block",
     text,
     rawText: block.rawText,
-    target,
+    referentText,
     startLine: block.startLine,
     endLine: block.endLine,
     blockKind: "code-block",

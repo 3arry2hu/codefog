@@ -89,8 +89,8 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
 
     // Same commit: both claims are synchronized -> weak-evidence (never self-proof-fog or fog-returned)
     const reportA = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    const claimCalcA = reportA.docClaims?.find((c) => c.target === "calculateFee");
-    const claimTaxA = reportA.docClaims?.find((c) => c.target === "taxFee");
+    const claimCalcA = reportA.docClaims?.find((c) => c.referentText === "calculateFee");
+    const claimTaxA = reportA.docClaims?.find((c) => c.referentText === "taxFee");
     expect(claimCalcA?.state).toBe("weak-evidence");
     expect(claimTaxA?.state).toBe("weak-evidence");
     expect(reportA.summary.docTrustScore).toBe(40);
@@ -116,10 +116,10 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await git(tmpDir, ["commit", "-m", "docs: add comments and type alias Cents"]);
 
     const reportB1 = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    expect(reportB1.docClaims?.find((c) => c.target === "calculateFee")?.state).toBe(
+    expect(reportB1.docClaims?.find((c) => c.referentText === "calculateFee")?.state).toBe(
       "weak-evidence",
     );
-    expect(reportB1.docClaims?.find((c) => c.target === "taxFee")?.state).toBe("weak-evidence");
+    expect(reportB1.docClaims?.find((c) => c.referentText === "taxFee")?.state).toBe("weak-evidence");
     expect(reportB1.summary.docTrustScore).toBe(40);
 
     // Commit B2: modify runtime logic of both calculateFee and taxFee,
@@ -156,8 +156,8 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     const commitB2Short = await git(tmpDir, ["rev-parse", "--short", "HEAD"]);
 
     const reportB2 = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    const claimCalcB2 = reportB2.docClaims?.find((c) => c.target === "calculateFee");
-    const claimTaxB2 = reportB2.docClaims?.find((c) => c.target === "taxFee");
+    const claimCalcB2 = reportB2.docClaims?.find((c) => c.referentText === "calculateFee");
+    const claimTaxB2 = reportB2.docClaims?.find((c) => c.referentText === "taxFee");
 
     expect(claimCalcB2?.state).toBe("fog-returned");
     expect(claimCalcB2?.referent?.lastModifiedCommit).toBe(commitB2Short);
@@ -208,7 +208,7 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await git(tmpDir, ["commit", "-m", "feat: change fee to 5% + 10"]);
 
     const reportB = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    expect(reportB.docClaims?.find((c) => c.target === "calculateFee")?.state).toBe("fog-returned");
+    expect(reportB.docClaims?.find((c) => c.referentText === "calculateFee")?.state).toBe("fog-returned");
 
     // Commit C1: only add spaces/line breaks inside the paragraph (pure whitespace edit)
     await fs.writeFile(
@@ -220,7 +220,7 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await git(tmpDir, ["commit", "-m", "docs: whitespace only edit in README"]);
 
     const reportC1 = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    expect(reportC1.docClaims?.find((c) => c.target === "calculateFee")?.state).toBe(
+    expect(reportC1.docClaims?.find((c) => c.referentText === "calculateFee")?.state).toBe(
       "fog-returned",
     );
     expect(reportC1.summary.docTrustScore).toBe(0);
@@ -235,7 +235,7 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     await git(tmpDir, ["commit", "-m", "docs: substantively update calculateFee description"]);
 
     const reportC2 = await analyzeRepository({ rootDir: tmpDir, docs: true });
-    expect(reportC2.docClaims?.find((c) => c.target === "calculateFee")?.state).toBe(
+    expect(reportC2.docClaims?.find((c) => c.referentText === "calculateFee")?.state).toBe(
       "weak-evidence",
     );
     expect(reportC2.summary.docTrustScore).toBe(40);
@@ -286,10 +286,10 @@ describe("Ticket 20: Doc Fog Returned via Git timeline & --fail-on doc-returned"
     const claims = report.docClaims ?? [];
 
     // neverExistedSymbol failed resolution both currently and at claim commit -> not a claim
-    expect(claims.find((c) => c.target === "neverExistedSymbol")).toBeUndefined();
+    expect(claims.find((c) => c.referentText === "neverExistedSymbol")).toBeUndefined();
 
     // calculateFee existed at claim commit (Commit A) -> becomes a symbol claim in fog-returned
-    const calcClaim = claims.find((c) => c.target === "calculateFee");
+    const calcClaim = claims.find((c) => c.referentText === "calculateFee");
     expect(calcClaim).toBeDefined();
     expect(calcClaim?.kind).toBe("symbol");
     expect(calcClaim?.state).toBe("fog-returned");
