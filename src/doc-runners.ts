@@ -210,23 +210,61 @@ function instrumentCodeBlockForExecution(rawCode: string): string {
   return [rawCode, keepImportsLine].filter(Boolean).join("\n");
 }
 
-function summarizeExecutionFailure(rawOutput: string): string {
+function summarizeRunnerOutput(
+  rawOutput: string,
+  options: {
+    priorityPattern: RegExp;
+    ignoreLine?: (line: string) => boolean;
+    defaultMessage: string;
+    maxLines?: number;
+  },
+): string {
   const lines = rawOutput
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .filter(Boolean);
+    .filter((l) => Boolean(l) && (!options.ignoreLine || !options.ignoreLine(l)));
   if (lines.length === 0) {
-    return "Code block execution failed with non-zero exit code.";
+    return options.defaultMessage;
   }
-  const priorityLine = lines.find((l) =>
-    /(?:AssertionError|SyntaxError|ReferenceError|TypeError|Error:|ERR_|does not provide an export|Cannot find module)/i.test(
-      l,
-    ),
-  );
-  const summary = priorityLine
-    ? lines.slice(lines.indexOf(priorityLine), lines.indexOf(priorityLine) + 3).join(" | ")
-    : lines.slice(0, 3).join(" | ");
-  return summary.slice(0, 300);
+  const count = options.maxLines ?? 3;
+  const priorityIdx = lines.findIndex((l) => options.priorityPattern.test(l));
+  const slice =
+    priorityIdx >= 0
+      ? lines.slice(priorityIdx, priorityIdx + count)
+      : lines.slice(0, count);
+  return slice.join(" | ").slice(0, 300);
+}
+
+function buildRunnerFailureResult(
+  err: unknown,
+  params: {
+    assertionsOnOutcome: number;
+    timeoutMs: number;
+    priorityPattern: RegExp;
+    ignoreLine?: (line: string) => boolean;
+    defaultMessage: string;
+    maxLines?: number;
+  },
+): DocCodeBlockRunResult {
+  const e = err as {
+    stderr?: unknown;
+    stdout?: unknown;
+    message?: unknown;
+    killed?: unknown;
+    signal?: unknown;
+  };
+  const stderr = typeof e?.stderr === "string" ? e.stderr : "";
+  const stdout = typeof e?.stdout === "string" ? e.stdout : "";
+  const message = typeof e?.message === "string" ? e.message : String(err);
+  const killed = Boolean(e?.killed) || e?.signal === "SIGTERM";
+  const rawOut = killed
+    ? `Execution timed out after ${params.timeoutMs}ms. ${stderr || stdout || message}`
+    : stderr || stdout || message;
+  return {
+    passed: false,
+    assertionsOnOutcome: params.assertionsOnOutcome,
+    executionOutput: summarizeRunnerOutput(rawOut, params),
+  };
 }
 
 // ============================================================================
@@ -372,19 +410,14 @@ export const tsJsDocCodeBlockRunner: DocCodeBlockRunner = {
         passed: true,
         assertionsOnOutcome,
       };
-    } catch (err: any) {
-      const stderr = typeof err?.stderr === "string" ? err.stderr : "";
-      const stdout = typeof err?.stdout === "string" ? err.stdout : "";
-      const message = typeof err?.message === "string" ? err.message : String(err);
-      const killed = Boolean(err?.killed) || err?.signal === "SIGTERM";
-      const rawOut = killed
-        ? `Execution timed out after ${timeoutMs}ms. ${stderr || stdout || message}`
-        : stderr || stdout || message;
-      return {
-        passed: false,
+    } catch (err) {
+      return buildRunnerFailureResult(err, {
         assertionsOnOutcome,
-        executionOutput: summarizeExecutionFailure(rawOut),
-      };
+        timeoutMs,
+        priorityPattern:
+          /(?:AssertionError|SyntaxError|ReferenceError|TypeError|Error:|ERR_|does not provide an export|Cannot find module)/i,
+        defaultMessage: "Code block execution failed with non-zero exit code.",
+      });
     } finally {
       await fs.rm(execDir, { recursive: true, force: true });
     }
@@ -548,25 +581,6 @@ function wrapGoDocCodeBlock(rawCode: string): string {
   return `package main\n\n${importSection}${assembledMainSection}\n`;
 }
 
-function summarizeGoExecutionFailure(rawOutput: string): string {
-  const lines = rawOutput
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => Boolean(l) && !l.startsWith("# "));
-  if (lines.length === 0) {
-    return "Go code block execution failed with non-zero exit code.";
-  }
-  const priorityLine = lines.find((l) =>
-    /(?:undefined:|cannot use|not enough arguments|too many arguments|syntax error:|panic:|fatal error:|no required module|imported and not used)/i.test(
-      l,
-    ),
-  );
-  const summary = priorityLine
-    ? lines.slice(lines.indexOf(priorityLine), lines.indexOf(priorityLine) + 3).join(" | ")
-    : lines.slice(0, 3).join(" | ");
-  return summary.slice(0, 300);
-}
-
 async function resolveGoBinary(): Promise<string> {
   const dirs: string[] = [];
   if (process.env.GOROOT) {
@@ -656,19 +670,15 @@ export const goDocCodeBlockRunner: DocCodeBlockRunner = {
         passed: true,
         assertionsOnOutcome,
       };
-    } catch (err: any) {
-      const stderr = typeof err?.stderr === "string" ? err.stderr : "";
-      const stdout = typeof err?.stdout === "string" ? err.stdout : "";
-      const message = typeof err?.message === "string" ? err.message : String(err);
-      const killed = Boolean(err?.killed) || err?.signal === "SIGTERM";
-      const rawOut = killed
-        ? `Execution timed out after ${timeoutMs}ms. ${stderr || stdout || message}`
-        : stderr || stdout || message;
-      return {
-        passed: false,
+    } catch (err) {
+      return buildRunnerFailureResult(err, {
         assertionsOnOutcome,
-        executionOutput: summarizeGoExecutionFailure(rawOut),
-      };
+        timeoutMs,
+        priorityPattern:
+          /(?:undefined:|cannot use|not enough arguments|too many arguments|syntax error:|panic:|fatal error:|no required module|imported and not used)/i,
+        ignoreLine: (l) => l.startsWith("# "),
+        defaultMessage: "Go code block execution failed with non-zero exit code.",
+      });
     } finally {
       await fs.rm(execDir, { recursive: true, force: true });
     }
@@ -801,24 +811,6 @@ function wrapRustDocCodeBlock(rawCode: string, libName: string): string {
   ].join("\n");
 }
 
-function summarizeRustExecutionFailure(rawOutput: string): string {
-  const lines = rawOutput
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (lines.length === 0) {
-    return "Rust code block execution failed with non-zero exit code.";
-  }
-  const priorityIdx = lines.findIndex((l) =>
-    /(?:^error(?:\[E\d+\])?:|panicked at|assertion .* failed)/i.test(l),
-  );
-  const summary =
-    priorityIdx >= 0
-      ? lines.slice(priorityIdx, priorityIdx + 4).join(" | ")
-      : lines.slice(0, 3).join(" | ");
-  return summary.slice(0, 300);
-}
-
 export const rustDocCodeBlockRunner: DocCodeBlockRunner = {
   id: "rust",
   languages: ["rust"],
@@ -878,19 +870,14 @@ export const rustDocCodeBlockRunner: DocCodeBlockRunner = {
             passed: true,
             assertionsOnOutcome,
           };
-        } catch (err: any) {
-          const stderr = typeof err?.stderr === "string" ? err.stderr : "";
-          const stdout = typeof err?.stdout === "string" ? err.stdout : "";
-          const message = typeof err?.message === "string" ? err.message : String(err);
-          const killed = Boolean(err?.killed) || err?.signal === "SIGTERM";
-          const rawOut = killed
-            ? `Execution timed out after ${timeoutMs}ms. ${stderr || stdout || message}`
-            : stderr || stdout || message;
-          return {
-            passed: false,
+        } catch (err) {
+          return buildRunnerFailureResult(err, {
             assertionsOnOutcome,
-            executionOutput: summarizeRustExecutionFailure(rawOut),
-          };
+            timeoutMs,
+            priorityPattern: /(?:^error(?:\[E\d+\])?:|panicked at|assertion .* failed)/i,
+            defaultMessage: "Rust code block execution failed with non-zero exit code.",
+            maxLines: 4,
+          });
         }
       });
     } finally {
@@ -1118,24 +1105,6 @@ function prepareJavaCodeBlockSource(rawCode: string): {
   };
 }
 
-function summarizeJavaExecutionFailure(rawOutput: string): string {
-  const lines = rawOutput
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => Boolean(l) && !/^\^+$/.test(l));
-  if (lines.length === 0) {
-    return "Java code block execution failed with non-zero exit code.";
-  }
-  const priorityIdx = lines.findIndex((l) =>
-    /(?:error:|AssertionError|Exception|Error)/i.test(l),
-  );
-  const slice =
-    priorityIdx >= 0
-      ? lines.slice(priorityIdx, priorityIdx + 4)
-      : lines.slice(0, 4);
-  return slice.join(" | ").slice(0, 300);
-}
-
 export const javaDocCodeBlockRunner: DocCodeBlockRunner = {
   id: "java",
   languages: ["java"],
@@ -1179,19 +1148,15 @@ export const javaDocCodeBlockRunner: DocCodeBlockRunner = {
         passed: true,
         assertionsOnOutcome,
       };
-    } catch (err: any) {
-      const stderr = typeof err?.stderr === "string" ? err.stderr : "";
-      const stdout = typeof err?.stdout === "string" ? err.stdout : "";
-      const message = typeof err?.message === "string" ? err.message : String(err);
-      const killed = Boolean(err?.killed) || err?.signal === "SIGTERM";
-      const rawOut = killed
-        ? `Execution timed out after ${timeoutMs}ms. ${stderr || stdout || message}`
-        : stderr || stdout || message;
-      return {
-        passed: false,
+    } catch (err) {
+      return buildRunnerFailureResult(err, {
         assertionsOnOutcome,
-        executionOutput: summarizeJavaExecutionFailure(rawOut),
-      };
+        timeoutMs,
+        priorityPattern: /(?:error:|AssertionError|Exception|Error)/i,
+        ignoreLine: (l) => /^\^+$/.test(l),
+        defaultMessage: "Java code block execution failed with non-zero exit code.",
+        maxLines: 4,
+      });
     } finally {
       await fs.rm(execDir, { recursive: true, force: true });
     }
@@ -1202,21 +1167,12 @@ export const javaDocCodeBlockRunner: DocCodeBlockRunner = {
 // Runner Registry & Dispatcher
 // ============================================================================
 
-export const DOC_CODE_BLOCK_RUNNERS: DocCodeBlockRunner[] = [
+export const DOC_CODE_BLOCK_RUNNERS: readonly DocCodeBlockRunner[] = [
   tsJsDocCodeBlockRunner,
   goDocCodeBlockRunner,
   rustDocCodeBlockRunner,
   javaDocCodeBlockRunner,
 ];
-
-export function registerDocCodeBlockRunner(runner: DocCodeBlockRunner): void {
-  const existingIdx = DOC_CODE_BLOCK_RUNNERS.findIndex((r) => r.id === runner.id);
-  if (existingIdx >= 0) {
-    DOC_CODE_BLOCK_RUNNERS[existingIdx] = runner;
-  } else {
-    DOC_CODE_BLOCK_RUNNERS.push(runner);
-  }
-}
 
 export function getDocCodeBlockRunner(language: string | undefined): DocCodeBlockRunner | undefined {
   if (!language) return undefined;
