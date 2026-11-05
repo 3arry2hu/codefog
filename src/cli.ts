@@ -170,6 +170,9 @@ export async function runCli(
           "  --docs                Scan Markdown & AI instruction files for Doc Claims and compute Doc Trust Score",
           "  --check-external-links Check external HTTP(S) links when --docs is enabled",
           "  --run-docs            Execute runnable code blocks in Markdown when --docs is enabled",
+          "  --sarif <path>        Import SARIF 2.1.0 report(s) as external overlay (repeatable)",
+          "  --knip <path>         Import Knip JSON report(s) as external overlay (repeatable)",
+          "  --libyear <path>      Import libyear JSON report(s) as repository dependency overlay (repeatable)",
           "  --diff <baseRef>      Compare against base git ref (e.g. origin/main)",
           "  --html <path>         Output path for interactive HTML Fog Map (default: .codefog/report.html)",
           "  --pr-comment [dir]    Write PR comment Markdown and SVG artifacts",
@@ -355,6 +358,10 @@ export async function runCli(
     let docsMode = false;
     let checkExternalLinks = false;
     let runDocs = false;
+    const sarifPaths: string[] = [];
+    const knipPaths: string[] = [];
+    const libyearPaths: string[] = [];
+    const externalReportPaths: string[] = [];
 
     const positional: string[] = [];
     for (let i = 0; i < argv.length; i++) {
@@ -382,6 +389,18 @@ export async function runCli(
         expectationsPath = argv[++i];
       } else if (arg === "--defects") {
         defectsPath = argv[++i];
+      } else if (arg === "--sarif") {
+        const val = argv[++i];
+        if (val) sarifPaths.push(val);
+      } else if (arg === "--knip") {
+        const val = argv[++i];
+        if (val) knipPaths.push(val);
+      } else if (arg === "--libyear") {
+        const val = argv[++i];
+        if (val) libyearPaths.push(val);
+      } else if (arg === "--external") {
+        const val = argv[++i];
+        if (val) externalReportPaths.push(val);
       } else if (arg === "--diff") {
         diffBase = argv[++i];
       } else if (arg === "--html") {
@@ -422,6 +441,14 @@ export async function runCli(
       if (envExpectations && !expectationsPath) expectationsPath = envExpectations;
       const envDefects = envVal("npm_config_defects");
       if (envDefects && !defectsPath) defectsPath = envDefects;
+      const envSarif = envVal("npm_config_sarif");
+      if (envSarif) sarifPaths.push(envSarif);
+      const envKnip = envVal("npm_config_knip");
+      if (envKnip) knipPaths.push(envKnip);
+      const envLibyear = envVal("npm_config_libyear");
+      if (envLibyear) libyearPaths.push(envLibyear);
+      const envExternal = envVal("npm_config_external");
+      if (envExternal) externalReportPaths.push(envExternal);
       const envDiff = envVal("npm_config_diff");
       if (envDiff && !diffBase) diffBase = envDiff;
       const envHtml = envVal("npm_config_html");
@@ -465,6 +492,21 @@ export async function runCli(
 
       if (/\.html?$/i.test(pos)) {
         htmlPath = pos;
+        continue;
+      }
+
+      if (/\.sarif(?:\.json)?$/i.test(pos) || /sarif.*\.(?:json|sarif)$/i.test(pos)) {
+        sarifPaths.push(pos);
+        continue;
+      }
+
+      if (/knip.*\.json$/i.test(pos)) {
+        knipPaths.push(pos);
+        continue;
+      }
+
+      if (/libyear.*\.json$/i.test(pos)) {
+        libyearPaths.push(pos);
         continue;
       }
 
@@ -522,6 +564,10 @@ export async function runCli(
       docs: docsMode || undefined,
       checkExternalLinks: checkExternalLinks || undefined,
       runDocs: runDocs || undefined,
+      sarifPath: sarifPaths.length > 0 ? sarifPaths : undefined,
+      knipPath: knipPaths.length > 0 ? knipPaths : undefined,
+      libyearPath: libyearPaths.length > 0 ? libyearPaths : undefined,
+      externalReportPath: externalReportPaths.length > 0 ? externalReportPaths : undefined,
     });
 
     if (diffBase) {

@@ -9,6 +9,7 @@ import { analyzeFileGitFreshness } from "./git-freshness.js";
 import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
 import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
 import { analyzeDocClaims } from "./doc-claims.js";
+import { loadExternalOverlay, matchRegionExternalIssues } from "./external.js";
 import {
   extractPolyglotFunctionSpans,
   getPolyglotAdapter,
@@ -187,6 +188,12 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     expectationsPath: options.expectationsPath,
     defectsPath: options.defectsPath,
   });
+  const externalOverlay = await loadExternalOverlay(rootDir, {
+    sarifPath: options.sarifPath,
+    knipPath: options.knipPath,
+    libyearPath: options.libyearPath,
+    externalReportPath: options.externalReportPath,
+  });
 
   let totalLinesFound = 0;
   let totalLinesHit = 0;
@@ -267,6 +274,11 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     });
     const fileChurn90d = gitFreshness.churn90d;
     const sourceCommit = await lastCommitHash(rootDir, relPath);
+    const fileExternalIssues = externalOverlay
+      ? externalOverlay.issues.filter(
+          (iss) => iss.file === relPath || iss.file.endsWith(`/${relPath}`),
+        )
+      : [];
 
     for (const span of effectiveSpans) {
       const fnRecord = record.functions.find((f) => f.name === span.name);
@@ -361,11 +373,20 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
 
       const unverifiedInSpan =
         regionState === "verified" ? 0 : spanLines.length;
+      const regionExternalIssues = externalOverlay
+        ? matchRegionExternalIssues(
+            fileExternalIssues,
+            span.name,
+            span.startLine,
+            span.endLine,
+          )
+        : [];
       const regionRisk = computeRiskScore({
         unverifiedLoc: regionState === "verified" ? 0 : Math.max(1, unverifiedInSpan),
         churn90d: fileChurn90d,
         cyclomaticComplexity: span.cyclomaticComplexity,
         state: regionState,
+        externalIssuesCount: regionExternalIssues.length,
       });
 
       const findingId =
@@ -388,6 +409,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         lastCodeChangeAt: fnFreshness?.lastCodeChangeAt,
         lastTestChangeAt: fnFreshness?.lastTestChangeAt,
         survivingMutants: spanMutants.survivingMutants,
+        ...(externalOverlay ? { externalIssues: regionExternalIssues } : {}),
         findingId,
       });
 
@@ -449,7 +471,9 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             ...(fnFreshness?.lastCodeChangeAt ? { lastCodeChangeAt: fnFreshness.lastCodeChangeAt } : {}),
             ...(fnFreshness?.lastTestChangeAt ? { lastTestChangeAt: fnFreshness.lastTestChangeAt } : {}),
             survivingMutants: spanMutants.survivingMutants,
+            ...(externalOverlay ? { externalIssues: regionExternalIssues } : {}),
           },
+          ...(externalOverlay ? { externalIssues: regionExternalIssues } : {}),
           suggestedAction,
           acceptanceCheck: {
             command: `npx codefog verify ${relPath} --mutants --oracle --lines ${span.startLine}-${span.endLine}`,
@@ -494,6 +518,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       churn90d: fileChurn90d,
       cyclomaticComplexity: totalComplexity,
       state: dominantState,
+      externalIssuesCount: fileExternalIssues.length,
     });
 
     files.push({
@@ -510,6 +535,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       lines: sourceLines,
       lineStates,
       regions,
+      ...(externalOverlay ? { externalIssues: fileExternalIssues } : {}),
     });
   }
 
@@ -623,6 +649,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     modules,
     findings,
     files,
+    ...(externalOverlay ? { external: externalOverlay } : {}),
+    ...(externalOverlay?.libyear ? { libyear: externalOverlay.libyear } : {}),
   };
 
   return report;
