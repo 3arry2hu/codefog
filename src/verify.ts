@@ -554,6 +554,112 @@ function claimMatchesAnyReferent(claim: DocClaim, referents: DocReferent[]): boo
   return false;
 }
 
+interface AlignedClaimPairResult {
+  deletedClaims: Array<{ headClaim: DocClaim; activeReferents: DocReferent[] }>;
+  retainedDeadSymbolClaims: DocClaim[];
+  modifiedCurBlocks: DocBlock[];
+}
+
+async function analyzeAlignedDocBlockClaims(params: {
+  headDoc: ParsedDocFile;
+  curDoc: ParsedDocFile;
+  headFileClaims: DocClaim[];
+  curFileClaims: DocClaim[];
+  curSymbolIndex: RepoSymbolIndex;
+  gitSession: GitTimelineSession;
+  rootDir: string;
+  pkgInfo: Awaited<ReturnType<typeof loadPackageManifestInfo>>;
+  inRange?: (start: number, end: number) => boolean;
+}): Promise<AlignedClaimPairResult> {
+  const {
+    headDoc,
+    curDoc,
+    headFileClaims,
+    curFileClaims,
+    curSymbolIndex,
+    gitSession,
+    rootDir,
+    pkgInfo,
+    inRange = () => true,
+  } = params;
+
+  const hunks = alignDocBlockHunks(headDoc, curDoc);
+  const deletedClaims: Array<{ headClaim: DocClaim; activeReferents: DocReferent[] }> = [];
+  const retainedDeadSymbolClaims: DocClaim[] = [];
+  const modifiedCurBlocks: DocBlock[] = [];
+
+  for (const hunk of hunks) {
+    const hunkInRange =
+      hunk.headBlocks.some((b) => inRange(b.startLine, b.endLine)) ||
+      hunk.curBlocks.some((b) => inRange(b.startLine, b.endLine));
+    if (!hunkInRange) continue;
+
+    for (const cb of hunk.curBlocks) {
+      if (inRange(cb.startLine, cb.endLine)) {
+        modifiedCurBlocks.push(cb);
+      }
+    }
+
+    const pairCount =
+      hunk.headBlocks.length === hunk.curBlocks.length ? hunk.headBlocks.length : 0;
+
+    for (let idx = 0; idx < hunk.headBlocks.length; idx++) {
+      const hb = hunk.headBlocks[idx]!;
+      const pairedCurBlocks =
+        pairCount > 0 ? [hunk.curBlocks[idx]!] : hunk.curBlocks;
+      if (
+        !inRange(hb.startLine, hb.endLine) &&
+        !pairedCurBlocks.some((cb) => inRange(cb.startLine, cb.endLine))
+      ) {
+        continue;
+      }
+
+      const hbClaims = headFileClaims.filter(
+        (c) => c.blockStartLine === hb.startLine && c.blockEndLine === hb.endLine,
+      );
+      const cbClaims = curFileClaims.filter((c) =>
+        pairedCurBlocks.some(
+          (cb) => c.blockStartLine === cb.startLine && c.blockEndLine === cb.endLine,
+        ),
+      );
+
+      for (const hc of hbClaims) {
+        if (hc.state !== "fog-returned") continue;
+        const activeRefs = await resolveExistingReferentsForClaim(
+          hc,
+          curSymbolIndex,
+          gitSession,
+          rootDir,
+          pkgInfo,
+          curDoc,
+        );
+        if (activeRefs.length === 0) {
+          if (hc.kind === "symbol") {
+            const retainedDeadClaim = cbClaims.find(
+              (cc) =>
+                cc.kind === "symbol" &&
+                (cc.text === hc.text || cc.rawText === hc.rawText),
+            );
+            if (retainedDeadClaim) {
+              retainedDeadSymbolClaims.push(retainedDeadClaim);
+            }
+          }
+          continue;
+        }
+
+        const kept = cbClaims.some(
+          (cc) => cc.state !== "fog-returned" && claimMatchesAnyReferent(cc, activeRefs),
+        );
+        if (!kept) {
+          deletedClaims.push({ headClaim: hc, activeReferents: activeRefs });
+        }
+      }
+    }
+  }
+
+  return { deletedClaims, retainedDeadSymbolClaims, modifiedCurBlocks };
+}
+
 export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyResult> {
   const rootDir = path.resolve(options.rootDir);
   const absTarget = path.resolve(rootDir, options.targetFile);
@@ -634,97 +740,53 @@ export async function verifyDocTarget(options: VerifyOptions): Promise<VerifyRes
   }
 
   if (headDoc && curDoc) {
-    const hunks = alignDocBlockHunks(headDoc, curDoc);
     const checkedClaimIds = new Set<string>();
+    const aligned = await analyzeAlignedDocBlockClaims({
+      headDoc,
+      curDoc,
+      headFileClaims,
+      curFileClaims,
+      curSymbolIndex,
+      gitSession,
+      rootDir,
+      pkgInfo,
+      inRange,
+    });
 
-    for (const hunk of hunks) {
-      const hunkInRange =
-        hunk.headBlocks.some((b) => inRange(b.startLine, b.endLine)) ||
-        hunk.curBlocks.some((b) => inRange(b.startLine, b.endLine));
-      if (!hunkInRange) continue;
+    for (const { headClaim, activeReferents } of aligned.deletedClaims) {
+      const refDesc = activeReferents
+        .map((r) => (r.file && r.symbol ? `${r.file} (${r.symbol})` : r.file ?? r.symbol ?? headClaim.text))
+        .join(", ");
+      violations.push(
+        `Anti-gaming gate triggered: fog-returned doc claim '${headClaim.text}' at ${relTarget}:${headClaim.startLine} was deleted or rewritten into vague text while referent ${refDesc} still exists.`,
+      );
+    }
 
-      const pairCount =
-        hunk.headBlocks.length === hunk.curBlocks.length ? hunk.headBlocks.length : 0;
-
-      for (let idx = 0; idx < hunk.headBlocks.length; idx++) {
-        const hb = hunk.headBlocks[idx]!;
-        const pairedCurBlocks =
-          pairCount > 0 ? [hunk.curBlocks[idx]!] : hunk.curBlocks;
-        if (
-          !inRange(hb.startLine, hb.endLine) &&
-          !pairedCurBlocks.some((cb) => inRange(cb.startLine, cb.endLine))
-        ) {
-          continue;
-        }
-
-        const hbClaims = headFileClaims.filter(
-          (c) => c.blockStartLine === hb.startLine && c.blockEndLine === hb.endLine,
+    for (const retainedDeadClaim of aligned.retainedDeadSymbolClaims) {
+      if (!checkedClaimIds.has(retainedDeadClaim.id)) {
+        checkedClaimIds.add(retainedDeadClaim.id);
+        violations.push(
+          `Unresolvable doc claim '${retainedDeadClaim.text}' (${retainedDeadClaim.kind}) in modified block at ${relTarget}:${retainedDeadClaim.startLine}.`,
         );
-        const cbClaims = curFileClaims.filter((c) =>
-          pairedCurBlocks.some(
-            (cb) => c.blockStartLine === cb.startLine && c.blockEndLine === cb.endLine,
-          ),
-        );
-
-        for (const hc of hbClaims) {
-          if (hc.state !== "fog-returned") continue;
-          const activeRefs = await resolveExistingReferentsForClaim(
-            hc,
-            curSymbolIndex,
-            gitSession,
-            rootDir,
-            pkgInfo,
-            curDoc,
-          );
-          if (activeRefs.length === 0) {
-            if (hc.kind === "symbol") {
-              const retainedDeadClaim = cbClaims.find(
-                (cc) =>
-                  cc.kind === "symbol" &&
-                  (cc.text === hc.text || cc.rawText === hc.rawText),
-              );
-              if (retainedDeadClaim && !checkedClaimIds.has(retainedDeadClaim.id)) {
-                checkedClaimIds.add(retainedDeadClaim.id);
-                violations.push(
-                  `Unresolvable doc claim '${retainedDeadClaim.text}' (${retainedDeadClaim.kind}) in modified block at ${relTarget}:${retainedDeadClaim.startLine}.`,
-                );
-              }
-            }
-            continue;
-          }
-
-          const kept = cbClaims.some(
-            (cc) => cc.state !== "fog-returned" && claimMatchesAnyReferent(cc, activeRefs),
-          );
-          if (!kept) {
-            const refDesc = activeRefs
-              .map((r) => (r.file && r.symbol ? `${r.file} (${r.symbol})` : r.file ?? r.symbol ?? hc.text))
-              .join(", ");
-            violations.push(
-              `Anti-gaming gate triggered: fog-returned doc claim '${hc.text}' at ${relTarget}:${hc.startLine} was deleted or rewritten into vague text while referent ${refDesc} still exists.`,
-            );
-          }
-        }
       }
+    }
 
-      // Rule 3: All claims in modified blocks must be resolvable (and code blocks must pass under --run-docs)
-      for (const cb of hunk.curBlocks) {
-        if (!inRange(cb.startLine, cb.endLine)) continue;
-        const cbClaims = curFileClaims.filter(
-          (c) => c.blockStartLine === cb.startLine && c.blockEndLine === cb.endLine,
-        );
-        for (const cc of cbClaims) {
-          if (cc.state === "fog-returned" && !checkedClaimIds.has(cc.id)) {
-            checkedClaimIds.add(cc.id);
-            if (cc.kind === "code-block" && cc.executionOutput) {
-              violations.push(
-                `Doc code block at ${relTarget}:${cc.startLine}-${cc.endLine} failed execution: ${cc.executionOutput}`,
-              );
-            } else {
-              violations.push(
-                `Unresolvable doc claim '${cc.text}' (${cc.kind}) in modified block at ${relTarget}:${cc.startLine}.`,
-              );
-            }
+    // Rule 3: All claims in modified blocks must be resolvable (and code blocks must pass under --run-docs)
+    for (const cb of aligned.modifiedCurBlocks) {
+      const cbClaims = curFileClaims.filter(
+        (c) => c.blockStartLine === cb.startLine && c.blockEndLine === cb.endLine,
+      );
+      for (const cc of cbClaims) {
+        if (cc.state === "fog-returned" && !checkedClaimIds.has(cc.id)) {
+          checkedClaimIds.add(cc.id);
+          if (cc.kind === "code-block" && cc.executionOutput) {
+            violations.push(
+              `Doc code block at ${relTarget}:${cc.startLine}-${cc.endLine} failed execution: ${cc.executionOutput}`,
+            );
+          } else {
+            violations.push(
+              `Unresolvable doc claim '${cc.text}' (${cc.kind}) in modified block at ${relTarget}:${cc.startLine}.`,
+            );
           }
         }
       }
@@ -832,56 +894,30 @@ export async function detectDeletedDocClaimsAgainstRef(
 
     const baseFileClaims = baseAtCurrentAnalysis.docClaims.filter((c) => c.file === docFile);
     const curFileClaims = curAnalysis.docClaims.filter((c) => c.file === docFile);
-    const hunks = alignDocBlockHunks(baseDoc, curDoc);
 
-    for (const hunk of hunks) {
-      const pairCount =
-        hunk.headBlocks.length === hunk.curBlocks.length ? hunk.headBlocks.length : 0;
+    const aligned = await analyzeAlignedDocBlockClaims({
+      headDoc: baseDoc,
+      curDoc,
+      headFileClaims: baseFileClaims,
+      curFileClaims,
+      curSymbolIndex,
+      gitSession,
+      rootDir: absRoot,
+      pkgInfo,
+    });
 
-      for (let idx = 0; idx < hunk.headBlocks.length; idx++) {
-        const hb = hunk.headBlocks[idx]!;
-        const pairedCurBlocks =
-          pairCount > 0 ? [hunk.curBlocks[idx]!] : hunk.curBlocks;
-
-        const hbClaims = baseFileClaims.filter(
-          (c) => c.blockStartLine === hb.startLine && c.blockEndLine === hb.endLine,
-        );
-        const cbClaims = curFileClaims.filter((c) =>
-          pairedCurBlocks.some(
-            (cb) => c.blockStartLine === cb.startLine && c.blockEndLine === cb.endLine,
-          ),
-        );
-
-        for (const hc of hbClaims) {
-          if (hc.state !== "fog-returned") continue;
-          const activeRefs = await resolveExistingReferentsForClaim(
-            hc,
-            curSymbolIndex,
-            gitSession,
-            absRoot,
-            pkgInfo,
-            curDoc,
-          );
-          if (activeRefs.length === 0) continue;
-
-          const kept = cbClaims.some(
-            (cc) => cc.state !== "fog-returned" && claimMatchesAnyReferent(cc, activeRefs),
-          );
-          if (!kept) {
-            const dedupKey = `${hc.file}:${hc.startLine}:${hc.rawText}`;
-            if (!seenKeys.has(dedupKey)) {
-              seenKeys.add(dedupKey);
-              deletedEvents.push({
-                file: hc.file,
-                claimText: hc.text,
-                rawText: hc.rawText,
-                kind: hc.kind,
-                line: hc.startLine,
-                referent: activeRefs[0]!,
-              });
-            }
-          }
-        }
+    for (const { headClaim, activeReferents } of aligned.deletedClaims) {
+      const dedupKey = `${headClaim.file}:${headClaim.startLine}:${headClaim.rawText}`;
+      if (!seenKeys.has(dedupKey)) {
+        seenKeys.add(dedupKey);
+        deletedEvents.push({
+          file: headClaim.file,
+          claimText: headClaim.text,
+          rawText: headClaim.rawText,
+          kind: headClaim.kind,
+          line: headClaim.startLine,
+          referent: activeReferents[0]!,
+        });
       }
     }
   }
