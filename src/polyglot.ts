@@ -1176,6 +1176,82 @@ export function generateRustCandidateMutations(
   return candidates;
 }
 
+export interface RustAssertionSpan {
+  kind: "outcome" | "liveness";
+  expr: string;
+}
+
+export function extractRustAssertionSpans(noCommentsText: string): RustAssertionSpan[] {
+  const spans: RustAssertionSpan[] = [];
+  const coveredRanges: Array<{ start: number; end: number }> = [];
+  const closeForOpen: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+
+  const macroRe =
+    /\b(assert_eq|assert_ne|debug_assert_eq|debug_assert_ne|assert_matches|debug_assert_matches|assert|debug_assert)!\s*([([{])/g;
+  let m: RegExpExecArray | null;
+  while ((m = macroRe.exec(noCommentsText)) !== null) {
+    const macroName = m[1]!;
+    const openChar = m[2]!;
+    const closeChar = closeForOpen[openChar] ?? ")";
+    const openIdx = m.index + m[0].length - 1;
+    const closeIdx = findMatchingDelimiter(noCommentsText, openIdx, openChar, closeChar);
+    if (closeIdx === -1) continue;
+    const expr = noCommentsText.slice(openIdx + 1, closeIdx);
+    coveredRanges.push({ start: m.index, end: closeIdx + 1 });
+
+    if (macroName === "assert" || macroName === "debug_assert") {
+      const isPureLiveness =
+        /\.\s*(?:is_ok|is_some)\s*\(\s*\)/.test(expr) &&
+        !/==|!=|<=|>=|<|>|\bmatches!\b/.test(expr);
+      spans.push({
+        kind: isPureLiveness ? "liveness" : "outcome",
+        expr,
+      });
+    } else {
+      spans.push({
+        kind: "outcome",
+        expr,
+      });
+    }
+  }
+
+  // Standalone `matches!(...)` outside an outer `assert!(...)` macro
+  const matchesMacroRe = /\bmatches!\s*([([{])/g;
+  while ((m = matchesMacroRe.exec(noCommentsText)) !== null) {
+    const startIdx = m.index;
+    if (coveredRanges.some((r) => startIdx >= r.start && startIdx < r.end)) {
+      continue;
+    }
+    const openChar = m[1]!;
+    const closeChar = closeForOpen[openChar] ?? ")";
+    const openIdx = startIdx + m[0].length - 1;
+    const closeIdx = findMatchingDelimiter(noCommentsText, openIdx, openChar, closeChar);
+    if (closeIdx === -1) continue;
+    const expr = noCommentsText.slice(openIdx + 1, closeIdx);
+    spans.push({
+      kind: "outcome",
+      expr,
+    });
+  }
+
+  return spans;
+}
+
+/**
+ * Counts Rust Outcome Assertions (`assert_eq!`, `assert_ne!`, `matches!`, non-liveness `assert!`)
+ * in a standalone Rust code snippet, reusing the Rust adapter's assertion classification.
+ * `.unwrap()`, `.expect()`, `assert!(x.is_ok())`, and `println!` are not counted as Outcome Assertions.
+ */
+export function countRustOutcomeAssertions(sourceText: string): number {
+  const { noComments } = stripCommentsAndMaskStrings(sourceText);
+  return extractRustAssertionSpans(noComments).filter((s) => s.kind === "outcome").length;
+}
+
+export function hasRustMainFunction(sourceText: string): boolean {
+  const { masked } = stripCommentsAndMaskStrings(sourceText);
+  return /\bfn\s+main\s*\(/.test(masked);
+}
+
 export interface RustFunctionAstMeta {
   name: string;
   fileStem: string;
@@ -1376,36 +1452,15 @@ export async function analyzeRustFilesAstEvidence(
         return found;
       }
 
-      // 3. Outcome assertions: `assert_eq!(...)`, `assert_ne!(...)`, `assert_matches!(...)`
-      const outcomeMacroRe =
-        /\b(?:assert_eq|assert_ne|debug_assert_eq|debug_assert_ne|assert_matches)!\s*\(([^;]+)\)/g;
-      let sm: RegExpExecArray | null;
-      while ((sm = outcomeMacroRe.exec(bodyText)) !== null) {
-        const expr = sm[1]!;
-        for (const t of collectTargetsInExpr(expr)) {
-          const k = `${t.fileStem}::${t.name}`;
-          outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
-        }
-      }
-
-      // 4. `assert!(<cond>)`: check if `<cond>` is purely `.is_ok()` / `.is_some()` (Liveness Check) vs concrete comparison (Outcome Assertion)
-      const assertMacroRe = /\b(?:assert|debug_assert)!\s*\(([^;]+)\)/g;
-      let am: RegExpExecArray | null;
-      while ((am = assertMacroRe.exec(bodyText)) !== null) {
-        const expr = am[1]!;
-        const targets = collectTargetsInExpr(expr);
-        if (targets.length === 0) continue;
-
-        const isPureLiveness =
-          /\.\s*(?:is_ok|is_some)\s*\(\s*\)/.test(expr) &&
-          !/==|!=|<=|>=|<|>|\bmatches!\b/.test(expr);
-
+      // 3. Outcome & Liveness assertions (`assert_eq!`, `assert_ne!`, `assert_matches!`, `matches!`, `assert!`)
+      for (const span of extractRustAssertionSpans(bodyText)) {
+        const targets = collectTargetsInExpr(span.expr);
         for (const t of targets) {
           const k = `${t.fileStem}::${t.name}`;
-          if (isPureLiveness) {
-            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
-          } else {
+          if (span.kind === "outcome") {
             outcomeForTarget.set(k, (outcomeForTarget.get(k) ?? 0) + 1);
+          } else {
+            livenessForTarget.set(k, (livenessForTarget.get(k) ?? 0) + 1);
           }
         }
       }
