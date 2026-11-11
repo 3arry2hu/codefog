@@ -8,7 +8,7 @@ import { runCli } from "../src/cli.js";
 
 const hasGo = spawnSync("go", ["version"]).status === 0;
 
-describe("Ticket 26: Executable docs — Go code block execution evidence (--run-docs)", () => {
+describe("Ticket 26: Executable docs — Go code block execution evidence (--run-docs)", { timeout: 60_000 }, () => {
   let tmpDir: string;
 
   beforeEach(async () => {

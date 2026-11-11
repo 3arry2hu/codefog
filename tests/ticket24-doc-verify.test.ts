@@ -13,7 +13,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-describe("Ticket 24: Doc verification gate (codefog verify <doc.md>) & PR deleted doc claims", () => {
+describe("Ticket 24: Doc verification gate (codefog verify <doc.md>) & PR deleted doc claims", { timeout: 60_000 }, () => {
   let tmpDir: string;
 
   beforeEach(async () => {

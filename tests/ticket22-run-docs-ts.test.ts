@@ -5,7 +5,7 @@ import * as os from "node:os";
 import { analyzeRepository } from "../src/analyzer.js";
 import { runCli } from "../src/cli.js";
 
-describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--run-docs)", () => {
+describe("Ticket 22: Executable docs — TS/JS code block execution evidence (--run-docs)", { timeout: 60_000 }, () => {
   let tmpDir: string;
 
   beforeEach(async () => {

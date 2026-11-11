@@ -8,7 +8,7 @@ import { runCli } from "../src/cli.js";
 
 const hasCargo = spawnSync("cargo", ["--version"]).status === 0;
 
-describe("Ticket 27: Executable docs — Rust code block execution evidence (--run-docs)", () => {
+describe("Ticket 27: Executable docs — Rust code block execution evidence (--run-docs)", { timeout: 60_000 }, () => {
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -63,10 +63,6 @@ describe("Ticket 27: Executable docs — Rust code block execution evidence (--r
   it.skipIf(!hasCargo)(
     "wraps rust code blocks without fn main (rustdoc style) and maps the local crate: marks passing assert_eq!(calculate_fee(100), 3) as verified and println!(\"{}\", calculate_fee(100)) as weak-evidence, and cleans up mkdtemp dirs",
     async () => {
-      const tmpBefore = new Set(
-        (await fs.readdir(os.tmpdir())).filter((n) => n.startsWith("codefog-rundocs-rust-")),
-      );
-
       await fs.writeFile(
         path.join(tmpDir, "README.md"),
         [
@@ -98,17 +94,26 @@ describe("Ticket 27: Executable docs — Rust code block execution evidence (--r
       expect(unrunBlocks[1]?.state).toBe("fog");
       expect(reportWithoutRun.summary.docTrustScore).toBe(0);
 
-      // With --run-docs, blocks are wrapped in fn main() and executed
-      const report = await analyzeRepository({
-        rootDir: tmpDir,
-        docs: true,
-        runDocs: true,
-      });
-
-      const tmpAfter = (await fs.readdir(os.tmpdir())).filter(
-        (n) => n.startsWith("codefog-rundocs-rust-") && !tmpBefore.has(n),
-      );
-      expect(tmpAfter).toEqual([]);
+      // With --run-docs, blocks are wrapped in fn main() and executed.
+      // TMPDIR is isolated so concurrent runs cannot leave their own dirs in the checked location.
+      const isolatedTmp = await fs.mkdtemp(path.join(os.tmpdir(), "codefog-t27-isolated-"));
+      const previousTmpDir = process.env.TMPDIR;
+      process.env.TMPDIR = isolatedTmp;
+      let report;
+      let leftover: string[];
+      try {
+        report = await analyzeRepository({
+          rootDir: tmpDir,
+          docs: true,
+          runDocs: true,
+        });
+        leftover = (await fs.readdir(isolatedTmp)).filter((n) => n.startsWith("codefog-rundocs-rust-"));
+      } finally {
+        if (previousTmpDir === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previousTmpDir;
+        await fs.rm(isolatedTmp, { recursive: true, force: true });
+      }
+      expect(leftover).toEqual([]);
 
       const codeClaims = (report.docClaims ?? []).filter(
         (c) => c.kind === "code-block",

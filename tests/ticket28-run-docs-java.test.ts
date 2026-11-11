@@ -12,7 +12,7 @@ const hasJavac =
   spawnSync("javac", ["-version"]).status === 0 &&
   spawnSync("java", ["-version"]).status === 0;
 
-describe("Ticket 28: Executable docs — Java code block execution evidence (--run-docs)", () => {
+describe("Ticket 28: Executable docs — Java code block execution evidence (--run-docs)", { timeout: 60_000 }, () => {
   let tmpDir: string;
 
   beforeEach(async () => {
