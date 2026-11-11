@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/@barryzhu/codefog"><img alt="npm version" src="https://img.shields.io/npm/v/@barryzhu/codefog?style=flat-square&color=1D3656&labelColor=0E1A2B&logo=npm&logoColor=white"></a>
   <a href="./LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-6E88AA?style=flat-square&labelColor=0E1A2B"></a>
-  <img alt="Node.js >= 16" src="https://img.shields.io/badge/node-%E2%89%A5%2016-BCCCE2?style=flat-square&labelColor=0E1A2B&logo=nodedotjs&logoColor=white">
+  <img alt="Node.js 16+" src="https://img.shields.io/badge/node-%E2%89%A5%2016-BCCCE2?style=flat-square&labelColor=0E1A2B&logo=nodedotjs&logoColor=white">
   <img alt="Languages" src="https://img.shields.io/badge/languages-TS%20%C2%B7%20JS%20%C2%B7%20Go%20%C2%B7%20Rust%20%C2%B7%20Java-1D3656?style=flat-square&labelColor=0E1A2B">
   <img alt="Zero wasm or native binaries" src="https://img.shields.io/badge/runtime-zero%20wasm%20%2F%20binaries-BD4900?style=flat-square&labelColor=0E1A2B">
 </p>
