@@ -360,7 +360,7 @@ npx @barryzhu/codefog --diff origin/main --pr-comment .codefog --fail-on regress
 **信任分（Trust Score，0 到 100）**衡量仓库、模块或文件的证据健康度。文档信任分使用相同的权重，只是按声明计数而不是按行计数。
 
 ```math
-\text{Trust} = \operatorname{clamp}_{[0,100]}\left(\operatorname{round}\left(\frac{1.0\,L_{\text{verified}} + 0.4\,L_{\text{weak}} + 0.3\,L_{\text{self-proof}} - 0.5\,L_{\text{returned}}}{L_{\text{total}}} \times 100\right)\right)
+\text{Trust} = \mathrm{clamp}_{[0,100]}\left(\mathrm{round}\left(\frac{1.0\,L_{\text{verified}} + 0.4\,L_{\text{weak}} + 0.3\,L_{\text{self-proof}} - 0.5\,L_{\text{returned}}}{L_{\text{total}}} \times 100\right)\right)
 ```
 
 **风险分（Risk Score，0.0 到 10.0）**衡量文件或发现项的修复紧迫度，综合未验证行数、近 90 天修改次数、圈复杂度与状态权重：
@@ -370,7 +370,7 @@ R_{\text{raw}} = \ln(1 + \max(1, L_{\text{unverified}})) \cdot \ln(1 + \max(1, \
 ```
 
 ```math
-\text{Risk} = \operatorname{round}_{0.1}\left(\min\left(10,\ \max\left(0.1,\ \frac{R_{\text{raw}}}{R_{\text{raw}} + 3.5} \times 10\right)\right)\right)
+\text{Risk} = \mathrm{round}_{0.1}\left(\min\left(10,\ \max\left(0.1,\ \frac{R_{\text{raw}}}{R_{\text{raw}} + 3.5} \times 10\right)\right)\right)
 ```
 
 $R_{\text{raw}}$ 的最后一项只在导入外部报告时生效，$n_{\text{external}}$ 是落在该区域内的外部问题数。

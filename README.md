@@ -360,7 +360,7 @@ npx @barryzhu/codefog --diff origin/main --pr-comment .codefog --fail-on regress
 **Trust Score** (0 to 100) measures evidence health for a repo, module or file. The Doc Trust Score uses the same weights, counted per claim instead of per line.
 
 ```math
-\text{Trust} = \operatorname{clamp}_{[0,100]}\left(\operatorname{round}\left(\frac{1.0\,L_{\text{verified}} + 0.4\,L_{\text{weak}} + 0.3\,L_{\text{self-proof}} - 0.5\,L_{\text{returned}}}{L_{\text{total}}} \times 100\right)\right)
+\text{Trust} = \mathrm{clamp}_{[0,100]}\left(\mathrm{round}\left(\frac{1.0\,L_{\text{verified}} + 0.4\,L_{\text{weak}} + 0.3\,L_{\text{self-proof}} - 0.5\,L_{\text{returned}}}{L_{\text{total}}} \times 100\right)\right)
 ```
 
 **Risk Score** (0.0 to 10.0) ranks how urgently a file or Finding needs work, from unverified lines, 90-day churn, cyclomatic complexity and the state weight:
@@ -370,7 +370,7 @@ R_{\text{raw}} = \ln(1 + \max(1, L_{\text{unverified}})) \cdot \ln(1 + \max(1, \
 ```
 
 ```math
-\text{Risk} = \operatorname{round}_{0.1}\left(\min\left(10,\ \max\left(0.1,\ \frac{R_{\text{raw}}}{R_{\text{raw}} + 3.5} \times 10\right)\right)\right)
+\text{Risk} = \mathrm{round}_{0.1}\left(\min\left(10,\ \max\left(0.1,\ \frac{R_{\text{raw}}}{R_{\text{raw}} + 3.5} \times 10\right)\right)\right)
 ```
 
 The last factor of $R_{\text{raw}}$ applies only when external reports are imported; $n_{\text{external}}$ is the number of imported issues inside the region.
