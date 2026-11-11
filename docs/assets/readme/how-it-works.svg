@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="title desc">
+  <title id="title">How codefog works</title>
+  <desc id="desc">Six evidence signals (coverage, assertions, Git history, mutations, doc claims, external tools) feed the five-state evidence model, which produces Trust Scores, an interactive Fog Map, PR comments with CI gates, and agent-ready Findings.</desc>
+  <defs>
+    <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="#6E88AA"/>
+      <rect width="2.5" height="6" fill="#89A0BE"/>
+    </pattern>
+    <linearGradient id="core" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#17304F"/>
+      <stop offset="1" stop-color="#112540"/>
+    </linearGradient>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+      .pill { fill: #13223A; stroke: #263B58; }
+      .label { font-size: 14px; font-weight: 700; fill: #F2F5FA; }
+      .detail { font-size: 11.5px; fill: #8DA6C7; }
+      .sub { font-size: 12px; fill: #8DA6C7; }
+      .wire { fill: none; stroke: #2E4A6E; stroke-width: 1.6; }
+      .flow { fill: none; stroke: #FF8A3D; stroke-width: 1.6; stroke-dasharray: 4 14; stroke-opacity: 0.85; animation: flow 1.6s linear infinite; }
+      @keyframes flow { to { stroke-dashoffset: -18; } }
+      @media (prefers-reduced-motion: reduce) { .flow { animation: none; stroke-opacity: 0; } }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1279" height="399" rx="20" fill="#0E1A2B" stroke="#22344D"/>
+
+  <text x="48" y="46" class="mono" font-size="12.5" font-weight="700" letter-spacing="3" fill="#FF8A3D">EVIDENCE SIGNALS</text>
+  <text x="640" y="46" class="mono" font-size="12.5" font-weight="700" letter-spacing="3" fill="#FF8A3D" text-anchor="middle">CLASSIFY</text>
+  <text x="1232" y="46" class="mono" font-size="12.5" font-weight="700" letter-spacing="3" fill="#FF8A3D" text-anchor="end">ACT</text>
+
+  <!-- Wires: inputs -> core -->
+  <g>
+    <path class="wire" d="M388 90 C444 90 444 220 500 220"/>
+    <path class="wire" d="M388 140 C444 140 444 220 500 220"/>
+    <path class="wire" d="M388 190 C444 190 444 220 500 220"/>
+    <path class="wire" d="M388 240 C444 240 444 220 500 220"/>
+    <path class="wire" d="M388 290 C444 290 444 220 500 220"/>
+    <path class="wire" d="M388 340 C444 340 444 220 500 220"/>
+    <path class="flow" d="M388 90 C444 90 444 220 500 220"/>
+    <path class="flow" d="M388 190 C444 190 444 220 500 220"/>
+    <path class="flow" d="M388 290 C444 290 444 220 500 220"/>
+    <path class="flow" d="M388 340 C444 340 444 220 500 220"/>
+  </g>
+  <!-- Wires: core -> outputs -->
+  <g>
+    <path class="wire" d="M780 220 C836 220 836 114 892 114"/>
+    <path class="wire" d="M780 220 C836 220 836 180 892 180"/>
+    <path class="wire" d="M780 220 C836 220 836 246 892 246"/>
+    <path class="wire" d="M780 220 C836 220 836 312 892 312"/>
+    <path class="flow" d="M780 220 C836 220 836 114 892 114"/>
+    <path class="flow" d="M780 220 C836 220 836 312 892 312"/>
+  </g>
+
+  <!-- Inputs -->
+  <g class="sans">
+    <rect class="pill" x="48" y="70" width="340" height="40" rx="10"/>
+    <circle cx="66" cy="90" r="4" fill="#BCCCE2"/>
+    <text x="80" y="95" class="label">Coverage</text>
+    <text x="372" y="94" class="mono detail" text-anchor="end">LCOV &#183; coverprofile &#183; JaCoCo</text>
+
+    <rect class="pill" x="48" y="120" width="340" height="40" rx="10"/>
+    <circle cx="66" cy="140" r="4" fill="#BCCCE2"/>
+    <text x="80" y="145" class="label">Assertions</text>
+    <text x="372" y="144" class="mono detail" text-anchor="end">outcome vs. liveness (AST)</text>
+
+    <rect class="pill" x="48" y="170" width="340" height="40" rx="10"/>
+    <circle cx="66" cy="190" r="4" fill="#FF8A3D"/>
+    <text x="80" y="195" class="label">Git history</text>
+    <text x="372" y="194" class="mono detail" text-anchor="end">runtime fingerprints</text>
+
+    <rect class="pill" x="48" y="220" width="340" height="40" rx="10"/>
+    <circle cx="66" cy="240" r="4" fill="#BCCCE2"/>
+    <text x="80" y="245" class="label">Mutations</text>
+    <text x="372" y="244" class="mono detail" text-anchor="end">Stryker &#183; PIT &#183; cargo-mutants</text>
+
+    <rect class="pill" x="48" y="270" width="340" height="40" rx="10"/>
+    <circle cx="66" cy="290" r="4" fill="#FF8A3D"/>
+    <text x="80" y="295" class="label">Doc claims</text>
+    <text x="372" y="294" class="mono detail" text-anchor="end">symbols &#183; paths &#183; commands</text>
+
+    <rect class="pill" x="48" y="320" width="340" height="40" rx="10"/>
+    <circle cx="66" cy="340" r="4" fill="#6E88AA"/>
+    <text x="80" y="345" class="label">External tools</text>
+    <text x="372" y="344" class="mono detail" text-anchor="end">SARIF &#183; Knip &#183; libyear</text>
+  </g>
+
+  <!-- Core -->
+  <g class="sans">
+    <rect x="500" y="146" width="280" height="148" rx="18" fill="url(#core)" stroke="#34507A" stroke-width="1.5"/>
+    <text x="640" y="198" font-size="22" font-weight="800" fill="#F2F5FA" text-anchor="middle">Five-state</text>
+    <text x="640" y="224" font-size="22" font-weight="800" fill="#F2F5FA" text-anchor="middle">evidence model</text>
+    <circle cx="590" cy="256" r="8" fill="#BD4900"/>
+    <circle cx="615" cy="256" r="8" fill="#1D3656" stroke="#4A6A96"/>
+    <circle cx="640" cy="256" r="8" fill="url(#hatch)"/>
+    <circle cx="665" cy="256" r="8" fill="#BCCCE2"/>
+    <circle cx="690" cy="256" r="8" fill="#EBEFF4"/>
+    <text x="640" y="282" class="mono" font-size="10.5" fill="#8DA6C7" text-anchor="middle">per code line &#183; per doc claim</text>
+  </g>
+
+  <!-- Outputs -->
+  <g class="sans">
+    <rect class="pill" x="892" y="88" width="340" height="52" rx="10"/>
+    <text x="912" y="110" class="label">Trust Score &#183; Doc Trust Score</text>
+    <text x="912" y="128" class="mono sub">0&#8211;100 per repo, module, file</text>
+
+    <rect class="pill" x="892" y="154" width="340" height="52" rx="10"/>
+    <text x="912" y="176" class="label">Interactive Fog Map</text>
+    <text x="912" y="194" class="mono sub">report.html &#183; offline &#183; zero CDN</text>
+
+    <rect class="pill" x="892" y="220" width="340" height="52" rx="10"/>
+    <text x="912" y="242" class="label">PR comment &amp; CI gate</text>
+    <text x="912" y="260" class="mono sub">--diff &#183; --pr-comment &#183; --fail-on</text>
+
+    <rect x="892" y="286" width="340" height="52" rx="10" fill="#2A1A10" stroke="#7A3A12"/>
+    <text x="912" y="308" class="label">Agent-ready Findings</text>
+    <text x="912" y="326" class="mono sub" style="fill:#F2B48A">CF-xxxx &#8594; codefog verify</text>
+  </g>
+</svg>

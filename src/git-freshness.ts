@@ -3,7 +3,6 @@ import { promisify } from "node:util";
 import ts from "typescript";
 import {
   extractPolyglotRuntimeFingerprints,
-  extractRustInlineTestFingerprint,
   getPolyglotAdapter,
   isPolyglotSourceFile,
 } from "./polyglot.js";
@@ -164,9 +163,25 @@ export function extractRuntimeFunctionFingerprints(
   return fingerprints;
 }
 
-interface CommitEntry {
+export interface CommitEntry {
   sha: string;
   isoDate: string;
+}
+
+export interface RepoCommitInfo {
+  sha: string;
+  shortSha: string;
+  isoDate: string;
+  index: number;
+}
+
+export interface GitTimelineSession {
+  isGitRepo: boolean;
+  commits: RepoCommitInfo[];
+  bySha: Map<string, RepoCommitInfo>;
+  getFileCommits: (relPath: string) => Promise<RepoCommitInfo[]>;
+  getFileTextAtCommit: (sha: string, relPath: string) => Promise<string | null>;
+  listTrackedFilesAtCommit: (sha: string) => Promise<Set<string>>;
 }
 
 async function runGit(rootDir: string, args: string[]): Promise<string | null> {
@@ -179,6 +194,109 @@ async function runGit(rootDir: string, args: string[]): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+export async function createGitTimelineSession(rootDir: string): Promise<GitTimelineSession> {
+  const insideGit = await runGit(rootDir, ["rev-parse", "--is-inside-work-tree"]);
+  if (insideGit !== "true") {
+    return {
+      isGitRepo: false,
+      commits: [],
+      bySha: new Map(),
+      getFileCommits: async () => [],
+      getFileTextAtCommit: async () => null,
+      listTrackedFilesAtCommit: async () => new Set(),
+    };
+  }
+
+  const logOut = await runGit(rootDir, ["log", "--format=%H|%h|%cI"]);
+  const commits: RepoCommitInfo[] = [];
+  const bySha = new Map<string, RepoCommitInfo>();
+  if (logOut) {
+    const lines = logOut.split(/\r?\n/).filter(Boolean);
+    for (let idx = 0; idx < lines.length; idx++) {
+      const [sha, shortSha, isoDate] = lines[idx]!.split("|");
+      if (!sha) continue;
+      const info: RepoCommitInfo = {
+        sha,
+        shortSha: shortSha || sha.slice(0, 7),
+        isoDate: isoDate || "",
+        index: idx,
+      };
+      commits.push(info);
+      bySha.set(sha, info);
+    }
+  }
+
+  const fileCommitsCache = new Map<string, Promise<RepoCommitInfo[]>>();
+  const fileTextCache = new Map<string, Promise<string | null>>();
+  const trackedFilesCache = new Map<string, Promise<Set<string>>>();
+
+  return {
+    isGitRepo: commits.length > 0,
+    commits,
+    bySha,
+    getFileCommits: (relPath: string) => {
+      const norm = relPath.replace(/\\/g, "/");
+      let p = fileCommitsCache.get(norm);
+      if (!p) {
+        p = (async () => {
+          const out = await runGit(rootDir, ["log", "--format=%H|%h|%cI", "--", norm]);
+          if (!out) return [];
+          const list: RepoCommitInfo[] = [];
+          for (const line of out.split(/\r?\n/).filter(Boolean)) {
+            const [sha, shortSha, isoDate] = line.split("|");
+            if (!sha) continue;
+            const existing = bySha.get(sha);
+            if (existing) {
+              list.push(existing);
+            } else {
+              list.push({
+                sha,
+                shortSha: shortSha || sha.slice(0, 7),
+                isoDate: isoDate || "",
+                index: commits.length,
+              });
+            }
+          }
+          return list;
+        })();
+        fileCommitsCache.set(norm, p);
+      }
+      return p;
+    },
+    getFileTextAtCommit: (sha: string, relPath: string) => {
+      const norm = relPath.replace(/\\/g, "/");
+      const key = `${sha}:${norm}`;
+      let p = fileTextCache.get(key);
+      if (!p) {
+        p = (async () => {
+          const t1 = await runGit(rootDir, ["show", `${sha}:./${norm}`]);
+          if (t1 !== null) return t1;
+          return runGit(rootDir, ["show", `${sha}:${norm}`]);
+        })();
+        fileTextCache.set(key, p);
+      }
+      return p;
+    },
+    listTrackedFilesAtCommit: (sha: string) => {
+      let p = trackedFilesCache.get(sha);
+      if (!p) {
+        p = (async () => {
+          const out = await runGit(rootDir, ["ls-tree", "-r", "--name-only", sha]);
+          if (!out) return new Set<string>();
+          return new Set(
+            out
+              .split(/\r?\n/)
+              .map((s) => s.trim().replace(/\\/g, "/"))
+              .filter(Boolean),
+          );
+        })();
+        trackedFilesCache.set(sha, p);
+      }
+      return p;
+    },
+  };
 }
 
 async function getCommitHistory(rootDir: string, paths: string[]): Promise<CommitEntry[]> {
@@ -298,18 +416,26 @@ export async function analyzeFileGitFreshness(params: {
   const polyAdapter = getPolyglotAdapter(relPath);
   let inlineTestCommits: CommitEntry[] | null = null;
   if (polyAdapter?.extractInlineTestBlockFingerprints && srcHistory.length > 0) {
+    const serializeInlineTestMap = (text: string | null): string => {
+      if (!text || !polyAdapter.extractInlineTestBlockFingerprints) return "";
+      const fpMap = polyAdapter.extractInlineTestBlockFingerprints(text);
+      if (fpMap.size === 0) return "";
+      return Array.from(fpMap.entries())
+        .map(([k, v]) => `${k}=${v}`)
+        .join("||");
+    };
     const inlineCommits: CommitEntry[] = [];
     for (let i = srcHistory.length - 1; i >= 0; i--) {
       const c = srcHistory[i]!;
       const curText = await getSourceTextAtCommit(c.sha);
-      const curTestFp = curText ? extractRustInlineTestFingerprint(curText) : "";
+      const curTestFp = serializeInlineTestMap(curText);
       if (!curTestFp) continue;
       if (i === srcHistory.length - 1) {
         inlineCommits.unshift(c);
       } else {
         const prevCommit = srcHistory[i + 1]!;
         const prevText = await getSourceTextAtCommit(prevCommit.sha);
-        const prevTestFp = prevText ? extractRustInlineTestFingerprint(prevText) : "";
+        const prevTestFp = serializeInlineTestMap(prevText);
         if (curTestFp !== prevTestFp) {
           inlineCommits.unshift(c);
         }

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
 import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
 import { STATE_COLORS, STATE_EVIDENCE_RANK } from "./scoring.js";
+import { detectDeletedDocClaimsAgainstRef } from "./verify.js";
 import type { CodefogReport, DiffComparison, EvidenceState } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -31,12 +32,31 @@ async function listTrackedFilesAtRef(rootDir: string, ref: string): Promise<stri
 export async function analyzeBaselineAtRef(
   rootDir: string,
   baseRef: string,
+  options?: {
+    docs?: boolean;
+    checkExternalLinks?: boolean;
+    runDocs?: boolean;
+  },
 ): Promise<CodefogReport | null> {
   const tracked = await listTrackedFilesAtRef(rootDir, baseRef);
   if (tracked.length === 0) return null;
 
   const tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), "codefog-base-"));
   try {
+    if (options?.docs) {
+      const baseSha = (await runGit(rootDir, ["rev-parse", baseRef]))?.trim();
+      if (baseSha) {
+        try {
+          await fs.cp(path.join(rootDir, ".git"), path.join(tmpBase, ".git"), {
+            recursive: true,
+          });
+          await runGit(tmpBase, ["update-ref", "--no-deref", "HEAD", baseSha]);
+        } catch {
+          // fallback if .git copy is unavailable
+        }
+      }
+    }
+
     for (const relPath of tracked) {
       if (relPath.startsWith("node_modules/") || relPath.startsWith(".git/")) continue;
       const content = await runGit(rootDir, ["show", `${baseRef}:${relPath}`]);
@@ -46,7 +66,12 @@ export async function analyzeBaselineAtRef(
       await fs.writeFile(fullPath, content, "utf8");
     }
 
-    return await analyzeRepository({ rootDir: tmpBase });
+    return await analyzeRepository({
+      rootDir: tmpBase,
+      ...(options?.docs ? { docs: true } : {}),
+      ...(options?.checkExternalLinks ? { checkExternalLinks: true } : {}),
+      ...(options?.runDocs ? { runDocs: true } : {}),
+    });
   } catch {
     return null;
   } finally {
@@ -59,7 +84,10 @@ export async function computeDiffComparison(
   baseRef: string,
   currentReport: CodefogReport,
 ): Promise<DiffComparison | undefined> {
-  const baseReport = await analyzeBaselineAtRef(rootDir, baseRef);
+  const docsEnabled = currentReport.summary.docTrustScore !== undefined;
+  const baseReport = await analyzeBaselineAtRef(rootDir, baseRef, {
+    docs: docsEnabled,
+  });
   if (!baseReport) return undefined;
 
   const baseFileMap = new Map(baseReport.files.map((f) => [f.path, f]));
@@ -137,6 +165,25 @@ export async function computeDiffComparison(
     alertHeadline = `Evidence held steady or improved against ${baseRef} (Trust Score ${baseReport.summary.trustScore} -> ${currentReport.summary.trustScore}).`;
   }
 
+  let newDocFogReturnedClaims = undefined;
+  let deletedDocClaims = undefined;
+  if (docsEnabled) {
+    const baseReturnedKeys = new Set<string>();
+    for (const bc of baseReport.docClaims ?? []) {
+      if (bc.state === "fog-returned") {
+        baseReturnedKeys.add(`${bc.file}:${bc.referentText}`);
+        baseReturnedKeys.add(`${bc.file}:${bc.rawText}`);
+      }
+    }
+    newDocFogReturnedClaims = (currentReport.docClaims ?? []).filter(
+      (c) =>
+        c.state === "fog-returned" &&
+        !baseReturnedKeys.has(`${c.file}:${c.referentText}`) &&
+        !baseReturnedKeys.has(`${c.file}:${c.rawText}`),
+    );
+    deletedDocClaims = await detectDeletedDocClaimsAgainstRef(rootDir, baseRef);
+  }
+
   return {
     baseRef,
     coverageUpEvidenceDown,
@@ -145,6 +192,13 @@ export async function computeDiffComparison(
     weakenedFiles,
     beforeSummary: {
       trustScore: baseReport.summary.trustScore,
+      ...(docsEnabled
+        ? {
+            docTrustScore: baseReport.summary.docTrustScore,
+            totalDocClaims: baseReport.summary.totalDocClaims,
+            docClaimsByState: baseReport.summary.docClaimsByState,
+          }
+        : {}),
       metrics: baseReport.summary.metrics,
       files: baseReport.files.map((f) => ({
         path: f.path,
@@ -154,6 +208,12 @@ export async function computeDiffComparison(
         riskScore: f.riskScore,
       })),
     },
+    ...(docsEnabled && newDocFogReturnedClaims
+      ? { newDocFogReturnedClaims }
+      : {}),
+    ...(docsEnabled && deletedDocClaims && deletedDocClaims.length > 0
+      ? { deletedDocClaims }
+      : {}),
   };
 }
 
@@ -218,10 +278,65 @@ export function renderPrDiffSvg(report: CodefogReport): string {
 </svg>`;
 }
 
+export function renderPrCommentDocSection(
+  report: CodefogReport,
+  fmtDelta: (nowVal: number, prevVal: number | undefined, suffix?: string) => string,
+): string[] {
+  const cur = report.summary;
+  if (cur.docTrustScore === undefined) {
+    return [];
+  }
+  const diff = report.diff;
+  const beforeDocScore = diff?.beforeSummary.docTrustScore;
+  const newReturned =
+    diff?.newDocFogReturnedClaims ??
+    (report.docClaims ?? []).filter((c) => c.state === "fog-returned");
+  const deletedClaims = diff?.deletedDocClaims ?? [];
+
+  const section: string[] = [
+    `### Documentation (Doc Claims)`,
+    "",
+    `- **Doc Trust Score**: ${
+      beforeDocScore !== undefined
+        ? `${beforeDocScore}/100 → **${cur.docTrustScore}/100** (${fmtDelta(cur.docTrustScore, beforeDocScore)})`
+        : `**${cur.docTrustScore}/100**`
+    }`,
+  ];
+
+  if (newReturned.length > 0) {
+    section.push(`- **New Doc Fog Returned (${newReturned.length})**:`);
+    for (const c of newReturned) {
+      const ref = c.referent ?? c.referents[0];
+      const refPath = ref?.file ?? ref?.url ?? c.referentText;
+      const refCommit = ref?.lastModifiedCommit ? ` @ \`${ref.lastModifiedCommit}\`` : "";
+      section.push(
+        `  - **[${c.id}] \`${c.file}:${c.startLine}\` (\`${c.text}\`, ${c.kind})** — \`fog-returned\` [RETURNED] · Referent: \`${refPath}\`${refCommit}`,
+        `    - Verify: \`npx codefog verify ${c.file} --lines ${c.blockStartLine}-${c.blockEndLine}\``,
+      );
+    }
+  } else {
+    section.push(`- **New Doc Fog Returned**: None`);
+  }
+
+  if (deletedClaims.length > 0) {
+    section.push(`- **Deleted Doc Claims (${deletedClaims.length})**:`);
+    for (const d of deletedClaims) {
+      const referentDesc = d.referent.file ?? d.referent.symbol ?? d.claimText;
+      section.push(
+        `  - \`${d.file}:${d.line}\` (\`${d.claimText}\`, ${d.kind}) — Referent \`${referentDesc}\` still exists`,
+      );
+    }
+  }
+
+  section.push("");
+  return section;
+}
+
 export function renderPrCommentMarkdown(report: CodefogReport): string {
   const diff = report.diff;
   const before = diff?.beforeSummary;
   const cur = report.summary;
+  const hasDocs = cur.docTrustScore !== undefined;
 
   const fmtDelta = (nowVal: number, prevVal: number | undefined, suffix = ""): string => {
     if (prevVal === undefined) return `${nowVal}${suffix}`;
@@ -242,6 +357,11 @@ export function renderPrCommentMarkdown(report: CodefogReport): string {
     `| Metric | Before (${diff?.baseRef ?? "base"}) | After (PR) / Delta |`,
     `| :--- | :--- | :--- |`,
     `| **Trust Score** | ${before?.trustScore ?? cur.trustScore}/100 | ${fmtDelta(cur.trustScore, before?.trustScore)} |`,
+    ...(hasDocs
+      ? [
+          `| **Doc Trust Score** | ${before?.docTrustScore ?? cur.docTrustScore}/100 | ${fmtDelta(cur.docTrustScore!, before?.docTrustScore)} |`,
+        ]
+      : []),
     `| **Line Coverage** | ${before?.metrics.lineCoveragePct ?? cur.metrics.lineCoveragePct}% | ${fmtDelta(cur.metrics.lineCoveragePct, before?.metrics.lineCoveragePct, "%")} |`,
     `| **Branch Coverage** | ${before?.metrics.branchCoveragePct ?? cur.metrics.branchCoveragePct}% | ${fmtDelta(cur.metrics.branchCoveragePct, before?.metrics.branchCoveragePct, "%")} |`,
     `| **Checked Coverage** | ${before?.metrics.checkedCoveragePct ?? cur.metrics.checkedCoveragePct}% | ${fmtDelta(cur.metrics.checkedCoveragePct, before?.metrics.checkedCoveragePct, "%")} |`,
@@ -250,9 +370,13 @@ export function renderPrCommentMarkdown(report: CodefogReport): string {
     "",
   ];
 
-  if (report.findings.length > 0) {
+  const codeFindings = hasDocs
+    ? report.findings.filter((f) => f.subjectType !== "doc")
+    : report.findings;
+
+  if (codeFindings.length > 0) {
     lines.push(`### Top Fog Hotspots & Agent Findings`, "");
-    for (const f of report.findings.slice(0, 5)) {
+    for (const f of codeFindings.slice(0, 5)) {
       lines.push(
         `- **[${f.id}] \`${f.location.file}:${f.location.startLine}-${f.location.endLine}\` (\`${f.title}\`)** — \`${f.state}\` (Risk **${f.riskScore}**)`,
         `  - ${f.reason}`,
@@ -260,6 +384,10 @@ export function renderPrCommentMarkdown(report: CodefogReport): string {
       );
     }
     lines.push("");
+  }
+
+  if (hasDocs) {
+    lines.push(...renderPrCommentDocSection(report, fmtDelta));
   }
 
   return lines.join("\n");

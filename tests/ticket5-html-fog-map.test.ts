@@ -103,4 +103,56 @@ describe("Ticket 5: Four-Level Progressive Disclosure Interactive Fog Map (.code
     expect(html).toContain("Copy as task for agent");
     expect(html).toContain("npx codefog verify");
   });
+
+  it("produces report.html byte-identical to main when neither --docs nor external reports are passed", async () => {
+    const repoDir = path.join(tmpDir, "tiny-repo");
+    await fs.mkdir(path.join(repoDir, "src"), { recursive: true });
+    await fs.mkdir(path.join(repoDir, "coverage"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(repoDir, "src", "math.ts"),
+      "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(repoDir, "coverage", "lcov.info"),
+      [
+        "TN:",
+        "SF:src/math.ts",
+        "FN:1,add",
+        "FNF:1",
+        "FNH:1",
+        "FNDA:1,add",
+        "DA:1,1",
+        "DA:2,1",
+        "LF:2",
+        "LH:2",
+        "end_of_record",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const exitCode = await runCli(["--root", repoDir, "--fail-on", "none"], {
+      stdout: () => {},
+      stderr: () => {},
+    });
+    expect(exitCode).toBe(0);
+
+    const rawHtml = await fs.readFile(path.join(repoDir, ".codefog", "report.html"), "utf8");
+    const html = rawHtml.replace(
+      /"generatedAt":"[^"]+"/,
+      '"generatedAt":"2026-01-01T00:00:00.000Z"',
+    );
+
+    // Must not contain any external overlay or doc claim code when neither flag is enabled
+    expect(html).not.toContain("externalIssues");
+    expect(html).not.toContain("External Overlay");
+    expect(html).not.toContain("externalByLine");
+    expect(html).not.toContain("docClaims");
+    expect(html).not.toContain("Doc Trust Score");
+    expect(html).toContain("'<div class=\"module-row\" onclick=\"switchLevel(2)\">' +");
+    expect(html).toContain(
+      "return '<tr class=\"line-' + st + '\"><td class=\"ln-col\">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;",
+    );
+  });
 });

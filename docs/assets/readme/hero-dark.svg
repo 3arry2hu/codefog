@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-labelledby="title desc">
+  <title id="title">codefog &#8212; see which parts of your codebase you can actually trust</title>
+  <desc id="desc">A fog-first trust map for code and docs: TypeScript, JavaScript, Go, Rust, Java and Markdown. Shows a fog map window with tiles colored by five evidence states.</desc>
+  <defs>
+    <radialGradient id="blobA" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#2A4A75" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#2A4A75" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="blobB" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#E0661A" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#E0661A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fogGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#6E88AA"/>
+      <rect width="3" height="8" fill="#89A0BE"/>
+    </pattern>
+    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.1" fill="#BCCCE2" fill-opacity="0.07"/>
+    </pattern>
+    <clipPath id="tm"><rect x="706" y="126" width="518" height="242"/></clipPath>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+      .drift { animation: drift 10s ease-in-out infinite alternate; }
+      @keyframes drift { from { transform: translateX(0px); } to { transform: translateX(640px); } }
+      @media (prefers-reduced-motion: reduce) { .drift { animation: none; opacity: 0; } }
+    </style>
+  </defs>
+
+  <rect width="1280" height="420" fill="#0A1322"/>
+  <rect width="1280" height="420" fill="url(#dots)"/>
+  <circle cx="300" cy="70" r="260" fill="url(#blobA)"/>
+  <circle cx="1120" cy="420" r="300" fill="url(#blobA)"/>
+  <circle cx="980" cy="60" r="200" fill="url(#blobB)"/>
+
+  <!-- Left: wordmark -->
+  <text x="72" y="96" class="mono" font-size="13" font-weight="700" letter-spacing="3" fill="#FF8A3D">FOG-FIRST TRUST MAP FOR CODE &amp; DOCS</text>
+  <text x="68" y="176" class="sans" font-size="86" font-weight="800" letter-spacing="-3" fill="#F2F5FA">code<tspan fill="#8DA6C7">fog</tspan></text>
+  <text x="72" y="222" class="sans" font-size="26" font-weight="500" fill="#BCCCE2">See which parts of your codebase</text>
+  <text x="72" y="254" class="sans" font-size="26" font-weight="500" fill="#BCCCE2">you can <tspan font-weight="800" fill="#F2F5FA">actually</tspan> trust.</text>
+
+  <g class="mono" font-size="12.5" font-weight="600" text-anchor="middle" fill="#D7E1EE">
+    <rect x="72" y="286" width="70" height="26" rx="13" fill="#13223A" stroke="#2C4466"/><text x="107" y="303">TS / JS</text>
+    <rect x="152" y="286" width="44" height="26" rx="13" fill="#13223A" stroke="#2C4466"/><text x="174" y="303">Go</text>
+    <rect x="206" y="286" width="56" height="26" rx="13" fill="#13223A" stroke="#2C4466"/><text x="234" y="303">Rust</text>
+    <rect x="272" y="286" width="56" height="26" rx="13" fill="#13223A" stroke="#2C4466"/><text x="300" y="303">Java</text>
+    <rect x="338" y="286" width="90" height="26" rx="13" fill="#13223A" stroke="#2C4466"/><text x="383" y="303">Markdown</text>
+  </g>
+
+  <rect x="72" y="336" width="316" height="38" rx="9" fill="#13223A" stroke="#2C4466"/>
+  <text x="90" y="360" class="mono" font-size="14.5" fill="#E8EEF6"><tspan fill="#FF8A3D">$</tspan> npx @barryzhu/codefog --docs</text>
+
+  <!-- Right: fog map window -->
+  <g filter="url(#shadow)">
+    <rect x="690" y="36" width="550" height="348" rx="16" fill="#FFFFFF" stroke="#2C4466"/>
+  </g>
+  <path d="M690 70 V52 a16 16 0 0 1 16 -16 H1224 a16 16 0 0 1 16 16 V70 Z" fill="#F0F3F8"/>
+  <line x1="690" y1="70" x2="1240" y2="70" stroke="#E1E7F0"/>
+  <circle cx="712" cy="53" r="5.5" fill="#E4876B"/>
+  <circle cx="730" cy="53" r="5.5" fill="#E9C46A"/>
+  <circle cx="748" cy="53" r="5.5" fill="#8CBF8A"/>
+  <text x="965" y="57" class="mono" font-size="12" fill="#6B7C93" text-anchor="middle">.codefog/report.html &#8212; Fog Map</text>
+
+  <text x="706" y="98" class="mono" font-size="11" font-weight="700" letter-spacing="1" fill="#1D3656">TRUST 74/100</text>
+  <text x="1224" y="98" class="mono" font-size="11" font-weight="700" letter-spacing="1" fill="#1D3656" text-anchor="end">DOC TRUST 81/100</text>
+  <g>
+    <rect x="706" y="106" width="10.4" height="8" fill="#BD4900"/>
+    <rect x="716.4" y="106" width="57" height="8" fill="#1D3656"/>
+    <rect x="773.4" y="106" width="20.7" height="8" fill="url(#hatch)"/>
+    <rect x="794.1" y="106" width="46.6" height="8" fill="#BCCCE2"/>
+    <rect x="840.7" y="106" width="383.3" height="8" fill="#EBEFF4"/>
+  </g>
+
+  <!-- Treemap -->
+  <g class="sans">
+    <rect x="706" y="126" width="240" height="136" rx="6" fill="#1D3656"/>
+    <text x="720" y="150" font-size="13" font-weight="700" fill="#FFFFFF">settlement/ledger.go</text>
+    <text x="720" y="168" class="mono" font-size="10.5" fill="#9FB3CE">fog &#183; risk 8.4</text>
+    <g fill="#FFFFFF" fill-opacity="0.12">
+      <rect x="720" y="196" width="150" height="4" rx="2"/>
+      <rect x="732" y="206" width="110" height="4" rx="2"/>
+      <rect x="732" y="216" width="170" height="4" rx="2"/>
+      <rect x="744" y="226" width="90" height="4" rx="2"/>
+      <rect x="732" y="236" width="130" height="4" rx="2"/>
+      <rect x="720" y="246" width="60" height="4" rx="2"/>
+    </g>
+
+    <rect x="706" y="266" width="118" height="102" rx="6" fill="#EBEFF4"/>
+    <text x="718" y="290" font-size="13" font-weight="700" fill="#44566E">tax.ts</text>
+    <text x="718" y="306" class="mono" font-size="10.5" fill="#6B7C93">verified</text>
+
+    <rect x="828" y="266" width="118" height="102" rx="6" fill="#BCCCE2"/>
+    <text x="840" y="290" font-size="13" font-weight="700" fill="#1D3656">discount.ts</text>
+    <text x="840" y="306" class="mono" font-size="10.5" fill="#3B5273">weak &#183; 5.4</text>
+
+    <rect x="950" y="126" width="160" height="90" rx="6" fill="#BD4900"/>
+    <text x="962" y="150" font-size="13" font-weight="700" fill="#FFFFFF">reconcile.go</text>
+    <rect x="962" y="160" width="74" height="18" rx="4" fill="#FFFFFF" fill-opacity="0.2"/>
+    <text x="999" y="173" class="mono" font-size="10.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">RETURNED</text>
+    <text x="962" y="200" class="mono" font-size="10.5" fill="#FFE2CF">risk 7.8</text>
+
+    <rect x="1114" y="126" width="110" height="90" rx="6" fill="#EBEFF4"/>
+    <text x="1126" y="150" font-size="13" font-weight="700" fill="#44566E">api.ts</text>
+    <text x="1126" y="166" class="mono" font-size="10.5" fill="#6B7C93">verified</text>
+
+    <rect x="950" y="220" width="92" height="148" rx="6" fill="url(#hatch)"/>
+    <text x="962" y="244" font-size="13" font-weight="700" fill="#FFFFFF">fee.rs</text>
+    <text x="962" y="260" class="mono" font-size="10.5" fill="#FFFFFF" fill-opacity="0.9">self-proof</text>
+
+    <rect x="1046" y="220" width="178" height="70" rx="6" fill="#BCCCE2"/>
+    <text x="1058" y="244" font-size="13" font-weight="700" fill="#1D3656">README.md</text>
+    <text x="1058" y="260" class="mono" font-size="10.5" fill="#3B5273">doc claims &#183; weak</text>
+
+    <rect x="1046" y="294" width="86" height="74" rx="6" fill="#EBEFF4"/>
+    <text x="1058" y="318" font-size="13" font-weight="700" fill="#44566E">guide.md</text>
+    <text x="1058" y="334" class="mono" font-size="10.5" fill="#6B7C93">verified</text>
+
+    <rect x="1136" y="294" width="88" height="74" rx="6" fill="#1D3656"/>
+    <text x="1148" y="318" font-size="13" font-weight="700" fill="#FFFFFF">calc.go</text>
+    <text x="1148" y="334" class="mono" font-size="10.5" fill="#9FB3CE">fog</text>
+  </g>
+
+  <g clip-path="url(#tm)">
+    <rect class="drift" x="380" y="126" width="320" height="242" fill="url(#fogGrad)"/>
+  </g>
+</svg>

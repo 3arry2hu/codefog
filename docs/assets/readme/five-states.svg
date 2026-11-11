@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="330" viewBox="0 0 1280 330" role="img" aria-labelledby="title desc">
+  <title id="title">The five-state evidence model</title>
+  <desc id="desc">Five evidence states ordered by repair priority: fog-returned, fog, self-proof-fog, weak-evidence and verified, with their Trust and Risk weights.</desc>
+  <defs>
+    <pattern id="hatch" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="10" height="10" fill="#6E88AA"/>
+      <rect width="4" height="10" fill="#89A0BE"/>
+    </pattern>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FF8A3D"/>
+      <stop offset="1" stop-color="#8DA6C7" stop-opacity="0.2"/>
+    </linearGradient>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+      .id { font-size: 15px; font-weight: 700; fill: #F2F5FA; }
+      .name { font-size: 13px; fill: #8DA6C7; }
+      .desc { font-size: 12.5px; fill: #C3D0E0; }
+      .w { font-size: 11px; font-weight: 700; letter-spacing: 0.6px; fill: #8DA6C7; }
+      .big { font-size: 30px; font-weight: 800; letter-spacing: -1px; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1279" height="329" rx="20" fill="#0E1A2B" stroke="#22344D"/>
+
+  <text x="48" y="54" class="mono" font-size="12.5" font-weight="700" letter-spacing="3" fill="#FF8A3D">THE FIVE-STATE EVIDENCE MODEL</text>
+  <text x="1232" y="54" class="mono" font-size="12" fill="#8DA6C7" text-anchor="end">repair priority</text>
+  <rect x="1000" y="49" width="110" height="3" rx="1.5" fill="url(#arrow)"/>
+  <path d="M1112 46 l8 4.5 -8 4.5 z" fill="#8DA6C7" fill-opacity="0.5"/>
+
+  <!-- 1. fog-returned -->
+  <g transform="translate(48 80)">
+    <rect width="220" height="88" rx="12" fill="#BD4900"/>
+    <text x="16" y="52" class="sans big" fill="#FFFFFF">&#8722;0.5</text>
+    <text x="204" y="26" class="mono" font-size="10.5" font-weight="700" fill="#FFFFFF" text-anchor="end">RETURNED</text>
+    <text x="0" y="114" class="mono id">fog-returned</text>
+    <text x="0" y="136" class="sans name">Fog Returned</text>
+    <text x="0" y="162" class="sans desc">Logic changed after its</text>
+    <text x="0" y="180" class="sans desc">evidence last caught up.</text>
+    <text x="0" y="214" class="mono w">TRUST &#8722;0.5 &#183; RISK &#215;2.0</text>
+  </g>
+
+  <!-- 2. fog -->
+  <g transform="translate(289 80)">
+    <rect width="220" height="88" rx="12" fill="#1D3656" stroke="#34507A"/>
+    <text x="16" y="52" class="sans big" fill="#FFFFFF">0.0</text>
+    <text x="0" y="114" class="mono id">fog</text>
+    <text x="0" y="136" class="sans name">Fog</text>
+    <text x="0" y="162" class="sans desc">No test or doc evidence</text>
+    <text x="0" y="180" class="sans desc">touches this region at all.</text>
+    <text x="0" y="214" class="mono w">TRUST 0.0 &#183; RISK &#215;1.4</text>
+  </g>
+
+  <!-- 3. self-proof-fog -->
+  <g transform="translate(530 80)">
+    <rect width="220" height="88" rx="12" fill="url(#hatch)"/>
+    <text x="16" y="52" class="sans big" fill="#FFFFFF">+0.3</text>
+    <text x="0" y="114" class="mono id">self-proof-fog</text>
+    <text x="0" y="136" class="sans name">Self-proof Fog</text>
+    <text x="0" y="162" class="sans desc">Code and its assertions were</text>
+    <text x="0" y="180" class="sans desc">born in the same commit.</text>
+    <text x="0" y="214" class="mono w">TRUST +0.3 &#183; RISK &#215;1.2</text>
+  </g>
+
+  <!-- 4. weak-evidence -->
+  <g transform="translate(771 80)">
+    <rect width="220" height="88" rx="12" fill="#BCCCE2"/>
+    <text x="16" y="52" class="sans big" fill="#1D3656">+0.4</text>
+    <text x="0" y="114" class="mono id">weak-evidence</text>
+    <text x="0" y="136" class="sans name">Weak Evidence</text>
+    <text x="0" y="162" class="sans desc">Executed, but only liveness</text>
+    <text x="0" y="180" class="sans desc">checks or partial branches.</text>
+    <text x="0" y="214" class="mono w">TRUST +0.4 &#183; RISK &#215;1.0</text>
+  </g>
+
+  <!-- 5. verified -->
+  <g transform="translate(1012 80)">
+    <rect width="220" height="88" rx="12" fill="#EBEFF4"/>
+    <text x="16" y="52" class="sans big" fill="#44566E">+1.0</text>
+    <text x="0" y="114" class="mono id">verified</text>
+    <text x="0" y="136" class="sans name">Verified</text>
+    <text x="0" y="162" class="sans desc">Outcome assertions, full</text>
+    <text x="0" y="180" class="sans desc">branches, fresh evidence.</text>
+    <text x="0" y="214" class="mono w">TRUST +1.0 &#183; RISK &#215;0.0</text>
+  </g>
+</svg>

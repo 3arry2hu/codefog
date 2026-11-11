@@ -1,7 +1,150 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { STATE_COLORS } from "./scoring.js";
-import type { CodefogReport } from "./types.js";
+import type {
+  CodefogReport,
+  DocClaim,
+  DocFileSummary,
+  DocReferent,
+  FileSummary,
+  LocByState,
+  ModuleSummary,
+} from "./types.js";
+
+function escapeHtmlServer(raw: string): string {
+  return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function formatReferentServer(ref: DocReferent | undefined, fallbackReferent: string): string {
+  if (!ref) {
+    return `<code>${escapeHtmlServer(fallbackReferent)}</code>`;
+  }
+  const referentPath = ref.file ?? ref.url ?? fallbackReferent;
+  const qualifier = ref.symbol
+    ? ` (${escapeHtmlServer(ref.symbol)})`
+    : ref.script
+      ? ` (script: ${escapeHtmlServer(ref.script)})`
+      : ref.anchor
+        ? `#${escapeHtmlServer(ref.anchor)}`
+        : "";
+  const commitPart = ref.lastModifiedCommit
+    ? ` @ <code>${escapeHtmlServer(ref.lastModifiedCommit)}</code>`
+    : "";
+  return `<code>${escapeHtmlServer(referentPath)}</code>${qualifier}${commitPart}`;
+}
+
+function formatClaimMarkerServer(claim: DocClaim): string {
+  const badge =
+    claim.state === "fog-returned"
+      ? '<span class="badge-returned">RETURNED</span>'
+      : `<span>[${claim.state}]</span>`;
+  const allRefs: DocReferent[] = [];
+  if (claim.referent) {
+    allRefs.push(claim.referent);
+  }
+  for (const r of claim.referents) {
+    if (!allRefs.includes(r)) {
+      allRefs.push(r);
+    }
+  }
+  const refHtml =
+    allRefs.length > 0
+      ? allRefs.map((r) => formatReferentServer(r, claim.referentText)).join(", ")
+      : formatReferentServer(undefined, claim.referentText);
+  return `<span class="doc-claim-inline" style="margin-left:8px;font-size:11px">${badge} · Referent: ${refHtml}</span>`;
+}
+
+function renderDocFileRowsServer(docFile: DocFileSummary): string {
+  const claimsByLine = new Map<number, DocClaim[]>();
+  for (const c of docFile.claims) {
+    const list = claimsByLine.get(c.startLine) ?? [];
+    list.push(c);
+    claimsByLine.set(c.startLine, list);
+  }
+  return docFile.lines
+    .map((lineText, idx) => {
+      const ln = idx + 1;
+      const st = docFile.lineStates[ln] ?? "verified";
+      const escaped = escapeHtmlServer(lineText);
+      const lineClaims = claimsByLine.get(ln) ?? [];
+      const claimMarkers = lineClaims.map((c) => formatClaimMarkerServer(c)).join(" ");
+      return `<tr class="line-${st}"><td class="ln-col">${ln}</td><td>${escaped}${claimMarkers ? " " + claimMarkers : ""}</td></tr>`;
+    })
+    .join("");
+}
+
+function renderStackedBarServer(loc: LocByState): string {
+  const total =
+    (loc["fog-returned"] || 0) +
+    (loc.fog || 0) +
+    (loc["self-proof-fog"] || 0) +
+    (loc["weak-evidence"] || 0) +
+    (loc.verified || 0) || 1;
+  const p = (k: keyof LocByState) => (((loc[k] || 0) / total) * 100).toFixed(1) + "%";
+  return (
+    '<div class="stacked-bar">' +
+    '<div class="bar-seg-returned" style="width:' +
+    p("fog-returned") +
+    '"></div>' +
+    '<div class="bar-seg-fog" style="width:' +
+    p("fog") +
+    '"></div>' +
+    '<div class="bar-seg-self-proof" style="width:' +
+    p("self-proof-fog") +
+    '"></div>' +
+    '<div class="bar-seg-weak" style="width:' +
+    p("weak-evidence") +
+    '"></div>' +
+    '<div class="bar-seg-verified" style="width:' +
+    p("verified") +
+    '"></div>' +
+    "</div>"
+  );
+}
+
+function renderModuleRowServer(m: ModuleSummary): string {
+  const loc = m.locByState;
+  const stateLine =
+    `fog-returned: ${loc["fog-returned"]} · fog: ${loc.fog} · self-proof-fog: ${loc["self-proof-fog"]} · weak-evidence: ${loc["weak-evidence"]} · verified: ${loc.verified}`;
+  return (
+    `<div class="module-row" data-module="${m.path}" onclick="switchLevel(2)">` +
+    `<div style="display:flex;justify-content:space-between;font-weight:600">` +
+    `<span>${m.path} (${m.totalFiles} files, ${m.verifiedFilesCollapsed} verified files collapsed)</span>` +
+    `<span>Trust ${m.trustScore}/100 · Max Risk ${m.maxRiskScore}</span>` +
+    `</div>` +
+    `<div style="font-size:12px;color:#475569;margin-top:4px">${stateLine}</div>` +
+    renderStackedBarServer(loc) +
+    `</div>`
+  );
+}
+
+function renderCodeTileServer(file: FileSummary): string {
+  const locWeight = Math.max(1, file.totalLoc);
+  const minH = Math.min(220, Math.max(76, 56 + locWeight * 8));
+  return (
+    `<div class="tile tile-${file.dominantState}" style="flex:${locWeight} 1 ${Math.min(340, 140 + locWeight * 12)}px;min-height:${minH}px" onclick="switchLevel(4, '${file.path}')">` +
+    `<div style="display:flex;justify-content:space-between;align-items:center">` +
+    `<strong>${file.path}</strong>` +
+    (file.dominantState === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : "") +
+    `</div>` +
+    `<div style="font-size:12px;margin-top:6px">LOC: ${file.totalLoc} · Unverified: ${file.unverifiedLoc} · Risk: ${file.riskScore}</div>` +
+    `</div>`
+  );
+}
+
+function renderDocTileServer(docFile: DocFileSummary): string {
+  const claimWeight = Math.max(1, docFile.totalClaims);
+  const minH = Math.min(220, Math.max(76, 56 + claimWeight * 8));
+  return (
+    `<div class="tile tile-${docFile.dominantState}" data-claims="${docFile.totalClaims}" style="flex:${claimWeight} 1 ${Math.min(340, 140 + claimWeight * 12)}px;min-height:${minH}px" onclick="switchLevel(4, '${docFile.path}')">` +
+    `<div style="display:flex;justify-content:space-between;align-items:center">` +
+    `<strong>${docFile.path}</strong>` +
+    (docFile.dominantState === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : "") +
+    `</div>` +
+    `<div style="font-size:12px;margin-top:6px">Claims: ${docFile.totalClaims} · Unverified: ${docFile.unverifiedClaims} · Risk: ${docFile.riskScore}</div>` +
+    `</div>`
+  );
+}
 
 export function renderHtmlFogMap(report: CodefogReport): string {
   const safeJson = JSON.stringify(report).replace(/<\//g, "<\\/");
@@ -9,6 +152,20 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     (acc, m) => acc + m.verifiedFilesCollapsed,
     0,
   );
+  const hasDocs = report.summary.docTrustScore !== undefined;
+  const hasExternal = report.external !== undefined || report.libyear !== undefined;
+  const serverModulesHtml = hasDocs
+    ? report.modules.map((m) => renderModuleRowServer(m)).join("")
+    : "";
+  const serverTilesHtml = hasDocs
+    ? [
+        ...report.files.map((f) => renderCodeTileServer(f)),
+        ...(report.docFiles ?? []).map((df) => renderDocTileServer(df)),
+      ].join("")
+    : "";
+  const serverDocSourceRowsHtml = hasDocs
+    ? (report.docFiles ?? []).map((df) => renderDocFileRowsServer(df)).join("")
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -320,7 +477,15 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       <div class="kpi-card">
         <div class="kpi-label">Trust Score</div>
         <div class="kpi-val">${report.summary.trustScore}/100</div>
-      </div>
+      </div>${
+        hasDocs
+          ? `
+      <div class="kpi-card">
+        <div class="kpi-label">Doc Trust Score</div>
+        <div class="kpi-val">${report.summary.docTrustScore}/100</div>
+      </div>`
+          : ""
+      }
       <div class="kpi-card">
         <div class="kpi-label">Line / Branch Coverage</div>
         <div class="kpi-val">${report.summary.metrics.lineCoveragePct}% / ${report.summary.metrics.branchCoveragePct}%</div>
@@ -336,15 +501,39 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       <div class="kpi-card">
         <div class="kpi-label">Pseudo-tested Methods</div>
         <div class="kpi-val">${report.summary.metrics.pseudoTestedMethods}</div>
-      </div>
+      </div>${
+        report.libyear
+          ? `
+      <div class="kpi-card">
+        <div class="kpi-label">Dependency Drift (libyear)</div>
+        <div class="kpi-val">${report.libyear.totalLibyears}</div>
+      </div>`
+          : ""
+      }
     </section>
 
     <!-- Level 1: Repository Overview -->
-    <section id="view-level-1" class="level-section">
+    <section id="view-level-1" class="level-section">${
+      hasDocs
+        ? `
+      <div class="panel" style="margin-bottom:16px;display:flex;gap:24px;align-items:center">
+        <div><strong>Trust Score:</strong> ${report.summary.trustScore}/100</div>
+        <div><strong>Doc Trust Score:</strong> ${report.summary.docTrustScore}/100</div>
+      </div>`
+        : ""
+    }${
+      report.libyear
+        ? `
+      <div class="panel" style="margin-bottom:16px">
+        <h2>Dependency Drift (libyear) <span>${report.libyear.totalLibyears} libyears</span></h2>
+        <div style="font-size:12px;color:#475569">${report.libyear.dependencies.map((d) => `<code>${escapeHtmlServer(d.name)}</code>: ${d.libyears} libyears`).join(" · ")}</div>
+      </div>`
+        : ""
+    }
       <div class="grid-2col">
         <div class="panel">
           <h2>Modules by Fog</h2>
-          <div id="l1-modules"></div>
+          <div id="l1-modules">${serverModulesHtml}</div>
         </div>
         <div class="panel">
           <h2>Top Fog Hotspots</h2>
@@ -357,7 +546,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     <section id="view-level-2" class="level-section hidden">
       <div class="panel">
         <h2>Module Breakdown <span style="font-size:12px;color:#64748B">${verifiedCollapsedTotal} verified files collapsed</span></h2>
-        <div id="l2-submodules"></div>
+        <div id="l2-submodules">${serverModulesHtml}</div>
       </div>
     </section>
 
@@ -366,7 +555,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       <div class="panel">
         <h2>File Fog Map (2D Area-Proportional Treemap)</h2>
         <div class="treemap-wrap">
-          <div id="l3-tiles" class="treemap-tiles"></div>
+          <div id="l3-tiles" class="treemap-tiles">${serverTilesHtml}</div>
           <div class="collapsed-zone">
             <strong>${verifiedCollapsedTotal} verified files collapsed</strong>
             <span style="margin-top:4px">Muted ${STATE_COLORS.verified} background; zero action needed</span>
@@ -391,7 +580,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         <!-- Center Column: Source Code & Inline Surviving Mutants -->
         <div class="panel">
           <h2 id="l4-file-title">Source View</h2>
-          <table class="source-table" id="l4-source-table"></table>
+          <table class="source-table" id="l4-source-table">${serverDocSourceRowsHtml}</table>
         </div>
         <!-- Right Column: Selected Finding Detail & Copy as task for agent -->
         <div class="panel">
@@ -456,11 +645,16 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     function initViews() {
       const l1Mod = document.getElementById("l1-modules");
       l1Mod.innerHTML = REPORT.modules.map(m =>
-        '<div class="module-row" onclick="switchLevel(2)">' +
+        ${hasDocs ? `'<div class="module-row" data-module="' + m.path + '" onclick="switchLevel(2)">'` : `'<div class="module-row" onclick="switchLevel(2)">'`} +
           '<div style="display:flex;justify-content:space-between;font-weight:600">' +
             '<span>' + m.path + ' (' + m.totalFiles + ' files, ' + m.verifiedFilesCollapsed + ' verified files collapsed)</span>' +
             '<span>Trust ' + m.trustScore + '/100 · Max Risk ' + m.maxRiskScore + '</span>' +
-          '</div>' +
+          '</div>' +${
+            hasDocs
+              ? `
+          '<div style="font-size:12px;color:#475569;margin-top:4px">fog-returned: ' + (m.locByState["fog-returned"] || 0) + ' · fog: ' + (m.locByState.fog || 0) + ' · self-proof-fog: ' + (m.locByState["self-proof-fog"] || 0) + ' · weak-evidence: ' + (m.locByState["weak-evidence"] || 0) + ' · verified: ' + (m.locByState.verified || 0) + '</div>' +`
+              : ""
+          }
           renderStackedBar(m.locByState) +
         '</div>'
       ).join("");
@@ -481,9 +675,9 @@ export function renderHtmlFogMap(report: CodefogReport): string {
 
       document.getElementById("l2-submodules").innerHTML = l1Mod.innerHTML;
 
-      // Area-proportional Treemap tiles: flex-grow and min-height scale with file.totalLoc
+      // Area-proportional Treemap tiles: flex-grow and min-height scale with file.totalLoc${hasDocs ? " (or docFile.totalClaims)" : ""}
       const l3Tiles = document.getElementById("l3-tiles");
-      l3Tiles.innerHTML = REPORT.files.map(file => {
+      ${hasDocs ? "const codeTilesHtml =" : "l3Tiles.innerHTML ="} REPORT.files.map(file => {
         const locWeight = Math.max(1, file.totalLoc);
         const minH = Math.min(220, Math.max(76, 56 + locWeight * 8));
         return '<div class="tile tile-' + file.dominantState + '" style="flex:' + locWeight + ' 1 ' + Math.min(340, 140 + locWeight * 12) + 'px;min-height:' + minH + 'px" onclick="switchLevel(4, \\'' + file.path + '\\')">' +
@@ -493,11 +687,44 @@ export function renderHtmlFogMap(report: CodefogReport): string {
           '</div>' +
           '<div style="font-size:12px;margin-top:6px">LOC: ' + file.totalLoc + ' · Unverified: ' + file.unverifiedLoc + ' · Risk: ' + file.riskScore + '</div>' +
         '</div>';
+      }).join("");${
+        hasDocs
+          ? `
+      const docTilesHtml = (REPORT.docFiles || []).map(docFile => {
+        const claimWeight = Math.max(1, docFile.totalClaims);
+        const minH = Math.min(220, Math.max(76, 56 + claimWeight * 8));
+        return '<div class="tile tile-' + docFile.dominantState + '" data-claims="' + docFile.totalClaims + '" style="flex:' + claimWeight + ' 1 ' + Math.min(340, 140 + claimWeight * 12) + 'px;min-height:' + minH + 'px" onclick="switchLevel(4, \\'' + docFile.path + '\\')">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center">' +
+            '<strong>' + docFile.path + '</strong>' +
+            (docFile.dominantState === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : '') +
+          '</div>' +
+          '<div style="font-size:12px;margin-top:6px">Claims: ' + docFile.totalClaims + ' · Unverified: ' + docFile.unverifiedClaims + ' · Risk: ' + docFile.riskScore + '</div>' +
+        '</div>';
       }).join("");
+      l3Tiles.innerHTML = codeTilesHtml + docTilesHtml;
+
+      const initialFile = (REPORT.docFiles && REPORT.docFiles[0] && REPORT.docFiles[0].path) || (REPORT.files[0] && REPORT.files[0].path);
+      if (initialFile) {
+        renderLevel4(initialFile);
+      }`
+          : `
 
       if (REPORT.files[0]) {
         renderLevel4(REPORT.files[0].path);
+      }`
       }
+    }${
+      hasDocs
+        ? `
+
+    function formatReferentClient(ref, fallbackReferent) {
+      if (!ref) return '<code>' + fallbackReferent + '</code>';
+      const referentPath = ref.file || ref.url || fallbackReferent;
+      const qualifier = ref.symbol ? ' (' + ref.symbol + ')' : ref.script ? ' (script: ' + ref.script + ')' : ref.anchor ? '#' + ref.anchor : '';
+      const commitPart = ref.lastModifiedCommit ? ' @ <code>' + ref.lastModifiedCommit + '</code>' : '';
+      return '<code>' + referentPath + '</code>' + qualifier + commitPart;
+    }`
+        : ""
     }
 
     function renderFindingDetail(f) {
@@ -508,7 +735,22 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       }
       const mutantsHtml = (f.evidence.survivingMutants || []).map(m =>
         '<li>Line ' + m.line + ': <code>' + m.original + '</code> → <code>' + m.mutated + '</code> (survived ' + m.testsRun + ' tests)</li>'
-      ).join("");
+      ).join("");${
+        hasExternal || hasDocs
+          ? `
+      const externalHtml = (f.externalIssues || []).map(ext =>
+        '<li>[' + ext.source + '] <code>' + ext.ruleId + '</code> (line ' + ext.line + '): ' + ext.message + '</li>'
+      ).join("");`
+          : ""
+      }${
+        hasDocs
+          ? `
+      const matchedClaim = (REPORT.docClaims || []).find(c => c.id === f.id);
+      const claimRefHtml = matchedClaim
+        ? '<div style="font-size:12px;margin-top:4px"><strong>Referent:</strong> ' + formatReferentClient(matchedClaim.referent || (matchedClaim.referents && matchedClaim.referents[0]), matchedClaim.referentText) + '</div>'
+        : '';`
+          : ""
+      }
       detailEl.innerHTML =
         '<div class="finding-card active">' +
           '<div style="display:flex;justify-content:space-between;align-items:center">' +
@@ -516,41 +758,103 @@ export function renderHtmlFogMap(report: CodefogReport): string {
             (f.state === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : '<span>' + f.state + '</span>') +
             (f.evidence && f.evidence.oracleContest ? ' <span>CONTESTED</span>' : '') +
           '</div>' +
-          '<div style="font-size:12px;margin-top:6px"><strong>Location:</strong> ' + f.location.file + ':' + f.location.startLine + '-' + f.location.endLine + '</div>' +
+          '<div style="font-size:12px;margin-top:6px"><strong>Location:</strong> ' + f.location.file + ':' + f.location.startLine + '-' + f.location.endLine + '</div>' +${
+            hasDocs
+              ? `
+          claimRefHtml +`
+              : ""
+          }
           '<div style="font-size:12px;margin-top:4px"><strong>Risk Score:</strong> ' + f.riskScore + '/10</div>' +
           '<div style="font-size:12px;margin-top:4px"><strong>Why it is in fog:</strong> ' + f.reason + '</div>' +
           '<div style="font-size:12px;margin-top:4px"><strong>Evidence:</strong> Executed by ' + f.evidence.executedByTests + ' test(s), ' + f.evidence.assertionsOnOutcome + ' outcome assertion(s)' + (f.evidence.pseudoTested ? ' [PSEUDO-TESTED]' : '') + '</div>' +
-          (mutantsHtml ? '<ul style="font-size:12px;margin:6px 0;padding-left:18px">' + mutantsHtml + '</ul>' : '') +
+          (mutantsHtml ? '<ul style="font-size:12px;margin:6px 0;padding-left:18px">' + mutantsHtml + '</ul>' : '') +${
+            hasExternal || hasDocs
+              ? `
+          (externalHtml ? '<div style="font-size:12px;margin-top:4px"><strong>External Overlay:</strong><ul style="font-size:12px;margin:4px 0;padding-left:18px">' + externalHtml + '</ul></div>' : '') +`
+              : ""
+          }
           '<div style="font-size:12px;margin-top:6px"><strong>Suggested Action:</strong> ' + f.suggestedAction + '</div>' +
           '<div style="font-size:11px;margin-top:6px;font-family:monospace;background:#E2E8F0;padding:6px;border-radius:4px">' + f.acceptanceCheck.command + '</div>' +
           '<button class="copy-agent-btn" onclick="copyAgentTask(\\'' + f.id + '\\', this, event)">Copy as task for agent</button>' +
         '</div>';
     }
 
-    function renderLevel4(filePath, selectedFindingId) {
-      const file = REPORT.files.find(f => f.path === filePath) || REPORT.files[0];
+    function renderLevel4(filePath, selectedFindingId) {${
+      hasDocs
+        ? `
+      const docFile = (REPORT.docFiles || []).find(df => df.path === filePath);
+      const file = docFile || REPORT.files.find(f => f.path === filePath) || (REPORT.docFiles && REPORT.docFiles[0]) || REPORT.files[0];`
+        : `
+      const file = REPORT.files.find(f => f.path === filePath) || REPORT.files[0];`
+    }
       if (!file) return;
       document.getElementById("l4-file-title").textContent = file.path + " (Trust " + file.trustScore + "/100)";
 
       // Build map of surviving mutants by line number for inline source annotation
-      const mutantsByLine = {};
+      const mutantsByLine = {};${
+        hasExternal || hasDocs
+          ? `
+      const externalByLine = {};`
+          : ""
+      }${
+        hasDocs
+          ? `
+      const claimsByLine = {};`
+          : ""
+      }
       (file.regions || []).forEach(r => {
         (r.survivingMutants || []).forEach(m => {
           mutantsByLine[m.line] = mutantsByLine[m.line] || [];
           mutantsByLine[m.line].push(m);
-        });
-      });
+        });${
+          hasExternal || hasDocs
+            ? `
+        (r.externalIssues || []).forEach(ext => {
+          const ln = ext.line || r.startLine;
+          externalByLine[ln] = externalByLine[ln] || [];
+          externalByLine[ln].push(ext);
+        });`
+            : ""
+        }
+      });${
+        hasDocs
+          ? `
+      (file.claims || []).forEach(c => {
+        claimsByLine[c.startLine] = claimsByLine[c.startLine] || [];
+        claimsByLine[c.startLine].push(c);
+      });`
+          : ""
+      }
 
       const table = document.getElementById("l4-source-table");
       table.innerHTML = (file.lines || []).map((lineText, idx) => {
         const ln = idx + 1;
         const st = (file.lineStates && file.lineStates[ln]) || "verified";
-        const escaped = lineText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        const escaped = lineText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");${
+          hasDocs
+            ? `
+        const lineClaims = claimsByLine[ln] || [];
+        const claimInlineHtml = lineClaims.map(c => {
+          const badge = c.state === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : '<span>[' + c.state + ']</span>';
+          const refHtml = formatReferentClient(c.referent || (c.referents && c.referents[0]), c.referentText);
+          return ' <span class="doc-claim-inline" style="margin-left:8px;font-size:11px">' + badge + ' · Referent: ' + refHtml + '</span>';
+        }).join("");`
+            : ""
+        }
         const lineMutants = mutantsByLine[ln] || [];
         const mutantRows = lineMutants.map(m =>
           '<tr class="mutant-inline-row"><td class="ln-col">↳</td><td>⚠️ Surviving Mutant [' + m.id + ']: <code>' + m.original + '</code> → <code>' + m.mutated + '</code> (survived ' + m.testsRun + ' tests)</td></tr>'
+        ).join("");${
+          hasExternal || hasDocs
+            ? `
+        const lineExternal = externalByLine[ln] || [];
+        const externalRows = lineExternal.map(ext =>
+          '<tr class="mutant-inline-row"><td class="ln-col">↳</td><td>[' + ext.source + '] <code>' + ext.ruleId + '</code>: ' + ext.message + '</td></tr>'
         ).join("");
-        return '<tr class="line-' + st + '"><td class="ln-col">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;
+        return '<tr class="line-' + st + '"><td class="ln-col">' + ln + '</td><td>' + escaped +${hasDocs ? " claimInlineHtml +" : ""} '</td></tr>' + mutantRows + externalRows;`
+            : `
+        return '<tr class="line-' + st + '"><td class="ln-col">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;`
+        }
       }).join("");
 
       const fileFindings = REPORT.findings.filter(f => f.location.file === file.path);

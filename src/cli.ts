@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
+import { analyzeDocClaims } from "./doc-claims.js";
 import { computeDiffComparison, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { installCodefogSkill } from "./skill-installer.js";
@@ -86,11 +87,21 @@ export function formatLevel1Summary(report: CodefogReport): string {
   const fogPct =
     summary.totalLoc > 0 ? Math.round((unverifiedLoc / summary.totalLoc) * 100) : 0;
 
+  const docTrustPart =
+    summary.docTrustScore !== undefined
+      ? ` | Doc Trust Score: ${summary.docTrustScore}/100`
+      : "";
+
   const lines: string[] = [
     `codefog | ${repository.name} (${repository.branch} @ ${repository.commit})`,
-    `Trust Score: ${summary.trustScore}/100 | Files: ${summary.totalFiles} | LOC: ${summary.totalLoc} | Unverified (Fog): ${fogPct}%`,
+    `Trust Score: ${summary.trustScore}/100${docTrustPart} | Files: ${summary.totalFiles} | LOC: ${summary.totalLoc} | Unverified (Fog): ${fogPct}%`,
     `Metrics: Line ${summary.metrics.lineCoveragePct}% | Branch ${summary.metrics.branchCoveragePct}% | Checked ${summary.metrics.checkedCoveragePct}% | Mutation ${summary.metrics.mutationScorePct}% | Pseudo-tested: ${summary.metrics.pseudoTestedMethods} | Contested: ${summary.metrics.contestedOracles}`,
     `States: Returned=${summary.locByState["fog-returned"]} Fog=${summary.locByState.fog} Self-proof=${summary.locByState["self-proof-fog"]} Weak=${summary.locByState["weak-evidence"]} Verified=${summary.locByState.verified}`,
+    ...(summary.docClaimsByState
+      ? [
+          `Doc Claims (${summary.totalDocClaims ?? 0}): Returned=${summary.docClaimsByState["fog-returned"]} Fog=${summary.docClaimsByState.fog} Weak=${summary.docClaimsByState["weak-evidence"]} Verified=${summary.docClaimsByState.verified}`,
+        ]
+      : []),
     "",
     "Modules by Fog:",
   ];
@@ -157,12 +168,18 @@ export async function runCli(
           "  --stryker <path>      Alias for --mutation-report",
           "  --expectations <path> Independent expectation manifest (default: oracles/expectations.json when present)",
           "  --defects <path>      Historical defect manifest (default: oracles/defects.json when present)",
+          "  --docs                Scan Markdown & AI instruction files for Doc Claims and compute Doc Trust Score",
+          "  --check-external-links Check external HTTP(S) links when --docs is enabled",
+          "  --run-docs            Execute runnable code blocks in Markdown when --docs is enabled",
+          "  --sarif <path>        Import SARIF 2.1.0 report(s) as external overlay (repeatable)",
+          "  --knip <path>         Import Knip JSON report(s) as external overlay (repeatable)",
+          "  --libyear <path>      Import libyear JSON report(s) as repository dependency overlay (repeatable)",
           "  --diff <baseRef>      Compare against base git ref (e.g. origin/main)",
           "  --html <path>         Output path for interactive HTML Fog Map (default: .codefog/report.html)",
           "  --pr-comment [dir]    Write PR comment Markdown and SVG artifacts",
           "  --json                Output full JSON report to stdout",
           "  --open                Open HTML Fog Map in default browser",
-          "  --fail-on <policy>    Exit gate policy: returned | regression | any-fog | contested | none (default: returned)",
+          "  --fail-on <policy>    Exit gate policy: returned | doc-returned | regression | any-fog | contested | none (default: returned)",
           "  --install-skill [ag]  Install AI agent skill for codex, claude-code, codebuddy, cursor (default: all)",
           "  -g, --global          Install AI skill into user home directory (~/.cursor/skills, ~/.claude/skills, etc.)",
           "  -v, --version         Print version",
@@ -238,11 +255,13 @@ export async function runCli(
       let oracle = false;
       let expectationsPath: string | undefined;
       let defectsPath: string | undefined;
+      let runDocs = false;
 
       if (process.env.npm_command === "exec") {
         if (process.env.npm_config_mutants === "true") mutants = true;
         if (process.env.npm_config_oracle === "true") oracle = true;
         if (process.env.npm_config_allow_source_change === "true") allowSourceChange = true;
+        if (process.env.npm_config_run_docs === "true") runDocs = true;
         const envExpectations = process.env.npm_config_expectations;
         if (envExpectations && envExpectations !== "true" && envExpectations !== "false") {
           expectationsPath = envExpectations;
@@ -276,6 +295,8 @@ export async function runCli(
           defectsPath = argv[++i];
         } else if (arg === "--allow-source-change") {
           allowSourceChange = true;
+        } else if (arg === "--run-docs") {
+          runDocs = true;
         } else if (arg === "--root") {
           rootDir = path.resolve(argv[++i] ?? ".");
         } else if (arg === "--lines") {
@@ -316,6 +337,7 @@ export async function runCli(
         oracle,
         expectationsPath,
         defectsPath,
+        runDocs,
       });
 
       if (verifyRes.passed) {
@@ -339,12 +361,24 @@ export async function runCli(
     let failOn = "returned";
     let expectationsPath: string | undefined;
     let defectsPath: string | undefined;
+    let docsMode = false;
+    let checkExternalLinks = false;
+    let runDocs = false;
+    const sarifPaths: string[] = [];
+    const knipPaths: string[] = [];
+    const libyearPaths: string[] = [];
 
     const positional: string[] = [];
     for (let i = 0; i < argv.length; i++) {
       const arg = argv[i]!;
       if (arg === "--json") {
         jsonMode = true;
+      } else if (arg === "--docs") {
+        docsMode = true;
+      } else if (arg === "--check-external-links") {
+        checkExternalLinks = true;
+      } else if (arg === "--run-docs") {
+        runDocs = true;
       } else if (arg === "--root") {
         rootDir = path.resolve(argv[++i] ?? ".");
       } else if (arg === "--coverage") {
@@ -360,6 +394,15 @@ export async function runCli(
         expectationsPath = argv[++i];
       } else if (arg === "--defects") {
         defectsPath = argv[++i];
+      } else if (arg === "--sarif") {
+        const val = argv[++i];
+        if (val) sarifPaths.push(val);
+      } else if (arg === "--knip") {
+        const val = argv[++i];
+        if (val) knipPaths.push(val);
+      } else if (arg === "--libyear") {
+        const val = argv[++i];
+        if (val) libyearPaths.push(val);
       } else if (arg === "--diff") {
         diffBase = argv[++i];
       } else if (arg === "--html") {
@@ -380,7 +423,14 @@ export async function runCli(
       }
     }
 
-    const validFailOnPolicies = new Set(["none", "returned", "regression", "any-fog", "contested"]);
+    const validFailOnPolicies = new Set([
+      "none",
+      "returned",
+      "doc-returned",
+      "regression",
+      "any-fog",
+      "contested",
+    ]);
 
     // Recover options if `npm exec` / `npx` consumed `--<flag>=<val>` into `npm_config_*` env vars
     if (process.env.npm_command === "exec") {
@@ -400,6 +450,12 @@ export async function runCli(
       if (envExpectations && !expectationsPath) expectationsPath = envExpectations;
       const envDefects = envVal("npm_config_defects");
       if (envDefects && !defectsPath) defectsPath = envDefects;
+      const envSarif = envVal("npm_config_sarif");
+      if (envSarif) sarifPaths.push(envSarif);
+      const envKnip = envVal("npm_config_knip");
+      if (envKnip) knipPaths.push(envKnip);
+      const envLibyear = envVal("npm_config_libyear");
+      if (envLibyear) libyearPaths.push(envLibyear);
       const envDiff = envVal("npm_config_diff");
       if (envDiff && !diffBase) diffBase = envDiff;
       const envHtml = envVal("npm_config_html");
@@ -412,6 +468,9 @@ export async function runCli(
       if (envFailOn) failOn = envFailOn;
       if (process.env.npm_config_json === "true") jsonMode = true;
       if (process.env.npm_config_open === "true") openBrowser = true;
+      if (process.env.npm_config_docs === "true") docsMode = true;
+      if (process.env.npm_config_check_external_links === "true") checkExternalLinks = true;
+      if (process.env.npm_config_run_docs === "true") runDocs = true;
     }
 
     // Classify positional arguments so that `npm exec` / `npx` stripping `--coverage`,
@@ -440,6 +499,21 @@ export async function runCli(
 
       if (/\.html?$/i.test(pos)) {
         htmlPath = pos;
+        continue;
+      }
+
+      if (/\.sarif(?:\.json)?$/i.test(pos) || /sarif.*\.(?:json|sarif)$/i.test(pos)) {
+        sarifPaths.push(pos);
+        continue;
+      }
+
+      if (/knip.*\.json$/i.test(pos)) {
+        knipPaths.push(pos);
+        continue;
+      }
+
+      if (/libyear.*\.json$/i.test(pos)) {
+        libyearPaths.push(pos);
         continue;
       }
 
@@ -480,7 +554,7 @@ export async function runCli(
 
     if (!validFailOnPolicies.has(failOn)) {
       io.stderr(
-        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, regression, any-fog, contested, none.\n`,
+        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, doc-returned, regression, any-fog, contested, none.\n`,
       );
       return 1;
     }
@@ -494,6 +568,12 @@ export async function runCli(
       expectationsPath,
       defectsPath,
       diffBase,
+      docs: docsMode || undefined,
+      checkExternalLinks: checkExternalLinks || undefined,
+      runDocs: runDocs || undefined,
+      sarifPath: sarifPaths.length > 0 ? sarifPaths : undefined,
+      knipPath: knipPaths.length > 0 ? knipPaths : undefined,
+      libyearPath: libyearPaths.length > 0 ? libyearPaths : undefined,
     });
 
     if (diffBase) {
@@ -525,6 +605,21 @@ export async function runCli(
     }
     if (failOn === "returned" && report.summary.locByState["fog-returned"] > 0) {
       return 1;
+    }
+    if (failOn === "doc-returned") {
+      const docReturnedCount =
+        report.summary.docClaimsByState !== undefined
+          ? report.summary.docClaimsByState["fog-returned"]
+          : (
+              await analyzeDocClaims({
+                rootDir,
+                checkExternalLinks: checkExternalLinks || undefined,
+                runDocs: runDocs || undefined,
+              })
+            ).docClaimsByState["fog-returned"];
+      if (docReturnedCount > 0) {
+        return 1;
+      }
     }
     if (
       failOn === "regression" &&
