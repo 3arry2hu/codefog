@@ -73,7 +73,7 @@ codefog 是一款“雾优先”的代码信任与风险地图，支持 **TypeSc
 npx @barryzhu/codefog
 ```
 
-它会自动探测覆盖率与变异测试报告，在终端打印摘要，并把交互式雾图写入 `.codefog/report.html`。加上 `--docs` 可以同时检查文档：
+它会自动探测覆盖率与变异测试报告，在终端打印摘要，并把交互式雾图写入 `.codefog/report.html`。覆盖率报告里没有的源文件按 `fog` 计入。找不到覆盖率报告、或报告比代码旧时，codefog 会给出警告并附上重新生成的命令。加上 `--docs` 可以同时检查文档：
 
 ```bash
 npx @barryzhu/codefog --docs --open
@@ -353,7 +353,18 @@ npx @barryzhu/codefog verify README.md
 npx @barryzhu/codefog --diff origin/main --pr-comment .codefog --fail-on regression
 ```
 
-`pr-comment.md` 包含信任分前后对比、新增的 `fog-returned` 文件、“**覆盖率上升但有效证据下降**”预警；开启 `--docs` 时还有文档小节，列出新增的文档腐化与被删除的声明。`pr-diff.svg` 是前后状态对比图。可参考 [`.github/workflows/codefog.yml`](./.github/workflows/codefog.yml) 中的 CI 配置。
+`pr-comment.md` 包含信任分前后对比、新增的 `fog-returned` 文件、“**覆盖率上升但有效证据下降**”预警；开启 `--docs` 时还有文档小节，列出新增的文档腐化与被删除的声明。`pr-diff.svg` 是前后状态对比图。
+
+在 GitHub Actions 中需要检出完整历史，基准 ref 才能被解析；`--diff` 指向找不到的 ref 时，codefog 以 `1` 退出：
+
+```yaml
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0
+- run: npx @barryzhu/codefog --diff origin/${{ github.base_ref }} --pr-comment .codefog --fail-on regression
+```
+
+本仓库自己的 [`.github/workflows/codefog.yml`](./.github/workflows/codefog.yml) 用本地构建产物运行同样的门禁。
 
 ## 评分公式
 

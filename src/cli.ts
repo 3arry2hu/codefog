@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
 import { analyzeDocClaims } from "./doc-claims.js";
-import { computeDiffComparison, writePrCommentArtifacts } from "./diff-pr.js";
+import { computeDiffComparison, resolveBaseRef, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { installCodefogSkill } from "./skill-installer.js";
 import { verifyTargetWithMutants } from "./verify.js";
@@ -559,6 +559,13 @@ export async function runCli(
       return 1;
     }
 
+    if (diffBase && !(await resolveBaseRef(rootDir, diffBase))) {
+      io.stderr(
+        `Error: --diff base ref '${diffBase}' could not be resolved to a commit. In GitHub Actions, set 'fetch-depth: 0' on actions/checkout; otherwise run 'git fetch origin <branch>' first.\n`,
+      );
+      return 1;
+    }
+
     const report = await analyzeRepository({
       rootDir,
       coveragePath: coveragePaths.length > 0 ? coveragePaths : undefined,
@@ -576,11 +583,19 @@ export async function runCli(
       libyearPath: libyearPaths.length > 0 ? libyearPaths : undefined,
     });
 
+    for (const warning of report.warnings ?? []) {
+      io.stderr(`[codefog] Warning: ${warning}\n`);
+    }
+
     if (diffBase) {
       const diff = await computeDiffComparison(rootDir, diffBase, report);
-      if (diff) {
-        report.diff = diff;
+      if (!diff) {
+        io.stderr(
+          `Error: --diff could not analyze base ref '${diffBase}' (no tracked files at that commit).\n`,
+        );
+        return 1;
       }
+      report.diff = diff;
     }
 
     if (prCommentDir) {

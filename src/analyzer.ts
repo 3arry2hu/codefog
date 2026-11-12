@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ts from "typescript";
+import { CODEFOG_COMMAND } from "./cli-command.js";
 import { loadCoverageRecords, type LcovFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
@@ -177,7 +178,11 @@ async function readGitMeta(rootDir: string): Promise<{ branch: string; commit: s
 
 export async function analyzeRepository(options: AnalyzeOptions): Promise<CodefogReport> {
   const rootDir = path.resolve(options.rootDir);
-  const { records: lcovRecords, mtimeMs: lcovMtimeMs } = await loadCoverageRecords(
+  const {
+    records: lcovRecords,
+    mtimeMs: lcovMtimeMs,
+    warnings: coverageWarnings,
+  } = await loadCoverageRecords(
     rootDir,
     options.coveragePath ?? options.lcovPath,
   );
@@ -478,7 +483,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           ...(externalOverlay ? { externalIssues: regionExternalIssues } : {}),
           suggestedAction,
           acceptanceCheck: {
-            command: `npx codefog verify ${relPath} --mutants --oracle --lines ${span.startLine}-${span.endLine}`,
+            command: `${CODEFOG_COMMAND} verify ${relPath} --mutants --oracle --lines ${span.startLine}-${span.endLine}`,
             criteria: [
               `Lines ${span.startLine}-${span.endLine} in ${relPath} reach verified state`,
               `All mutants in ${span.name} are killed`,
@@ -723,6 +728,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     modules,
     findings,
     files,
+    warnings: coverageWarnings,
     ...(externalOverlay ? { external: externalOverlay } : {}),
     ...(externalOverlay?.libyear ? { libyear: externalOverlay.libyear } : {}),
   };

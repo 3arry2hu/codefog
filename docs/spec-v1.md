@@ -8,15 +8,15 @@
 ## 1. 目标与范围边界（Scope）
 
 ### 1.1 v1 交付范围（2–3 周可交付）
-- **目标语言与生态**：仅限 TypeScript / JavaScript（Node.js >= 20，支持通过 `npx codefog` 直接运行）。
+- **目标语言与生态**：仅限 TypeScript / JavaScript（Node.js >= 20，支持通过 `npx @barryzhu/codefog` 直接运行）。
 - **输入源**：
   - 必选：`lcov.info`（兼容 Vitest / Jest / c8 / Istanbul 标准 LCOV 输出）+ 本地 Git 仓库历史（`git log` / `git blame` / `git diff`）。
   - 可选：Stryker 变异测试报告（`reports/mutation/mutation.json`）。
 - **核心交付物**：
-  1. **CLI 扫描器与验收器**（`npx codefog` 与 `npx codefog verify`）
+  1. **CLI 扫描器与验收器**（`npx @barryzhu/codefog` 与 `npx @barryzhu/codefog verify`）
   2. **本地单文件交互式 HTML 雾图**（`.codefog/report.html`，支持四层渐进披露）
-  3. **面向 AI Coding Agent 的结构化 JSON 输出**（`npx codefog --json`）
-  4. **GitHub Action / PR 前后对比报告**（`npx codefog --diff <base> --pr-comment`，生成并排对比 SVG 与 Markdown 摘要）
+  3. **面向 AI Coding Agent 的结构化 JSON 输出**（`npx @barryzhu/codefog --json`）
+  4. **GitHub Action / PR 前后对比报告**（`npx @barryzhu/codefog --diff <base> --pr-comment`，生成并排对比 SVG 与 Markdown 摘要）
 
 ### 1.2 明确不做（Non-Goals for v1）
 - 不支持多语言（Python / Go / Rust / Java 等不在 v1 范围）。
@@ -61,10 +61,10 @@
 
 ## 3. CLI 接口契约（CLI Surface）
 
-### 3.1 主扫描命令：`npx codefog [root-dir]`
+### 3.1 主扫描命令：`npx @barryzhu/codefog [root-dir]`
 
 ```bash
-npx codefog [root-dir] [options]
+npx @barryzhu/codefog [root-dir] [options]
 ```
 
 - `--lcov <path>`：指定 LCOV 覆盖率文件路径（默认自动探测 `coverage/lcov.info`）。
@@ -75,10 +75,10 @@ npx codefog [root-dir] [options]
 - `--pr-comment <dir>`：配合 `--diff` 使用，输出 PR 评论用的 `.codefog/pr-diff.svg`（并排 BEFORE/AFTER Treemap）与 `.codefog/pr-comment.md`。
 - `--fail-on <policy>`：退出码策略，可选 `returned`（默认，存在 `fog-returned` 时退出码为 `1`）、`any-fog`、`regression`、`contested`（存在预期冲突时退出码为 `1`）、`none`。
 
-### 3.2 定点验收命令：`npx codefog verify <target>`
+### 3.2 定点验收命令：`npx @barryzhu/codefog verify <target>`
 
 ```bash
-npx codefog verify <file-or-finding-id> [options]
+npx @barryzhu/codefog verify <file-or-finding-id> [options]
 ```
 
 - `--mutants`：对目标文件（或指定行区间 `--lines <start>-<end>`）执行定点变异测试（如边界条件 `>` ↔ `>=`、`===` ↔ `!==`、逻辑分支反转）与伪测试方法检测（函数体清空检验）。
@@ -107,11 +107,11 @@ npx codefog verify <file-or-finding-id> [options]
 4. **Level 4 - Code & Finding（代码与待办详情）**：
    - 左侧：当前文件内的 `Findings` 列表（如 `CF-1182 refund branch (9.4)`）。
    - 中间：源码行视图，高亮未验证行区间，并在存活变异体行下内联标注（如 `Surviving mutant > → >= on line 46 · all 14 tests still pass`）。
-   - 右侧：结构化 `Finding` 详情卡片（状态标签、问题类型、Evidence、Suggested Action、Acceptance Check 命令 `npx codefog verify ...`）及一键复制 Agent 任务的 `Copy as task for agent` 按钮。
+   - 右侧：结构化 `Finding` 详情卡片（状态标签、问题类型、Evidence、Suggested Action、Acceptance Check 命令 `npx @barryzhu/codefog verify ...`）及一键复制 Agent 任务的 `Copy as task for agent` 按钮。
 
 ---
 
-## 5. JSON Schema 与样例输出（`npx codefog --json`）
+## 5. JSON Schema 与样例输出（`npx @barryzhu/codefog --json`）
 
 ```json
 {
@@ -190,7 +190,7 @@ npx codefog verify <file-or-finding-id> [options]
       },
       "suggestedAction": "Add a test for a refund larger than the order total, asserting markPartial is returned and ledger is not credited.",
       "acceptanceCheck": {
-        "command": "npx codefog verify src/billing/stripe/webhook/handler.ts --mutants --lines 44-50",
+        "command": "npx @barryzhu/codefog verify src/billing/stripe/webhook/handler.ts --mutants --lines 44-50",
         "criteria": [
           "Mutant mut-46-gt-gte on line 46 is killed",
           "Lines 44-50 reach verified state with at least 1 outcome assertion"

@@ -5,6 +5,7 @@ import {
   findFilesByExtensionInRepo,
   getPolyglotAdapter,
   isPolyglotSourceFile,
+  loadGitignoreMatchers,
 } from "./polyglot.js";
 
 export interface LcovBranchEntry {
@@ -330,13 +331,17 @@ async function synthesizeZeroHitRecordsFromRepo(
     const found = await findFilesByExtensionInRepo(rootDir, rootDir, ext);
     allFiles.push(...found);
   }
+  const gitignoreMatchers = await loadGitignoreMatchers(rootDir);
 
   for (const rel of allFiles) {
     const isTsJsSource =
       /\.(ts|tsx|js|jsx|mjs)$/.test(rel) &&
       !rel.endsWith(".d.ts") &&
-      !/\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(rel);
+      !/\.(test|spec)\.(ts|tsx|js|jsx|mjs)$/.test(rel) &&
+      !/(?:^|\/)[^/]+\.config\.(ts|js|mjs)$/.test(rel);
     if (!isTsJsSource && !isPolyglotSourceFile(rel)) continue;
+    if (out.has(rel)) continue;
+    if (gitignoreMatchers.some((re) => re.test(rel))) continue;
 
     let content = "";
     try {
@@ -403,10 +408,63 @@ async function synthesizeZeroHitRecordsFromRepo(
   }
 }
 
+const COVERAGE_RECIPES: ReadonlyArray<{ label: string; test: RegExp; command: string }> = [
+  {
+    label: "TypeScript/JavaScript",
+    test: /\.(ts|tsx|js|jsx|mjs)$/,
+    command: "vitest run --coverage.enabled=true --coverage.reporter=lcov",
+  },
+  { label: "Go", test: /\.go$/, command: "go test -coverprofile=coverage.out ./..." },
+  {
+    label: "Rust",
+    test: /\.rs$/,
+    command: "cargo llvm-cov --lcov --output-path coverage/lcov.info",
+  },
+  { label: "Java", test: /\.java$/, command: "mvn test jacoco:report" },
+];
+
+function formatNoCoverageWarning(sourceFiles: Iterable<string>): string {
+  const files = Array.from(sourceFiles);
+  const recipes = COVERAGE_RECIPES.filter((r) => files.some((f) => r.test.test(f)));
+  return [
+    "No coverage report found (looked for coverage/lcov.info, coverage.out and JaCoCo XML). Results reflect Git history and test syntax only; every line counts as fog. Generate coverage first, or pass --coverage <path>:",
+    ...recipes.map((r) => `  ${r.label}: ${r.command}`),
+  ].join("\n");
+}
+
+function toRootRelative(rootDir: string, absPath: string): string {
+  return path.relative(rootDir, absPath).replace(/\\/g, "/") || absPath;
+}
+
+async function findSourceNewerThan(
+  rootDir: string,
+  relPaths: Iterable<string>,
+  thresholdMs: number,
+): Promise<{ file: string; mtimeMs: number } | undefined> {
+  let newest: { file: string; mtimeMs: number } | undefined;
+  for (const rel of relPaths) {
+    try {
+      const { mtimeMs } = await fs.stat(path.join(rootDir, rel));
+      if (mtimeMs > thresholdMs && (!newest || mtimeMs > newest.mtimeMs)) {
+        newest = { file: rel, mtimeMs };
+      }
+    } catch {
+      // coverage may reference files that no longer exist
+    }
+  }
+  return newest;
+}
+
+export interface LoadedCoverage {
+  records: Map<string, LcovFileRecord>;
+  mtimeMs?: number;
+  warnings: string[];
+}
+
 export async function loadCoverageRecords(
   rootDir: string,
   explicitPaths?: string | string[],
-): Promise<{ records: Map<string, LcovFileRecord>; mtimeMs?: number }> {
+): Promise<LoadedCoverage> {
   const goModulePrefix = await readGoModulePrefix(rootDir);
   let repoGoFiles: string[] | undefined;
   const candidateRelPaths: string[] = [];
@@ -444,6 +502,7 @@ export async function loadCoverageRecords(
 
   const merged = new Map<string, LcovFileRecord>();
   let latestMtimeMs: number | undefined;
+  let latestCoveragePath: string | undefined;
   const missingPaths: string[] = [];
 
   for (const absPath of resolvedPaths) {
@@ -453,6 +512,7 @@ export async function loadCoverageRecords(
       const stat = await fs.stat(absPath);
       if (latestMtimeMs === undefined || stat.mtimeMs > latestMtimeMs) {
         latestMtimeMs = stat.mtimeMs;
+        latestCoveragePath = absPath;
       }
     } catch {
       missingPaths.push(absPath);
@@ -477,15 +537,39 @@ export async function loadCoverageRecords(
     }
   }
 
-  if (merged.size === 0) {
-    await synthesizeZeroHitRecordsFromRepo(rootDir, merged);
-
-    if (merged.size === 0) {
-      const targetErrPath =
-        missingPaths[0] ?? path.join(rootDir, "coverage", "lcov.info");
-      throw new Error(`Could not read LCOV coverage file at ${targetErrPath}`);
-    }
+  if (missingPaths.length > 0) {
+    const listed = missingPaths.map((p) => toRootRelative(rootDir, p)).join(", ");
+    throw new Error(
+      `Coverage file not found or unreadable: ${listed} (paths are resolved against ${rootDir})`,
+    );
   }
 
-  return { records: merged, mtimeMs: latestMtimeMs };
+  const reportedFileCount = merged.size;
+  await synthesizeZeroHitRecordsFromRepo(rootDir, merged);
+
+  if (merged.size === 0) {
+    throw new Error(
+      `No TypeScript/JavaScript, Go, Rust or Java source files found under ${rootDir}`,
+    );
+  }
+
+  const warnings: string[] = [];
+  if (latestMtimeMs !== undefined && latestCoveragePath) {
+    const stale = await findSourceNewerThan(rootDir, merged.keys(), latestMtimeMs);
+    if (stale) {
+      warnings.push(
+        `Coverage report ${toRootRelative(rootDir, latestCoveragePath)} (generated ${new Date(latestMtimeMs).toISOString()}) is older than ${stale.file} (modified ${new Date(stale.mtimeMs).toISOString()}). Re-generate coverage so the results match the current code.`,
+      );
+    }
+  }
+  if (resolvedPaths.length === 0) {
+    warnings.push(formatNoCoverageWarning(merged.keys()));
+  } else if (reportedFileCount === 0) {
+    const listed = resolvedPaths.map((p) => toRootRelative(rootDir, p)).join(", ");
+    warnings.push(
+      `Coverage report ${listed} matched no source files under ${rootDir}; every line counts as fog. Check that the report was generated from this directory.`,
+    );
+  }
+
+  return { records: merged, mtimeMs: latestMtimeMs, warnings };
 }

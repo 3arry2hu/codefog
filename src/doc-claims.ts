@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { CODEFOG_COMMAND } from "./cli-command.js";
 import {
   discoverDocFiles,
   isInstructionFile,
@@ -13,7 +14,6 @@ import {
   checkExternalUrlReachable,
   detectInstructionConflictFindings,
   isGeneratedArtifactPath,
-  loadGitignoreMatchers,
   loadPackageManifestInfo,
   looksLikePathToken,
   parseCandidateSymbolToken,
@@ -32,6 +32,7 @@ import {
   type DocTimelinePoint,
 } from "./doc-timeline.js";
 import { createGitTimelineSession } from "./git-freshness.js";
+import { loadGitignoreMatchers } from "./polyglot.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -60,12 +61,12 @@ export {
   extractSymbolsFromSource,
   inferCommandIntent,
   isGeneratedArtifactPath,
-  loadGitignoreMatchers,
   loadPackageManifestInfo,
   type PackageManifestInfo,
   type RepoSymbol,
   type RepoSymbolIndex,
 } from "./doc-resolution.js";
+export { loadGitignoreMatchers } from "./polyglot.js";
 
 export { type DocTimelinePoint } from "./doc-timeline.js";
 
@@ -755,7 +756,7 @@ export async function analyzeDocClaims(options: {
         },
         suggestedAction: `Update or replace stale ${claim.kind} claim '${claim.text}' in ${claim.file}:${claim.startLine}-${claim.endLine}.`,
         acceptanceCheck: {
-          command: `npx codefog verify ${claim.file} --lines ${claim.blockStartLine}-${claim.blockEndLine}`,
+          command: `${CODEFOG_COMMAND} verify ${claim.file} --lines ${claim.blockStartLine}-${claim.blockEndLine}`,
           criteria: [
             `Doc claim '${claim.text}' in ${claim.file}:${claim.blockStartLine}-${claim.blockEndLine} resolves to a valid referent`,
           ],

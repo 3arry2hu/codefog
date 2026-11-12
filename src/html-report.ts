@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { CODEFOG_COMMAND } from "./cli-command.js";
 import { STATE_COLORS } from "./scoring.js";
 import type {
   CodefogReport,
@@ -287,6 +288,15 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       gap: 12px;
       margin-bottom: 20px;
     }
+    .report-warning {
+      background: rgba(189, 73, 0, 0.08);
+      border: 1px solid ${STATE_COLORS["fog-returned"]};
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      white-space: pre-wrap;
+    }
     .kpi-card {
       background: var(--bg-card);
       border: 1px solid var(--border-subtle);
@@ -513,7 +523,9 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     </section>
 
     <!-- Level 1: Repository Overview -->
-    <section id="view-level-1" class="level-section">${
+    <section id="view-level-1" class="level-section">${(report.warnings ?? [])
+      .map((w) => `\n      <div class="report-warning">${escapeHtmlServer(w)}</div>`)
+      .join("")}${
       hasDocs
         ? `
       <div class="panel" style="margin-bottom:16px;display:flex;gap:24px;align-items:center">
@@ -573,7 +585,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
           <div id="l4-findings"></div>
           ${
             report.findings.length === 0
-              ? '<div class="finding-card">No active findings. Example command: <code>npx codefog verify --mutants</code> <button class="copy-agent-btn">Copy as task for agent</button></div>'
+              ? `<div class="finding-card">No active findings. Example command: <code>${CODEFOG_COMMAND} verify &lt;file&gt; --mutants</code> <button class="copy-agent-btn">Copy as task for agent</button></div>`
               : ""
           }
         </div>

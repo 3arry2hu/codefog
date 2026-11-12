@@ -4,6 +4,7 @@ import * as os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
+import { CODEFOG_COMMAND } from "./cli-command.js";
 import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
 import { STATE_COLORS, STATE_EVIDENCE_RANK } from "./scoring.js";
 import { detectDeletedDocClaimsAgainstRef } from "./verify.js";
@@ -18,6 +19,11 @@ async function runGit(rootDir: string, args: string[]): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+export async function resolveBaseRef(rootDir: string, ref: string): Promise<string | null> {
+  const sha = await runGit(rootDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  return sha?.trim() || null;
 }
 
 async function listTrackedFilesAtRef(rootDir: string, ref: string): Promise<string[]> {
@@ -311,7 +317,7 @@ export function renderPrCommentDocSection(
       const refCommit = ref?.lastModifiedCommit ? ` @ \`${ref.lastModifiedCommit}\`` : "";
       section.push(
         `  - **[${c.id}] \`${c.file}:${c.startLine}\` (\`${c.text}\`, ${c.kind})** — \`fog-returned\` [RETURNED] · Referent: \`${refPath}\`${refCommit}`,
-        `    - Verify: \`npx codefog verify ${c.file} --lines ${c.blockStartLine}-${c.blockEndLine}\``,
+        `    - Verify: \`${CODEFOG_COMMAND} verify ${c.file} --lines ${c.blockStartLine}-${c.blockEndLine}\``,
       );
     }
   } else {

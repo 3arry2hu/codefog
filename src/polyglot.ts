@@ -28,6 +28,46 @@ export function isIgnoredRepoRelPath(relPath: string): boolean {
     .some((seg) => REPO_IGNORED_DIRS.has(seg));
 }
 
+function globPatternToRegex(pattern: string): RegExp {
+  let pat = pattern.trim();
+  const anchored = pat.startsWith("/");
+  if (anchored) pat = pat.slice(1);
+  const dirOnly = pat.endsWith("/");
+  if (dirOnly) pat = pat.slice(0, -1);
+
+  const escaped = pat
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, "\u0000")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, "[^/]")
+    .replace(/\u0000/g, ".*");
+
+  if (dirOnly) {
+    return anchored
+      ? new RegExp(`^${escaped}(?:/.*)?$`)
+      : new RegExp(`(?:^|/)${escaped}(?:/.*)?$`);
+  }
+  if (anchored || pat.includes("/")) {
+    return new RegExp(`^${escaped}(?:/.*)?$`);
+  }
+  return new RegExp(`(?:^|/)${escaped}(?:/.*)?$`);
+}
+
+export async function loadGitignoreMatchers(rootDir: string): Promise<RegExp[]> {
+  try {
+    const raw = await fs.readFile(path.join(rootDir, ".gitignore"), "utf8");
+    const matchers: RegExp[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!")) continue;
+      matchers.push(globPatternToRegex(trimmed));
+    }
+    return matchers;
+  } catch {
+    return [];
+  }
+}
+
 export async function walkRepoFiles(
   dirAbs: string,
   rootDir: string,

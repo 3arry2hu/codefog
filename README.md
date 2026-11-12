@@ -73,7 +73,7 @@ Run it at the root of any Git repository. No global install is needed:
 npx @barryzhu/codefog
 ```
 
-This auto-detects coverage and mutation reports, prints a summary, and writes the interactive Fog Map to `.codefog/report.html`. Add `--docs` to check your Markdown as well:
+This auto-detects coverage and mutation reports, prints a summary, and writes the interactive Fog Map to `.codefog/report.html`. Source files missing from the coverage report count as `fog`. When no report is found, or the report is older than the code, codefog prints a warning with the command to regenerate it. Add `--docs` to check your Markdown as well:
 
 ```bash
 npx @barryzhu/codefog --docs --open
@@ -353,7 +353,18 @@ npx @barryzhu/codefog verify README.md
 npx @barryzhu/codefog --diff origin/main --pr-comment .codefog --fail-on regression
 ```
 
-`pr-comment.md` shows trust before and after, newly `fog-returned` files, **"Coverage up, evidence down"** warnings, and with `--docs` a doc section listing new doc rot and deleted claims. `pr-diff.svg` is a before/after state chart. See [`.github/workflows/codefog.yml`](./.github/workflows/codefog.yml) for a working CI setup.
+`pr-comment.md` shows trust before and after, newly `fog-returned` files, **"Coverage up, evidence down"** warnings, and with `--docs` a doc section listing new doc rot and deleted claims. `pr-diff.svg` is a before/after state chart.
+
+In GitHub Actions, check out the full history so the base ref resolves; codefog exits with `1` when `--diff` points at a ref it cannot find:
+
+```yaml
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0
+- run: npx @barryzhu/codefog --diff origin/${{ github.base_ref }} --pr-comment .codefog --fail-on regression
+```
+
+This repository's own [`.github/workflows/codefog.yml`](./.github/workflows/codefog.yml) runs the same gate against its local build.
 
 ## Scoring
 

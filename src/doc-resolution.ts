@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import ts from "typescript";
+import { CODEFOG_COMMAND } from "./cli-command.js";
 import { collectFilesUnderDir, isInstructionFile } from "./doc-markdown.js";
 import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
 import {
@@ -346,46 +347,6 @@ const KNOWN_GENERATED_DIRS = new Set([
   "build",
   "node_modules",
 ]);
-
-function globPatternToRegex(pattern: string): RegExp {
-  let pat = pattern.trim();
-  const anchored = pat.startsWith("/");
-  if (anchored) pat = pat.slice(1);
-  const dirOnly = pat.endsWith("/");
-  if (dirOnly) pat = pat.slice(0, -1);
-
-  const escaped = pat
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\u0000")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]")
-    .replace(/\u0000/g, ".*");
-
-  if (dirOnly) {
-    return anchored
-      ? new RegExp(`^${escaped}(?:/.*)?$`)
-      : new RegExp(`(?:^|/)${escaped}(?:/.*)?$`);
-  }
-  if (anchored || pat.includes("/")) {
-    return new RegExp(`^${escaped}(?:/.*)?$`);
-  }
-  return new RegExp(`(?:^|/)${escaped}(?:/.*)?$`);
-}
-
-export async function loadGitignoreMatchers(rootDir: string): Promise<RegExp[]> {
-  try {
-    const raw = await fs.readFile(path.join(rootDir, ".gitignore"), "utf8");
-    const matchers: RegExp[] = [];
-    for (const line of raw.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!")) continue;
-      matchers.push(globPatternToRegex(trimmed));
-    }
-    return matchers;
-  } catch {
-    return [];
-  }
-}
 
 export function isGeneratedArtifactPath(
   rawPath: string,
@@ -879,7 +840,7 @@ export function detectInstructionConflictFindings(docClaims: DocClaim[]): Findin
       },
       suggestedAction: `Align '${intent}' command across AI instruction files (${locationRangeSummary}) so all agents execute the same command.`,
       acceptanceCheck: {
-        command: `npx codefog verify ${primary.file} --lines ${primary.blockStartLine}-${primary.blockEndLine}`,
+        command: `${CODEFOG_COMMAND} verify ${primary.file} --lines ${primary.blockStartLine}-${primary.blockEndLine}`,
         criteria: [
           `Instruction files (${sortedClaims.map((c) => `${c.file}:${c.startLine}`).join(", ")}) specify a consistent '${intent}' command`,
         ],

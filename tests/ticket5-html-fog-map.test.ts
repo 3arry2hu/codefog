@@ -101,7 +101,7 @@ describe("Ticket 5: Four-Level Progressive Disclosure Interactive Fog Map (.code
     // 4. Collapsed verified files / modules section & Copy as task for agent button
     expect(html).toContain("verified files collapsed");
     expect(html).toContain("Copy as task for agent");
-    expect(html).toContain("npx codefog verify");
+    expect(html).toContain("npx @barryzhu/codefog verify");
   });
 
   it("produces report.html byte-identical to main when neither --docs nor external reports are passed", async () => {

@@ -291,7 +291,11 @@ describe("Ticket #9 (Ticket 1): Go (golang) end-to-end slice & --coverage ingest
     expect(res2.killedMutants).toBeGreaterThanOrEqual(3);
 
     // 3. Verify npm exec / npx stripped-flag recovery (`coverage.out` and `none` passed as positional args)
-    // and fallback to zero-hit repo synthesis when `coverage.out` does not exist on disk yet
+    await fs.writeFile(
+      path.join(tmpDir, "coverage.out"),
+      ["mode: count", "github.com/acme/pay/internal/billing/guard.go:3.40,4.17 1 1"].join("\n"),
+      "utf8",
+    );
     let cliOut = "";
     let cliErr = "";
     const code = await runCli(["--root", tmpDir, "coverage.out", "none"], {

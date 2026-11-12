@@ -285,6 +285,7 @@ export interface CodefogReport {
   modules: ModuleSummary[];
   findings: Finding[];
   files: FileSummary[];
+  warnings?: string[];
   diff?: DiffComparison;
   external?: ExternalOverlaySummary;
   libyear?: LibyearSummary;
