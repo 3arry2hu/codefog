@@ -76,6 +76,36 @@ describe("Ticket 33: --diff fails loudly when the base ref cannot be resolved", 
     expect(stderr).toContain("HEAD~1");
   });
 
+  it("exits 1 when the base ref resolves but its baseline cannot be analyzed", async () => {
+    const docsOnly = await fs.mkdtemp(path.join(os.tmpdir(), "codefog-t33-docs-"));
+    try {
+      await git(docsOnly, ["init", "-q", "-b", "main"]);
+      await git(docsOnly, ["config", "user.email", "t33@codefog.dev"]);
+      await git(docsOnly, ["config", "user.name", "t33"]);
+      await fs.writeFile(path.join(docsOnly, "README.md"), "# Demo\n", "utf8");
+      await git(docsOnly, ["add", "."]);
+      await git(docsOnly, ["commit", "-q", "-m", "docs only"]);
+      await fs.mkdir(path.join(docsOnly, "src"), { recursive: true });
+      await fs.writeFile(path.join(docsOnly, "src", "a.ts"), "export const a = 1;\n", "utf8");
+      await git(docsOnly, ["add", "."]);
+      await git(docsOnly, ["commit", "-q", "-m", "add code"]);
+
+      const { code, stderr } = await runCapture([
+        "--root",
+        docsOnly,
+        "--diff",
+        "HEAD~1",
+        "--fail-on",
+        "none",
+      ]);
+
+      expect(code).toBe(1);
+      expect(stderr).toContain("could not analyze base ref 'HEAD~1'");
+    } finally {
+      await fs.rm(docsOnly, { recursive: true, force: true });
+    }
+  });
+
   it("still compares against a resolvable base ref", async () => {
     await fs.writeFile(
       path.join(tmpDir, "src", "b.ts"),

@@ -66,7 +66,6 @@ export {
   type RepoSymbol,
   type RepoSymbolIndex,
 } from "./doc-resolution.js";
-export { loadGitignoreMatchers } from "./polyglot.js";
 
 export { type DocTimelinePoint } from "./doc-timeline.js";
 

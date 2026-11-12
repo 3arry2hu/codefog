@@ -591,7 +591,7 @@ export async function runCli(
       const diff = await computeDiffComparison(rootDir, diffBase, report);
       if (!diff) {
         io.stderr(
-          `Error: --diff could not analyze base ref '${diffBase}' (no tracked files at that commit).\n`,
+          `Error: --diff could not analyze base ref '${diffBase}': the commit has no tracked source files, or analyzing it failed.\n`,
         );
         return 1;
       }
