@@ -72,7 +72,7 @@ function renderDocFileRowsServer(docFile: DocFileSummary): string {
       const escaped = escapeHtmlServer(lineText);
       const lineClaims = claimsByLine.get(ln) ?? [];
       const claimMarkers = lineClaims.map((c) => formatClaimMarkerServer(c)).join(" ");
-      return `<tr class="line-${st}"><td class="ln-col">${ln}</td><td>${escaped}${claimMarkers ? " " + claimMarkers : ""}</td></tr>`;
+      return `<tr class="line-${st}"><td class="ln-col" data-ln="${ln}">${ln}</td><td>${escaped}${claimMarkers ? " " + claimMarkers : ""}</td></tr>`;
     })
     .join("");
 }
@@ -387,6 +387,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       --bg-card: #FFFFFF;
       --border-subtle: #E2E8F0;
       --border-strong: #CBD5E1;
+      --sticky-offset: 88px;
       --text-primary: #0F172A;
       --text-secondary: #475569;
       --text-muted: #64748B;
@@ -567,8 +568,9 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     }
     .grid-3col {
       display: grid;
-      grid-template-columns: 300px 1fr 360px;
+      grid-template-columns: 300px minmax(0, 1fr) 360px;
       gap: 16px;
+      align-items: start;
     }
     .panel {
       background: var(--bg-card);
@@ -751,17 +753,55 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       white-space: pre-wrap;
     }
     .ln-col {
-      width: 44px;
+      width: 48px;
       text-align: right;
-      color: #64748B;
+      color: var(--text-muted);
       user-select: none;
-      border-right: 1px solid #E2E8F0;
+      padding-right: 12px !important;
     }
-    .line-fog-returned { background: rgba(189, 73, 0, 0.18); border-left: 4px solid ${STATE_COLORS["fog-returned"]}; }
-    .line-fog { background: rgba(29, 54, 86, 0.16); border-left: 4px solid ${STATE_COLORS.fog}; }
-    .line-self-proof-fog { background: rgba(110, 136, 170, 0.20); border-left: 4px solid ${STATE_COLORS["self-proof-fog"]}; }
-    .line-weak-evidence { background: rgba(188, 204, 226, 0.32); border-left: 4px solid ${STATE_COLORS["weak-evidence"]}; }
-    .line-verified { background: ${STATE_COLORS.verified}; border-left: 4px solid #CBD5E1; color: #475569; }
+    .line-fog-returned .ln-col { box-shadow: inset -4px 0 0 var(--state-returned); }
+    .line-fog .ln-col { box-shadow: inset -4px 0 0 var(--state-fog); }
+    .line-weak-evidence .ln-col { box-shadow: inset -4px 0 0 var(--state-weak); }
+    .line-self-proof-fog .ln-col {
+      background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 2px, #587294 2px 4px) right / 4px 100% no-repeat;
+    }
+    .line-fog-returned > td:not(.ln-col) { background: rgba(189, 73, 0, 0.16); }
+    .line-fog > td:not(.ln-col) { background: rgba(29, 54, 86, 0.14); }
+    .line-self-proof-fog > td:not(.ln-col) { background: rgba(110, 136, 170, 0.10); }
+    .line-weak-evidence > td:not(.ln-col) { background: rgba(188, 204, 226, 0.16); }
+    .line-verified > td:not(.ln-col) { color: var(--text-secondary); }
+    .code-wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 12px;
+      gap: 8px;
+      align-items: start;
+    }
+    .minimap {
+      position: sticky;
+      top: var(--sticky-offset);
+      height: calc(100vh - var(--sticky-offset) - 48px);
+      background: var(--bg-canvas);
+      border: 1px solid var(--border-subtle);
+      border-radius: 3px;
+    }
+    .mm-mark { position: absolute; left: 0; right: 0; min-height: 2px; cursor: pointer; }
+    .mm-fog-returned { background: var(--state-returned); }
+    .mm-fog { background: var(--state-fog); }
+    .mm-self-proof-fog { background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 2px, #587294 2px 4px); }
+    .mm-weak-evidence { background: var(--state-weak); }
+    .l4-side {
+      position: sticky;
+      top: var(--sticky-offset);
+      max-height: calc(100vh - var(--sticky-offset) - 16px);
+      overflow: auto;
+    }
+    .fc-title {
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .mutant-inline-row td {
       background: #FFF7ED;
       color: #9A3412;
@@ -812,6 +852,9 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       .tf-row .copy-agent-btn { display: none; }
       .tf-risk { width: 64px; }
       .module-head { flex-direction: column; gap: 2px; }
+      .l4-side { position: static; max-height: none; }
+      .code-wrap { grid-template-columns: minmax(0, 1fr); }
+      .minimap { display: none; }
     }
     .hidden { display: none !important; }
   </style>
@@ -908,7 +951,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     <section id="view-level-4" class="level-section hidden">
       <div class="grid-3col">
         <!-- Left Column: Findings List -->
-        <div class="panel">
+        <div class="panel l4-side">
           <h2>Findings List</h2>
           <div id="l4-findings"></div>
           ${
@@ -920,10 +963,13 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         <!-- Center Column: Source Code & Inline Surviving Mutants -->
         <div class="panel">
           <h2 id="l4-file-title">Source View</h2>
-          <table class="source-table" id="l4-source-table">${serverDocSourceRowsHtml}</table>
+          <div class="code-wrap">
+            <table class="source-table" id="l4-source-table">${serverDocSourceRowsHtml}</table>
+            <div id="l4-minimap" class="minimap"></div>
+          </div>
         </div>
         <!-- Right Column: Selected Finding Detail & Copy as task for agent -->
-        <div class="panel">
+        <div class="panel l4-side">
           <h2>Finding Detail & Agent Task</h2>
           <div id="l4-finding-detail"></div>
         </div>
@@ -1039,7 +1085,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
           '<div class="fc-head">' +
             stateChip(f.state) +
             (f.evidence && f.evidence.oracleContest ? ' <span class="state-chip chip-contested">CONTESTED</span>' : '') +
-            '<strong>[' + f.id + '] ' + f.title + '</strong>' +
+            findingTitle(f) +
           '</div>' +
           '<div style="font-size:12px;margin-top:6px"><strong>Location:</strong> ' + f.location.file + ':' + f.location.startLine + '-' + f.location.endLine + '</div>' +${
             hasDocs
@@ -1134,11 +1180,13 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         const externalRows = lineExternal.map(ext =>
           '<tr class="mutant-inline-row"><td class="ln-col">↳</td><td>[' + ext.source + '] <code>' + ext.ruleId + '</code>: ' + ext.message + '</td></tr>'
         ).join("");
-        return '<tr class="line-' + st + '"><td class="ln-col">' + ln + '</td><td>' + escaped +${hasDocs ? " claimInlineHtml +" : ""} '</td></tr>' + mutantRows + externalRows;`
+        return '<tr class="line-' + st + '"><td class="ln-col" data-ln="' + ln + '">' + ln + '</td><td>' + escaped +${hasDocs ? " claimInlineHtml +" : ""} '</td></tr>' + mutantRows + externalRows;`
             : `
-        return '<tr class="line-' + st + '"><td class="ln-col">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;`
+        return '<tr class="line-' + st + '"><td class="ln-col" data-ln="' + ln + '">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;`
         }
       }).join("");
+
+      document.getElementById("l4-minimap").innerHTML = renderMinimap(file);
 
       const fileFindings = REPORT.findings.filter(f => f.location.file === file.path);
       const list = fileFindings.length ? fileFindings : REPORT.findings;
@@ -1146,13 +1194,51 @@ export function renderHtmlFogMap(report: CodefogReport): string {
 
       document.getElementById("l4-findings").innerHTML = list.map(f =>
         '<div class="finding-card' + (activeFinding && activeFinding.id === f.id ? ' active' : '') + '" onclick="renderLevel4(\\'' + f.location.file + '\\', \\'' + f.id + '\\')">' +
-          '<div class="fc-head">' + stateChip(f.state) + '<strong>[' + f.id + '] ' + f.title + '</strong></div>' +
+          '<div class="fc-head">' + stateChip(f.state) + findingTitle(f) + '</div>' +
           '<div style="font-size:12px;margin-top:4px">' + f.reason + '</div>' +
           '<button class="copy-agent-btn" onclick="copyAgentTask(\\'' + f.id + '\\', this, event)">Copy as task for agent</button>' +
         '</div>'
       ).join("");
 
       renderFindingDetail(activeFinding);
+      if (selectedFindingId && activeFinding && activeFinding.id === selectedFindingId && activeFinding.location.file === file.path) {
+        jumpToLine(activeFinding.location.startLine);
+      }
+    }
+
+    function escAttr(raw) {
+      return String(raw).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function findingTitle(f) {
+      const full = "[" + f.id + "] " + f.title;
+      return '<strong class="fc-title" title="' + escAttr(full) + '">' + escAttr(full) + '</strong>';
+    }
+
+    function renderMinimap(file) {
+      const total = (file.lines || []).length || 1;
+      const fmt = n => String(Number(n.toFixed(3)));
+      const marks = [];
+      let runState = null;
+      let runStart = 1;
+      for (let ln = 1; ln <= total + 1; ln++) {
+        const raw = ln <= total ? (file.lineStates && file.lineStates[ln]) || null : null;
+        const st = raw === "verified" ? null : raw;
+        if (st !== runState) {
+          if (runState) {
+            const end = ln - 1;
+            marks.push('<i class="mm-mark mm-' + runState + '" style="top:' + fmt((runStart - 1) / total * 100) + '%;height:' + fmt((end - runStart + 1) / total * 100) + '%" onclick="jumpToLine(' + runStart + ')" title="Lines ' + runStart + '-' + end + ' · ' + runState + '"></i>');
+          }
+          runState = st;
+          runStart = ln;
+        }
+      }
+      return marks.join("");
+    }
+
+    function jumpToLine(ln) {
+      const el = document.querySelector('[data-ln="' + ln + '"]');
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", behavior: "smooth" });
     }
 
     initViews();

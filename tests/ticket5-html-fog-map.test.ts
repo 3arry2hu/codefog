@@ -152,7 +152,7 @@ describe("Ticket 5: Four-Level Progressive Disclosure Interactive Fog Map (.code
     expect(html).not.toContain("Doc Trust Score");
     expect(html).toContain('<div class="module-row" data-module="src" onclick="switchLevel(2)">');
     expect(html).toContain(
-      "return '<tr class=\"line-' + st + '\"><td class=\"ln-col\">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;",
+      "return '<tr class=\"line-' + st + '\"><td class=\"ln-col\" data-ln=\"' + ln + '\">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;",
     );
   });
 });
