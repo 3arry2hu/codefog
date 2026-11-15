@@ -7,6 +7,7 @@ import { analyzeDocClaims } from "./doc-claims.js";
 import { computeDiffComparison, resolveBaseRef, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { installCodefogSkill } from "./skill-installer.js";
+import { formatLevel1SummaryColor } from "./terminal-summary.js";
 import { verifyTargetWithMutants } from "./verify.js";
 import type { CodefogReport } from "./types.js";
 
@@ -63,6 +64,8 @@ export function formatOutdatedNpmWarning(version: string): string {
 export interface CliIo {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
+  /** ANSI-colored Level 1 summary; only bin.ts turns this on, for TTY stdout without NO_COLOR. */
+  color?: boolean;
 }
 
 function openInDefaultBrowser(filePath: string): void {
@@ -611,7 +614,7 @@ export async function runCli(
     } else {
       const writtenHtml = await writeHtmlFogMap(rootDir, report, htmlPath);
       if (openBrowser) openInDefaultBrowser(writtenHtml);
-      io.stdout(formatLevel1Summary(report));
+      io.stdout(io.color ? formatLevel1SummaryColor(report, writtenHtml) : formatLevel1Summary(report));
     }
 
     if (failOn === "none") return 0;
