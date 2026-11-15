@@ -68,6 +68,10 @@ _Avoid_: High-risk File（高危文件）, Bottleneck（瓶颈）
 定位到具体源码或文档文件与行区间的可操作信任缺口，包含确定性标识、证据事实、建议动作与可自动执行的验收条件。
 _Avoid_: Issue（问题）, Warning（警告）, Lint Error（静态检查错误）
 
+**Report Warning（报告警告）**:
+关于分析输入本身是否可信的提示，例如覆盖率报告缺失、早于源码或未匹配到任何源文件；不定位到代码行、不计分、不产生验证待办。
+_Avoid_: Finding（发现项）, Alert（告警）
+
 ## 度量与检验指标（Metrics & Verification）
 
 **Trust Score（信任分）**:
