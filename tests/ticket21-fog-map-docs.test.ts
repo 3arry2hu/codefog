@@ -178,11 +178,15 @@ describe("Ticket 21: Doc Layer in Interactive Fog Map (report.html) and PR Diff 
     expect(level3Html).toContain("README.md");
     expect(level3Html).toContain("Claims: 4");
     expect(level3Html).toContain('data-claims="4"');
-    expect(level3Html).toContain("flex:4 1");
     expect(level3Html).toContain("docs/guide.md");
     expect(level3Html).toContain("Claims: 2");
     expect(level3Html).toContain('data-claims="2"');
-    expect(level3Html).toContain("flex:2 1");
+    const tileArea = (docPath: string): number => {
+      const open = new RegExp(`<div class="tm-tile[^"]*" data-path="${docPath}"[^>]*>`).exec(level3Html)![0];
+      const [, w, h] = /width:([\d.]+)%;height:([\d.]+)%/.exec(open)!;
+      return Number(w) * Number(h);
+    };
+    expect(tileArea("README.md") / tileArea("docs/guide.md")).toBeCloseTo(2, 1);
   });
 
   it("renders Level 4 doc lines with 5-state highlighting, RETURNED badge (#BD4900) on fog-returned claims, referent file path, and referent lastModifiedCommit short SHA", async () => {

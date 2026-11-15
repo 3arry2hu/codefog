@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CODEFOG_COMMAND } from "./cli-command.js";
-import { STATE_COLORS } from "./scoring.js";
+import { STATE_COLORS, STATE_URGENCY_ORDER } from "./scoring.js";
+import { squarify, type TreemapRect } from "./treemap.js";
 import type {
   CodefogReport,
   DocClaim,
@@ -119,32 +120,146 @@ function renderModuleRowServer(m: ModuleSummary): string {
   );
 }
 
-function renderCodeTileServer(file: FileSummary): string {
-  const locWeight = Math.max(1, file.totalLoc);
-  const minH = Math.min(220, Math.max(76, 56 + locWeight * 8));
+const TREEMAP_WIDTH = 1000;
+const TREEMAP_CODE_HEIGHT = 600;
+const TREEMAP_DOC_HEIGHT = 400;
+const TREEMAP_HOTSPOT_COUNT = 5;
+const TREEMAP_LABEL_MIN_WIDTH = 100;
+const TREEMAP_LABEL_MIN_HEIGHT = 34;
+
+interface TreemapEntry {
+  path: string;
+  weight: number;
+  byState: LocByState;
+  riskScore: number;
+  sizeLabel: string;
+  sizeAttr: string;
+  rank?: number;
+}
+
+function escapeAttrServer(raw: string): string {
+  return escapeHtmlServer(raw).replace(/"/g, "&quot;");
+}
+
+function fmtNum(n: number, digits = 3): string {
+  return String(Number(n.toFixed(digits)));
+}
+
+function renderTreemapTileServer(rect: TreemapRect<TreemapEntry>, mapHeight: number): string {
+  const e = rect.item;
+  const small = rect.w < TREEMAP_LABEL_MIN_WIDTH || rect.h < TREEMAP_LABEL_MIN_HEIGHT;
+  const shares = STATE_URGENCY_ORDER.filter((s) => e.byState[s] > 0).map((s) => ({
+    state: s,
+    pct: (e.byState[s] / e.weight) * 100,
+  }));
+  const tooltip = [
+    e.path,
+    e.sizeLabel,
+    `Risk ${e.riskScore}`,
+    ...shares.map((s) => `${s.state} ${fmtNum(s.pct, 1)}%`),
+  ].join(" · ");
+  const classes = ["tm-tile", small ? "tm-small" : "", e.rank ? "tm-hotspot" : ""]
+    .filter(Boolean)
+    .join(" ");
+  const style =
+    `left:${fmtNum((rect.x / TREEMAP_WIDTH) * 100)}%;top:${fmtNum((rect.y / mapHeight) * 100)}%;` +
+    `width:${fmtNum((rect.w / TREEMAP_WIDTH) * 100)}%;height:${fmtNum((rect.h / mapHeight) * 100)}%`;
+  const segs = shares
+    .map((s) => `<i class="seg seg-${s.state}" style="flex-basis:${fmtNum(s.pct)}%"></i>`)
+    .join("");
+  const badges =
+    (e.rank ? `<span class="tm-rank">#${e.rank}</span>` : "") +
+    (e.byState["fog-returned"] > 0 ? '<span class="badge-returned">RETURNED</span>' : "");
   return (
-    `<div class="tile tile-${file.dominantState}" style="flex:${locWeight} 1 ${Math.min(340, 140 + locWeight * 12)}px;min-height:${minH}px" onclick="switchLevel(4, '${file.path}')">` +
-    `<div style="display:flex;justify-content:space-between;align-items:center">` +
-    `<strong>${file.path}</strong>` +
-    (file.dominantState === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : "") +
-    `</div>` +
-    `<div style="font-size:12px;margin-top:6px">LOC: ${file.totalLoc} · Unverified: ${file.unverifiedLoc} · Risk: ${file.riskScore}</div>` +
+    `<div class="${classes}" data-path="${escapeAttrServer(e.path)}" ${e.sizeAttr} title="${escapeAttrServer(tooltip)}" style="${style}" onclick="switchLevel(4, this.dataset.path)">` +
+    `<div class="tm-segs tm-segs-${rect.w >= rect.h ? "row" : "col"}">${segs}</div>` +
+    (small
+      ? ""
+      : `<div class="tm-label"><strong>${escapeHtmlServer(e.path)}</strong><span>${escapeHtmlServer(e.sizeLabel)} · Risk ${e.riskScore}</span></div>`) +
+    (badges ? `<div class="tm-badges">${badges}</div>` : "") +
     `</div>`
   );
 }
 
-function renderDocTileServer(docFile: DocFileSummary): string {
-  const claimWeight = Math.max(1, docFile.totalClaims);
-  const minH = Math.min(220, Math.max(76, 56 + claimWeight * 8));
+function renderTreemapServer(entries: TreemapEntry[], mapId: string, mapHeight: number): string {
+  const rects = squarify(
+    entries.map((e) => ({ weight: e.weight, item: e })),
+    TREEMAP_WIDTH,
+    mapHeight,
+  );
   return (
-    `<div class="tile tile-${docFile.dominantState}" data-claims="${docFile.totalClaims}" style="flex:${claimWeight} 1 ${Math.min(340, 140 + claimWeight * 12)}px;min-height:${minH}px" onclick="switchLevel(4, '${docFile.path}')">` +
-    `<div style="display:flex;justify-content:space-between;align-items:center">` +
-    `<strong>${docFile.path}</strong>` +
-    (docFile.dominantState === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : "") +
-    `</div>` +
-    `<div style="font-size:12px;margin-top:6px">Claims: ${docFile.totalClaims} · Unverified: ${docFile.unverifiedClaims} · Risk: ${docFile.riskScore}</div>` +
+    `<div class="tm-canvas" data-map="${mapId}" style="aspect-ratio:${TREEMAP_WIDTH} / ${mapHeight}">` +
+    rects.map((r) => renderTreemapTileServer(r, mapHeight)).join("") +
     `</div>`
   );
+}
+
+function codeTreemapEntries(files: FileSummary[]): TreemapEntry[] {
+  const entries: TreemapEntry[] = files
+    .filter((f) => f.totalLoc > 0 && f.locByState.verified < f.totalLoc)
+    .map((f) => ({
+      path: f.path,
+      weight: f.totalLoc,
+      byState: f.locByState,
+      riskScore: f.riskScore,
+      sizeLabel: `${f.totalLoc} LOC`,
+      sizeAttr: `data-loc="${f.totalLoc}"`,
+    }));
+  [...entries]
+    .filter((e) => e.riskScore > 0)
+    .sort((a, b) => b.riskScore - a.riskScore || a.path.localeCompare(b.path))
+    .slice(0, TREEMAP_HOTSPOT_COUNT)
+    .forEach((e, idx) => {
+      e.rank = idx + 1;
+    });
+  return entries;
+}
+
+function docTreemapEntries(docFiles: DocFileSummary[]): TreemapEntry[] {
+  return docFiles
+    .filter((d) => d.totalClaims > 0 && d.claimsByState.verified < d.totalClaims)
+    .map((d) => ({
+      path: d.path,
+      weight: d.totalClaims,
+      byState: d.claimsByState,
+      riskScore: d.riskScore,
+      sizeLabel: `Claims: ${d.totalClaims}`,
+      sizeAttr: `data-claims="${d.totalClaims}"`,
+    }));
+}
+
+function renderLevel3Server(report: CodefogReport, hasDocs: boolean): string {
+  const codeEntries = codeTreemapEntries(report.files);
+  const zeroLocCount = report.files.filter((f) => f.totalLoc === 0).length;
+  const verifiedCount = report.files.filter(
+    (f) => f.totalLoc > 0 && f.locByState.verified === f.totalLoc,
+  ).length;
+  const codeNote =
+    `${verifiedCount} verified files collapsed` +
+    (zeroLocCount > 0 ? ` · ${zeroLocCount} zero-LOC files not shown` : "");
+
+  let docPanel = "";
+  if (hasDocs) {
+    const docFiles = report.docFiles ?? [];
+    const docEntries = docTreemapEntries(docFiles);
+    const docVerified = docFiles.filter(
+      (d) => d.totalClaims > 0 && d.claimsByState.verified === d.totalClaims,
+    ).length;
+    const docEmpty = docFiles.filter((d) => d.totalClaims === 0).length;
+    docPanel = `
+      <div class="panel">
+        <h2>Doc Fog Map <span class="panel-sub">Area = claims · fill = evidence mix</span></h2>
+        ${docEntries.length > 0 ? renderTreemapServer(docEntries, "docs", TREEMAP_DOC_HEIGHT) : '<div class="tm-empty">No doc files with unverified claims.</div>'}
+        <p class="tm-note">${docVerified} verified doc files collapsed${docEmpty > 0 ? ` · ${docEmpty} doc files without claims not shown` : ""}</p>
+      </div>`;
+  }
+
+  return `
+      <div class="panel">
+        <h2>File Fog Map <span class="panel-sub">Area = executable lines · fill = evidence mix · #1–#${TREEMAP_HOTSPOT_COUNT} = top hotspots</span></h2>
+        ${codeEntries.length > 0 ? renderTreemapServer(codeEntries, "code", TREEMAP_CODE_HEIGHT) : '<div class="tm-empty">No files with unverified code.</div>'}
+        <p class="tm-note">${codeNote}</p>
+      </div>${docPanel}`;
 }
 
 export function renderHtmlFogMap(report: CodefogReport): string {
@@ -157,12 +272,6 @@ export function renderHtmlFogMap(report: CodefogReport): string {
   const hasExternal = report.external !== undefined || report.libyear !== undefined;
   const serverModulesHtml = hasDocs
     ? report.modules.map((m) => renderModuleRowServer(m)).join("")
-    : "";
-  const serverTilesHtml = hasDocs
-    ? [
-        ...report.files.map((f) => renderCodeTileServer(f)),
-        ...(report.docFiles ?? []).map((df) => renderDocTileServer(df)),
-      ].join("")
     : "";
   const serverDocSourceRowsHtml = hasDocs
     ? (report.docFiles ?? []).map((df) => renderDocFileRowsServer(df)).join("")
@@ -361,47 +470,83 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     }
     .bar-seg-weak { background: ${STATE_COLORS["weak-evidence"]}; }
     .bar-seg-verified { background: ${STATE_COLORS.verified}; }
-    .treemap-wrap {
-      display: grid;
-      grid-template-columns: 1fr 220px;
-      gap: 14px;
-    }
-    .treemap-tiles {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      align-items: stretch;
-    }
-    .tile {
-      border-radius: 8px;
-      padding: 12px;
-      min-width: 140px;
-      cursor: pointer;
-      border: 1px solid rgba(15, 23, 42, 0.12);
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-    }
-    .tile-fog-returned { background: ${STATE_COLORS["fog-returned"]}; color: #FFFFFF; }
-    .tile-fog { background: ${STATE_COLORS.fog}; color: #FFFFFF; }
-    .tile-self-proof-fog {
-      background: repeating-linear-gradient(-45deg, ${STATE_COLORS["self-proof-fog"]}, ${STATE_COLORS["self-proof-fog"]} 6px, #5B7597 6px, #5B7597 12px);
-      color: #FFFFFF;
-    }
-    .tile-weak-evidence { background: ${STATE_COLORS["weak-evidence"]}; color: #0F172A; }
-    .tile-verified { background: ${STATE_COLORS.verified}; color: #475569; }
-    .collapsed-zone {
-      background: ${STATE_COLORS.verified};
-      border: 1px dashed #94A3B8;
-      border-radius: 8px;
-      padding: 14px;
-      color: #475569;
+    .panel-sub {
       font-size: 12px;
+      font-weight: 400;
+      color: var(--text-muted);
+    }
+    .tm-canvas {
+      position: relative;
+      width: 100%;
+      background: var(--bg-card);
+    }
+    .tm-tile {
+      position: absolute;
+      border: 2px solid var(--bg-card);
+      border-radius: 5px;
+      overflow: hidden;
+      cursor: pointer;
+    }
+    .tm-tile:hover { border-color: var(--text-secondary); }
+    .tm-tile.tm-hotspot { border: 3px solid var(--text-primary); }
+    .tm-segs { position: absolute; inset: 0; display: flex; }
+    .tm-segs-row { flex-direction: row; }
+    .tm-segs-col { flex-direction: column; }
+    .seg { display: block; flex-grow: 0; flex-shrink: 0; }
+    .seg-fog-returned { background: ${STATE_COLORS["fog-returned"]}; }
+    .seg-fog { background: ${STATE_COLORS.fog}; }
+    .seg-self-proof-fog {
+      background: repeating-linear-gradient(-45deg, ${STATE_COLORS["self-proof-fog"]}, ${STATE_COLORS["self-proof-fog"]} 4px, #587294 4px, #587294 8px);
+    }
+    .seg-weak-evidence { background: ${STATE_COLORS["weak-evidence"]}; }
+    .seg-verified { background: ${STATE_COLORS.verified}; }
+    .tm-label {
+      position: absolute;
+      left: 5px;
+      top: 5px;
+      max-width: calc(100% - 10px);
+      background: rgba(255, 255, 255, 0.9);
+      color: var(--text-primary);
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .tm-label strong {
+      display: block;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tm-label span { color: var(--text-secondary); white-space: nowrap; }
+    .tm-badges {
+      position: absolute;
+      right: 5px;
+      bottom: 5px;
       display: flex;
-      flex-direction: column;
-      justify-content: center;
+      gap: 4px;
       align-items: center;
-      text-align: center;
+    }
+    .tm-rank {
+      background: var(--text-primary);
+      color: var(--bg-card);
+      font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+    .tm-small .tm-badges { right: 2px; bottom: 2px; }
+    .tm-small .tm-rank { font-size: 9px; padding: 0 3px; }
+    .tm-small .badge-returned { font-size: 0; width: 8px; height: 8px; padding: 0; border-radius: 50%; }
+    .tm-note { margin: 10px 0 0; font-size: 12px; color: var(--text-muted); }
+    .tm-empty { padding: 24px; text-align: center; color: var(--text-muted); font-size: 13px; }
+    @media (max-width: 640px) {
+      .tm-canvas { aspect-ratio: 1 / 1 !important; }
+      .tm-label { display: none; }
+      .tm-badges { right: 2px; bottom: 2px; }
+      .tm-rank { font-size: 9px; padding: 0 3px; }
+      .tm-tile .badge-returned { font-size: 0; width: 8px; height: 8px; padding: 0; border-radius: 50%; }
     }
     .source-table {
       width: 100%;
@@ -563,17 +708,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     </section>
 
     <!-- Level 3: File Map Treemap -->
-    <section id="view-level-3" class="level-section hidden">
-      <div class="panel">
-        <h2>File Fog Map (2D Area-Proportional Treemap)</h2>
-        <div class="treemap-wrap">
-          <div id="l3-tiles" class="treemap-tiles">${serverTilesHtml}</div>
-          <div class="collapsed-zone">
-            <strong>${verifiedCollapsedTotal} verified files collapsed</strong>
-            <span style="margin-top:4px">Muted ${STATE_COLORS.verified} background; zero action needed</span>
-          </div>
-        </div>
-      </div>
+    <section id="view-level-3" class="level-section hidden">${renderLevel3Server(report, hasDocs)}
     </section>
 
     <!-- Level 4: Three-Column Source & Evidence View -->
@@ -685,35 +820,9 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         '</div>'
       ).join("");
 
-      document.getElementById("l2-submodules").innerHTML = l1Mod.innerHTML;
-
-      // Area-proportional Treemap tiles: flex-grow and min-height scale with file.totalLoc${hasDocs ? " (or docFile.totalClaims)" : ""}
-      const l3Tiles = document.getElementById("l3-tiles");
-      ${hasDocs ? "const codeTilesHtml =" : "l3Tiles.innerHTML ="} REPORT.files.map(file => {
-        const locWeight = Math.max(1, file.totalLoc);
-        const minH = Math.min(220, Math.max(76, 56 + locWeight * 8));
-        return '<div class="tile tile-' + file.dominantState + '" style="flex:' + locWeight + ' 1 ' + Math.min(340, 140 + locWeight * 12) + 'px;min-height:' + minH + 'px" onclick="switchLevel(4, \\'' + file.path + '\\')">' +
-          '<div style="display:flex;justify-content:space-between;align-items:center">' +
-            '<strong>' + file.path + '</strong>' +
-            (file.dominantState === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : '') +
-          '</div>' +
-          '<div style="font-size:12px;margin-top:6px">LOC: ' + file.totalLoc + ' · Unverified: ' + file.unverifiedLoc + ' · Risk: ' + file.riskScore + '</div>' +
-        '</div>';
-      }).join("");${
+      document.getElementById("l2-submodules").innerHTML = l1Mod.innerHTML;${
         hasDocs
           ? `
-      const docTilesHtml = (REPORT.docFiles || []).map(docFile => {
-        const claimWeight = Math.max(1, docFile.totalClaims);
-        const minH = Math.min(220, Math.max(76, 56 + claimWeight * 8));
-        return '<div class="tile tile-' + docFile.dominantState + '" data-claims="' + docFile.totalClaims + '" style="flex:' + claimWeight + ' 1 ' + Math.min(340, 140 + claimWeight * 12) + 'px;min-height:' + minH + 'px" onclick="switchLevel(4, \\'' + docFile.path + '\\')">' +
-          '<div style="display:flex;justify-content:space-between;align-items:center">' +
-            '<strong>' + docFile.path + '</strong>' +
-            (docFile.dominantState === "fog-returned" ? '<span class="badge-returned">RETURNED</span>' : '') +
-          '</div>' +
-          '<div style="font-size:12px;margin-top:6px">Claims: ' + docFile.totalClaims + ' · Unverified: ' + docFile.unverifiedClaims + ' · Risk: ' + docFile.riskScore + '</div>' +
-        '</div>';
-      }).join("");
-      l3Tiles.innerHTML = codeTilesHtml + docTilesHtml;
 
       const initialFile = (REPORT.docFiles && REPORT.docFiles[0] && REPORT.docFiles[0].path) || (REPORT.files[0] && REPORT.files[0].path);
       if (initialFile) {
