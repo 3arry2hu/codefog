@@ -154,6 +154,7 @@ export interface DiffComparison {
   alertHeadline: string;
   fogReturnedFiles: string[];
   weakenedFiles: string[];
+  changedFiles?: string[];
   beforeSummary: {
     trustScore: number;
     docTrustScore?: number;
@@ -175,6 +176,8 @@ export interface DiffComparison {
       totalLoc: number;
       dominantState: EvidenceState;
       riskScore: number;
+      trustScore?: number;
+      locByState?: LocByState;
     }>;
   };
   newDocFogReturnedClaims?: DocClaim[];

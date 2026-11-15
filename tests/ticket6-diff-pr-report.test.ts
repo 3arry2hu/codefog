@@ -364,6 +364,6 @@ describe("Ticket 6: Incremental --diff and PR Before/After Comparison Report (--
     expect(receiptSummary.diffStatus).toBe("improved");
 
     const md = await fs.readFile(path.join(tmpDir, ".codefog", "pr-comment.md"), "utf8");
-    expect(md).toContain("40 → **100** (+60)");
+    expect(md).toContain("| **Trust Score** | 40/100 | **100/100** | +60 |");
   });
 });

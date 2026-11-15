@@ -96,8 +96,7 @@ describe("Ticket 35: --diff marks coverage-derived before-metrics unavailable wh
     ]) {
       const cells = metricRow(md, label).split("|").map((c) => c.trim());
       expect(cells[2]).toBe("—");
-      expect(cells[3]).not.toContain("→");
-      expect(cells[3]).toContain("—");
+      expect(cells[4]).toBe("—");
     }
     expect(md).toContain(
       "Base coverage unavailable: coverage-derived before-metrics are not compared.",

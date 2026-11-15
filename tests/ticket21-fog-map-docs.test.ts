@@ -452,7 +452,7 @@ describe("Ticket 21: Doc Layer in Interactive Fog Map (report.html) and PR Diff 
       "utf8",
     );
     expect(prCommentDocs).toContain("Doc Trust Score");
-    expect(prCommentDocs).toContain("60 → **30** (-30)");
+    expect(prCommentDocs).toContain("| **Doc Trust Score** | 60/100 | **30/100** | -30 |");
     expect(prCommentDocs).toContain("README.md:5");
     expect(prCommentDocs).toContain("`calculateFee`");
     expect(prCommentDocs).toContain("src/fee.ts");
