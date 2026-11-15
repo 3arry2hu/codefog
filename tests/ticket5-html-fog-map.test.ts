@@ -150,7 +150,7 @@ describe("Ticket 5: Four-Level Progressive Disclosure Interactive Fog Map (.code
     expect(html).not.toContain("externalByLine");
     expect(html).not.toContain("docClaims");
     expect(html).not.toContain("Doc Trust Score");
-    expect(html).toContain("'<div class=\"module-row\" onclick=\"switchLevel(2)\">' +");
+    expect(html).toContain('<div class="module-row" data-module="src" onclick="switchLevel(2)">');
     expect(html).toContain(
       "return '<tr class=\"line-' + st + '\"><td class=\"ln-col\">' + ln + '</td><td>' + escaped + '</td></tr>' + mutantRows;",
     );

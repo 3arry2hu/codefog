@@ -402,7 +402,7 @@ export function renderPrCommentMarkdown(report: CodefogReport): string {
     : report.findings;
 
   if (codeFindings.length > 0) {
-    lines.push(`### Top Fog Hotspots & Agent Findings`, "");
+    lines.push(`### Top Findings`, "");
     for (const f of codeFindings.slice(0, 5)) {
       lines.push(
         `- **[${f.id}] \`${f.location.file}:${f.location.startLine}-${f.location.endLine}\` (\`${f.title}\`)** — \`${f.state}\` (Risk **${f.riskScore}**)`,

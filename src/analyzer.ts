@@ -717,6 +717,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         pseudoTestedMethods: totalPseudoTestedMethods,
         contestedOracles: totalContestedOracles,
         coverageAvailable,
+        mutationAvailable: strykerReport !== undefined,
       },
       locByState: repoLocByState,
     },

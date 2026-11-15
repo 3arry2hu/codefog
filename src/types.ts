@@ -279,6 +279,7 @@ export interface CodefogReport {
       pseudoTestedMethods: number;
       contestedOracles: number;
       coverageAvailable?: boolean;
+      mutationAvailable?: boolean;
     };
     locByState: LocByState;
   };

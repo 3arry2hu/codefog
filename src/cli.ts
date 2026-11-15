@@ -113,7 +113,7 @@ export function formatLevel1Summary(report: CodefogReport): string {
   }
 
   if (findings.length > 0) {
-    lines.push("", "Top Fog Hotspots & Findings:");
+    lines.push("", "Top Findings:");
     for (const f of findings.slice(0, 5)) {
       lines.push(
         `  - [${f.id}] ${f.location.file}:${f.location.startLine}-${f.location.endLine} (${f.title}) | ${f.state} | risk ${f.riskScore}`,

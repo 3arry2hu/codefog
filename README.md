@@ -154,7 +154,7 @@ Modules by Fog:
   - src/core: Trust 86/100 | Risk 4.1 | Fog=12 Weak=18 Verified=320
   - docs: Trust 81/100 | Risk 3.2 | Fog=9 Weak=21 Verified=31
 
-Top Fog Hotspots & Findings:
+Top Findings:
   - [CF-8A2F] internal/settlement/ledger.go:42-89 (ReconcileBatch) | fog-returned | risk 7.8
   - [CF-3C19] src/core/discount.ts:15-48 (calculateTierDiscount) | weak-evidence | risk 5.4
 ```
