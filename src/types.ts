@@ -159,6 +159,7 @@ export interface DiffComparison {
     docTrustScore?: number;
     totalDocClaims?: number;
     docClaimsByState?: LocByState;
+    coverageAvailable?: boolean;
     metrics: {
       lineCoveragePct: number;
       branchCoveragePct: number;
@@ -166,6 +167,7 @@ export interface DiffComparison {
       mutationScorePct: number;
       pseudoTestedMethods: number;
       contestedOracles: number;
+      coverageAvailable?: boolean;
     };
     files: Array<{
       path: string;
@@ -276,6 +278,7 @@ export interface CodefogReport {
       mutationScorePct: number;
       pseudoTestedMethods: number;
       contestedOracles: number;
+      coverageAvailable?: boolean;
     };
     locByState: LocByState;
   };

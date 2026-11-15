@@ -162,11 +162,15 @@ export async function computeDiffComparison(
   const coverageUpEvidenceDown =
     lineCovDelta >= 0 && (checkedCovDelta < 0 || trustDelta < 0);
 
+  const baseCoverageAvailable = baseReport.summary.metrics.coverageAvailable !== false;
+
   let alertHeadline: string;
   if (coverageUpEvidenceDown) {
     alertHeadline = `Coverage up, evidence down: Line coverage changed by ${lineCovDelta >= 0 ? "+" : ""}${lineCovDelta.toFixed(1)}%, while Checked Coverage changed by ${checkedCovDelta.toFixed(1)}% (Trust Score ${baseReport.summary.trustScore} -> ${currentReport.summary.trustScore}).`;
   } else if (fogReturnedFiles.length > 0 || weakenedFiles.length > 0) {
     alertHeadline = `Fog Returned detected against ${baseRef}: ${fogReturnedFiles.length} file(s) with Fog Returned, ${weakenedFiles.length} weakened file(s).`;
+  } else if (!baseCoverageAvailable) {
+    alertHeadline = `No Fog Returned or weakened files against ${baseRef}. ${baseRef} has no coverage report, so coverage-derived metrics are not compared.`;
   } else {
     alertHeadline = `Evidence held steady or improved against ${baseRef} (Trust Score ${baseReport.summary.trustScore} -> ${currentReport.summary.trustScore}).`;
   }
@@ -205,6 +209,7 @@ export async function computeDiffComparison(
             docClaimsByState: baseReport.summary.docClaimsByState,
           }
         : {}),
+      coverageAvailable: baseCoverageAvailable,
       metrics: baseReport.summary.metrics,
       files: baseReport.files.map((f) => ({
         path: f.path,
@@ -351,6 +356,21 @@ export function renderPrCommentMarkdown(report: CodefogReport): string {
     return `${prevVal}${suffix} → **${nowVal}${suffix}** (${sign}${suffix})`;
   };
 
+  const baseCoverageUnavailable = before?.coverageAvailable === false;
+  const metricRow = (
+    label: string,
+    nowVal: number,
+    prevVal: number | undefined,
+    cellSuffix: string,
+    coverageDerived: boolean,
+    deltaSuffix = cellSuffix,
+  ): string => {
+    if (coverageDerived && baseCoverageUnavailable) {
+      return `| **${label}** | — | **${nowVal}${cellSuffix}** (Δ —) |`;
+    }
+    return `| **${label}** | ${prevVal ?? nowVal}${cellSuffix} | ${fmtDelta(nowVal, prevVal, deltaSuffix)} |`;
+  };
+
   const lines: string[] = [
     `## 🌫️ codefog PR Evidence Report`,
     "",
@@ -362,17 +382,18 @@ export function renderPrCommentMarkdown(report: CodefogReport): string {
     "",
     `| Metric | Before (${diff?.baseRef ?? "base"}) | After (PR) / Delta |`,
     `| :--- | :--- | :--- |`,
-    `| **Trust Score** | ${before?.trustScore ?? cur.trustScore}/100 | ${fmtDelta(cur.trustScore, before?.trustScore)} |`,
+    metricRow("Trust Score", cur.trustScore, before?.trustScore, "/100", true, ""),
     ...(hasDocs
-      ? [
-          `| **Doc Trust Score** | ${before?.docTrustScore ?? cur.docTrustScore}/100 | ${fmtDelta(cur.docTrustScore!, before?.docTrustScore)} |`,
-        ]
+      ? [metricRow("Doc Trust Score", cur.docTrustScore!, before?.docTrustScore, "/100", false, "")]
       : []),
-    `| **Line Coverage** | ${before?.metrics.lineCoveragePct ?? cur.metrics.lineCoveragePct}% | ${fmtDelta(cur.metrics.lineCoveragePct, before?.metrics.lineCoveragePct, "%")} |`,
-    `| **Branch Coverage** | ${before?.metrics.branchCoveragePct ?? cur.metrics.branchCoveragePct}% | ${fmtDelta(cur.metrics.branchCoveragePct, before?.metrics.branchCoveragePct, "%")} |`,
-    `| **Checked Coverage** | ${before?.metrics.checkedCoveragePct ?? cur.metrics.checkedCoveragePct}% | ${fmtDelta(cur.metrics.checkedCoveragePct, before?.metrics.checkedCoveragePct, "%")} |`,
-    `| **Mutation Score** | ${before?.metrics.mutationScorePct ?? cur.metrics.mutationScorePct}% | ${fmtDelta(cur.metrics.mutationScorePct, before?.metrics.mutationScorePct, "%")} |`,
-    `| **Pseudo-tested Methods** | ${before?.metrics.pseudoTestedMethods ?? cur.metrics.pseudoTestedMethods} | ${fmtDelta(cur.metrics.pseudoTestedMethods, before?.metrics.pseudoTestedMethods)} |`,
+    metricRow("Line Coverage", cur.metrics.lineCoveragePct, before?.metrics.lineCoveragePct, "%", true),
+    metricRow("Branch Coverage", cur.metrics.branchCoveragePct, before?.metrics.branchCoveragePct, "%", true),
+    metricRow("Checked Coverage", cur.metrics.checkedCoveragePct, before?.metrics.checkedCoveragePct, "%", true),
+    metricRow("Mutation Score", cur.metrics.mutationScorePct, before?.metrics.mutationScorePct, "%", true),
+    metricRow("Pseudo-tested Methods", cur.metrics.pseudoTestedMethods, before?.metrics.pseudoTestedMethods, "", true),
+    ...(baseCoverageUnavailable
+      ? ["", "_Base coverage unavailable: coverage-derived before-metrics are not compared._"]
+      : []),
     "",
   ];
 

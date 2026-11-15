@@ -459,6 +459,7 @@ export interface LoadedCoverage {
   records: Map<string, LcovFileRecord>;
   mtimeMs?: number;
   warnings: string[];
+  coverageAvailable: boolean;
 }
 
 export async function loadCoverageRecords(
@@ -571,5 +572,10 @@ export async function loadCoverageRecords(
     );
   }
 
-  return { records: merged, mtimeMs: latestMtimeMs, warnings };
+  return {
+    records: merged,
+    mtimeMs: latestMtimeMs,
+    warnings,
+    coverageAvailable: reportedFileCount > 0,
+  };
 }

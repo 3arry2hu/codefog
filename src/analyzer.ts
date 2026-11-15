@@ -182,6 +182,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     records: lcovRecords,
     mtimeMs: lcovMtimeMs,
     warnings: coverageWarnings,
+    coverageAvailable,
   } = await loadCoverageRecords(
     rootDir,
     options.coveragePath ?? options.lcovPath,
@@ -715,6 +716,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         mutationScorePct: strykerReport?.mutationScorePct ?? 0,
         pseudoTestedMethods: totalPseudoTestedMethods,
         contestedOracles: totalContestedOracles,
+        coverageAvailable,
       },
       locByState: repoLocByState,
     },
