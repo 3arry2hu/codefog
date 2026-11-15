@@ -383,39 +383,102 @@ export function renderHtmlFogMap(report: CodefogReport): string {
   <title>codefog · ${report.repository.name} (${report.repository.branch} @ ${report.repository.commit})</title>
   <style>
     :root {
+      color-scheme: light dark;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sticky-offset: 88px;
       --bg-canvas: #F8FAFC;
       --bg-card: #FFFFFF;
+      --bg-subtle: #F1F5F9;
       --border-subtle: #E2E8F0;
       --border-strong: #CBD5E1;
-      --sticky-offset: 88px;
       --text-primary: #0F172A;
       --text-secondary: #475569;
       --text-muted: #64748B;
-      /* Five-State Fog-First OKLCH Slate Scale + Fog Returned Warning Orange */
+      --header-bg: #0F172A;
+      --header-text: #F8FAFC;
+      --header-muted: #CBD5E1;
+      --header-pill: #1E293B;
+      --swatch-ring: rgba(255, 255, 255, 0.5);
+      --tile-label-bg: rgba(255, 255, 255, 0.9);
+      /* Five-state scale (ADR-0001): Verified recedes into the canvas, Fog Returned is the only saturated hue */
       --state-verified: ${STATE_COLORS.verified};
       --state-weak: ${STATE_COLORS["weak-evidence"]};
       --state-self-proof: ${STATE_COLORS["self-proof-fog"]};
+      --state-self-proof-hatch: #587294;
       --state-fog: ${STATE_COLORS.fog};
       --state-returned: ${STATE_COLORS["fog-returned"]};
+      --on-returned: #FFFFFF;
+      --on-fog: #FFFFFF;
+      --on-self-proof: #FFFFFF;
+      --tint-returned: rgba(189, 73, 0, 0.08);
+      --tint-line-returned: rgba(189, 73, 0, 0.16);
+      --tint-line-fog: rgba(29, 54, 86, 0.14);
+      --tint-line-self-proof: rgba(110, 136, 170, 0.10);
+      --tint-line-weak: rgba(188, 204, 226, 0.16);
+      --mutant-bg: #FFF7ED;
+      --mutant-text: #9A3412;
+    }
+    @media (prefers-color-scheme: dark) {
+      /* ADR-0006: the lightness ladder inverts so Fog is brightest and Verified sits next to the canvas */
+      :root {
+        --bg-canvas: #0E1A2B;
+        --bg-card: #112036;
+        --bg-subtle: #172A44;
+        --border-subtle: #1F3352;
+        --border-strong: #2E4669;
+        --text-primary: #E6ECF4;
+        --text-secondary: #A9B8CC;
+        --text-muted: #7D8FA8;
+        --header-bg: #08111E;
+        --header-text: #F2F5FA;
+        --header-muted: #A9B8CC;
+        --header-pill: #172A44;
+        --swatch-ring: rgba(255, 255, 255, 0.25);
+        --tile-label-bg: rgba(14, 26, 43, 0.88);
+        --state-verified: #15243A;
+        --state-weak: #2F4868;
+        --state-self-proof: #6E88AA;
+        --state-self-proof-hatch: #89A0BE;
+        --state-fog: #C3D0E0;
+        --state-returned: #FF8A3D;
+        --on-returned: #0E1A2B;
+        --on-fog: #0E1A2B;
+        --on-self-proof: #0E1A2B;
+        --tint-returned: rgba(255, 138, 61, 0.10);
+        --tint-line-returned: rgba(255, 138, 61, 0.16);
+        --tint-line-fog: rgba(195, 208, 224, 0.13);
+        --tint-line-self-proof: rgba(110, 136, 170, 0.14);
+        --tint-line-weak: rgba(47, 72, 104, 0.28);
+        --mutant-bg: rgba(255, 138, 61, 0.12);
+        --mutant-text: #FFB27A;
+      }
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      font-family: var(--font-sans);
+      font-variant-numeric: tabular-nums;
       background: var(--bg-canvas);
       color: var(--text-primary);
       line-height: 1.5;
     }
+    .ls-label, .metric-label, .kpi-label {
+      font: 700 10.5px/1.4 var(--font-mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
     header {
-      background: #0F172A;
-      color: #F8FAFC;
+      background: var(--header-bg);
+      color: var(--header-text);
       padding: 14px 24px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       flex-wrap: wrap;
       gap: 10px 24px;
-      border-bottom: 1px solid #1E293B;
+      border-bottom: 1px solid var(--header-pill);
     }
     .brand {
       display: flex;
@@ -426,11 +489,11 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       letter-spacing: -0.01em;
     }
     .repo-pill {
-      background: #1E293B;
-      color: #CBD5E1;
+      background: var(--header-pill);
+      color: var(--header-muted);
       padding: 3px 10px;
       border-radius: 999px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-family: var(--font-mono);
       font-size: 12px;
     }
     .legend {
@@ -438,8 +501,10 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       align-items: center;
       flex-wrap: wrap;
       gap: 6px 14px;
-      font-size: 12px;
-      color: #CBD5E1;
+      font: 700 10.5px/1.4 var(--font-mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--header-muted);
     }
     .swatch {
       display: inline-block;
@@ -448,24 +513,23 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       border-radius: 3px;
       vertical-align: middle;
       margin-right: 5px;
-      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5);
+      box-shadow: 0 0 0 1px var(--swatch-ring);
     }
-    .swatch-verified { background: ${STATE_COLORS.verified}; }
-    .swatch-weak { background: ${STATE_COLORS["weak-evidence"]}; }
+    .swatch-verified { background: var(--state-verified); }
+    .swatch-weak { background: var(--state-weak); }
     .swatch-self-proof {
-      background: repeating-linear-gradient(-45deg, ${STATE_COLORS["self-proof-fog"]}, ${STATE_COLORS["self-proof-fog"]} 3px, #587294 3px, #587294 6px);
+      background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 3px, var(--state-self-proof-hatch) 3px 6px);
     }
-    .swatch-fog { background: ${STATE_COLORS.fog}; }
-    .swatch-returned { background: ${STATE_COLORS["fog-returned"]}; }
+    .swatch-fog { background: var(--state-fog); }
+    .swatch-returned { background: var(--state-returned); }
     .badge-returned {
       display: inline-block;
-      background: ${STATE_COLORS["fog-returned"]};
-      color: #FFFFFF;
-      font-weight: 700;
-      font-size: 10px;
-      padding: 1px 6px;
+      background: var(--state-returned);
+      color: var(--on-returned);
+      font: 700 10px/1.5 var(--font-mono);
+      padding: 0 6px;
       border-radius: 4px;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.08em;
     }
     .sticky-top {
       position: sticky;
@@ -481,7 +545,6 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       gap: 20px;
       font-size: 13px;
     }
-    .ls-label { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
     .ls-bar { flex: 1; max-width: 360px; }
     .ls-bar .stacked-bar { margin-top: 0; height: 8px; }
     .nav-levels {
@@ -493,8 +556,8 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       flex-wrap: wrap;
     }
     .nav-btn {
-      background: #F1F5F9;
-      border: 1px solid #CBD5E1;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-strong);
       color: var(--text-primary);
       padding: 6px 14px;
       border-radius: 6px;
@@ -503,9 +566,9 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       cursor: pointer;
     }
     .nav-btn.active {
-      background: ${STATE_COLORS.fog};
-      color: #FFFFFF;
-      border-color: ${STATE_COLORS.fog};
+      background: var(--state-fog);
+      color: var(--on-fog);
+      border-color: var(--state-fog);
     }
     main {
       max-width: 1400px;
@@ -541,24 +604,17 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       margin-bottom: 4px;
     }
     .metric { display: flex; align-items: baseline; gap: 8px; }
-    .metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
     .metric-val { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
     .metric-na .metric-val { color: var(--text-muted); font-weight: 400; }
     .metric-na { cursor: help; }
     .report-warning {
-      background: rgba(189, 73, 0, 0.08);
-      border: 1px solid ${STATE_COLORS["fog-returned"]};
+      background: var(--tint-returned);
+      border: 1px solid var(--state-returned);
       border-radius: 8px;
       padding: 10px 14px;
       margin-bottom: 12px;
       font-size: 13px;
       white-space: pre-wrap;
-    }
-    .kpi-label {
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--text-muted);
     }
     .grid-2col {
       display: grid;
@@ -593,30 +649,30 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       margin-bottom: 10px;
       cursor: pointer;
     }
-    .module-row:hover { border-color: ${STATE_COLORS["self-proof-fog"]}; }
+    .module-row:hover { border-color: var(--state-self-proof); }
     .module-head { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; }
-    .module-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-    .module-meta { font-size: 12px; font-weight: 400; color: var(--text-secondary); font-family: inherit; font-variant-numeric: tabular-nums; }
+    .module-path { font-family: var(--font-mono); font-size: 13px; }
+    .module-meta { font-size: 12px; font-weight: 400; color: var(--text-secondary); font-family: inherit; }
     .module-states { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
     .state-chip {
       display: inline-block;
       flex: none;
       min-width: 74px;
       text-align: center;
-      font: 700 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: 0.06em;
+      font: 700 10px/1.6 var(--font-mono);
+      letter-spacing: 0.08em;
       padding: 0 6px;
       border-radius: 4px;
       border: 1px solid transparent;
     }
-    .chip-fog-returned { background: ${STATE_COLORS["fog-returned"]}; color: #FFFFFF; }
-    .chip-fog { background: ${STATE_COLORS.fog}; color: #FFFFFF; }
+    .chip-fog-returned { background: var(--state-returned); color: var(--on-returned); }
+    .chip-fog { background: var(--state-fog); color: var(--on-fog); }
     .chip-self-proof-fog {
-      background: repeating-linear-gradient(-45deg, ${STATE_COLORS["self-proof-fog"]}, ${STATE_COLORS["self-proof-fog"]} 3px, #587294 3px, #587294 6px);
-      color: #FFFFFF;
+      background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 3px, var(--state-self-proof-hatch) 3px 6px);
+      color: var(--on-self-proof);
     }
-    .chip-weak-evidence { background: ${STATE_COLORS["weak-evidence"]}; color: var(--text-primary); }
-    .chip-verified { background: ${STATE_COLORS.verified}; color: var(--text-secondary); border-color: var(--border-subtle); }
+    .chip-weak-evidence { background: var(--state-weak); color: var(--text-primary); }
+    .chip-verified { background: var(--state-verified); color: var(--text-secondary); border-color: var(--border-subtle); }
     .chip-contested { background: transparent; color: var(--text-primary); border-color: var(--text-secondary); min-width: 0; }
     .tf-row {
       display: flex;
@@ -629,8 +685,8 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     .tf-row:hover { background: var(--bg-canvas); }
     .tf-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
     .tf-symbol, .tf-loc { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .tf-symbol { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 600; }
-    .tf-loc { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tf-symbol { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+    .tf-loc { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
     .tf-risk { flex: none; display: flex; align-items: center; gap: 6px; width: 92px; }
     .risk-bar { flex: 1; height: 6px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; }
     .risk-bar i { display: block; height: 100%; background: var(--text-secondary); }
@@ -653,16 +709,16 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       height: 12px;
       border-radius: 6px;
       overflow: hidden;
-      background: ${STATE_COLORS.verified};
+      background: var(--state-verified);
       margin-top: 8px;
     }
-    .bar-seg-returned { background: ${STATE_COLORS["fog-returned"]}; }
-    .bar-seg-fog { background: ${STATE_COLORS.fog}; }
+    .bar-seg-returned { background: var(--state-returned); }
+    .bar-seg-fog { background: var(--state-fog); }
     .bar-seg-self-proof {
-      background: repeating-linear-gradient(-45deg, ${STATE_COLORS["self-proof-fog"]}, ${STATE_COLORS["self-proof-fog"]} 4px, #587294 4px, #587294 8px);
+      background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 4px, var(--state-self-proof-hatch) 4px 8px);
     }
-    .bar-seg-weak { background: ${STATE_COLORS["weak-evidence"]}; }
-    .bar-seg-verified { background: ${STATE_COLORS.verified}; }
+    .bar-seg-weak { background: var(--state-weak); }
+    .bar-seg-verified { background: var(--state-verified); }
     .panel-sub {
       font-size: 12px;
       font-weight: 400;
@@ -686,19 +742,19 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     .tm-segs-row { flex-direction: row; }
     .tm-segs-col { flex-direction: column; }
     .seg { display: block; flex-grow: 0; flex-shrink: 0; }
-    .seg-fog-returned { background: ${STATE_COLORS["fog-returned"]}; }
-    .seg-fog { background: ${STATE_COLORS.fog}; }
+    .seg-fog-returned { background: var(--state-returned); }
+    .seg-fog { background: var(--state-fog); }
     .seg-self-proof-fog {
-      background: repeating-linear-gradient(-45deg, ${STATE_COLORS["self-proof-fog"]}, ${STATE_COLORS["self-proof-fog"]} 4px, #587294 4px, #587294 8px);
+      background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 4px, var(--state-self-proof-hatch) 4px 8px);
     }
-    .seg-weak-evidence { background: ${STATE_COLORS["weak-evidence"]}; }
-    .seg-verified { background: ${STATE_COLORS.verified}; }
+    .seg-weak-evidence { background: var(--state-weak); }
+    .seg-verified { background: var(--state-verified); }
     .tm-label {
       position: absolute;
       left: 5px;
       top: 5px;
       max-width: calc(100% - 10px);
-      background: rgba(255, 255, 255, 0.9);
+      background: var(--tile-label-bg);
       color: var(--text-primary);
       border-radius: 4px;
       padding: 2px 6px;
@@ -707,7 +763,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     }
     .tm-label strong {
       display: block;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-family: var(--font-mono);
       font-weight: 600;
       white-space: nowrap;
       overflow: hidden;
@@ -725,7 +781,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     .tm-rank {
       background: var(--text-primary);
       color: var(--bg-card);
-      font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 700 11px var(--font-mono);
       padding: 1px 6px;
       border-radius: 4px;
     }
@@ -744,7 +800,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     .source-table {
       width: 100%;
       border-collapse: collapse;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-family: var(--font-mono);
       font-size: 12px;
     }
     .source-table td {
@@ -763,12 +819,12 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     .line-fog .ln-col { box-shadow: inset -4px 0 0 var(--state-fog); }
     .line-weak-evidence .ln-col { box-shadow: inset -4px 0 0 var(--state-weak); }
     .line-self-proof-fog .ln-col {
-      background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 2px, #587294 2px 4px) right / 4px 100% no-repeat;
+      background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 2px, var(--state-self-proof-hatch) 2px 4px) right / 4px 100% no-repeat;
     }
-    .line-fog-returned > td:not(.ln-col) { background: rgba(189, 73, 0, 0.16); }
-    .line-fog > td:not(.ln-col) { background: rgba(29, 54, 86, 0.14); }
-    .line-self-proof-fog > td:not(.ln-col) { background: rgba(110, 136, 170, 0.10); }
-    .line-weak-evidence > td:not(.ln-col) { background: rgba(188, 204, 226, 0.16); }
+    .line-fog-returned > td:not(.ln-col) { background: var(--tint-line-returned); }
+    .line-fog > td:not(.ln-col) { background: var(--tint-line-fog); }
+    .line-self-proof-fog > td:not(.ln-col) { background: var(--tint-line-self-proof); }
+    .line-weak-evidence > td:not(.ln-col) { background: var(--tint-line-weak); }
     .line-verified > td:not(.ln-col) { color: var(--text-secondary); }
     .code-wrap {
       display: grid;
@@ -787,7 +843,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     .mm-mark { position: absolute; left: 0; right: 0; min-height: 2px; cursor: pointer; }
     .mm-fog-returned { background: var(--state-returned); }
     .mm-fog { background: var(--state-fog); }
-    .mm-self-proof-fog { background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 2px, #587294 2px 4px); }
+    .mm-self-proof-fog { background: repeating-linear-gradient(-45deg, var(--state-self-proof) 0 2px, var(--state-self-proof-hatch) 2px 4px); }
     .mm-weak-evidence { background: var(--state-weak); }
     .l4-side {
       position: sticky;
@@ -803,9 +859,9 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       text-overflow: ellipsis;
     }
     .mutant-inline-row td {
-      background: #FFF7ED;
-      color: #9A3412;
-      border-left: 4px solid ${STATE_COLORS["fog-returned"]};
+      background: var(--mutant-bg);
+      color: var(--mutant-text);
+      border-left: 4px solid var(--state-returned);
       font-size: 11px;
       padding: 4px 12px;
     }
@@ -814,12 +870,12 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       border-radius: 8px;
       padding: 12px;
       margin-bottom: 12px;
-      background: #F8FAFC;
+      background: var(--bg-canvas);
       cursor: pointer;
     }
     .finding-card.active {
-      border-color: ${STATE_COLORS.fog};
-      box-shadow: 0 0 0 1px ${STATE_COLORS.fog};
+      border-color: var(--state-fog);
+      box-shadow: 0 0 0 1px var(--state-fog);
     }
     .copy-agent-btn {
       margin-top: 8px;
@@ -1059,7 +1115,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     function renderFindingDetail(f) {
       const detailEl = document.getElementById("l4-finding-detail");
       if (!f) {
-        detailEl.innerHTML = '<div style="font-size:13px;color:#64748B">Select a finding to inspect evidence & agent remediation instructions.</div>';
+        detailEl.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">Select a finding to inspect evidence & agent remediation instructions.</div>';
         return;
       }
       const mutantsHtml = (f.evidence.survivingMutants || []).map(m =>
@@ -1103,7 +1159,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
               : ""
           }
           '<div style="font-size:12px;margin-top:6px"><strong>Suggested Action:</strong> ' + f.suggestedAction + '</div>' +
-          '<div style="font-size:11px;margin-top:6px;font-family:monospace;background:#E2E8F0;padding:6px;border-radius:4px">' + f.acceptanceCheck.command + '</div>' +
+          '<div style="font-size:11px;margin-top:6px;font-family:var(--font-mono);background:var(--bg-subtle);padding:6px;border-radius:4px">' + f.acceptanceCheck.command + '</div>' +
           '<button class="copy-agent-btn" onclick="copyAgentTask(\\'' + f.id + '\\', this, event)">Copy as task for agent</button>' +
         '</div>';
     }
