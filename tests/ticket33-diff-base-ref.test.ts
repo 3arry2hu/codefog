@@ -76,6 +76,22 @@ describe("Ticket 33: --diff fails loudly when the base ref cannot be resolved", 
     expect(stderr).toContain("HEAD~1");
   });
 
+  it("fails the regression gate and prints no diff-less JSON report for a nonexistent base ref", async () => {
+    const { code, stdout, stderr } = await runCapture([
+      "--root",
+      tmpDir,
+      "--diff",
+      "no-such-ref",
+      "--fail-on",
+      "regression",
+      "--json",
+    ]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("'no-such-ref' could not be resolved to a commit");
+  });
+
   it("exits 1 when the base ref resolves but its baseline cannot be analyzed", async () => {
     const docsOnly = await fs.mkdtemp(path.join(os.tmpdir(), "codefog-t33-docs-"));
     try {
