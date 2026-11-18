@@ -90,8 +90,12 @@ export interface LanguageAdapter {
   extractInlineTestBlockFingerprints?(sourceText: string): Map<string, string>;
 }
 
+const CHAR_LITERAL_AFTER_QUOTE_RE =
+  /^(?:\\(?:u\{[0-9a-fA-F_]+\}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2}|[0-7]{1,3}|[^\r\n])|[\uD800-\uDBFF][\uDC00-\uDFFF]|[^'\\\r\n])'/;
+
 /**
- * Strips // line comments and /* block comments while preserving \n line breaks.
+ * Strips // line comments and /* block comments while preserving \n line breaks and
+ * exact UTF-16 code-unit offsets (`noComments.length === masked.length === source.length`).
  * Also produces a `masked` string where string/char literals and comments are replaced
  * with spaces (preserving \n) for safe brace and keyword scanning.
  */
@@ -99,8 +103,10 @@ export function stripCommentsAndMaskStrings(source: string): {
   noComments: string;
   masked: string;
 } {
-  const noCommentsChars = Array.from(source);
-  const maskedChars = Array.from(source);
+  // Index strictly by UTF-16 code units (`split("")`), matching `source.length`,
+  // `RegExpExecArray.index`, `buildLineStarts`, and `String.prototype.slice`.
+  const noCommentsChars = source.split("");
+  const maskedChars = source.split("");
   const len = source.length;
   let i = 0;
 
@@ -182,26 +188,17 @@ export function stripCommentsAndMaskStrings(source: string): {
       continue;
     }
 
-    // Single-quoted char/rune '...' (not Rust lifetime `'a` or `'static`)
-    if (
-      ch === "'" &&
-      (source[i + 2] === "'" || (source[i + 1] === "\\" && source[i + 3] === "'"))
-    ) {
-      maskedChars[i] = " ";
-      i++;
-      while (i < len && source[i] !== "'" && source[i] !== "\n") {
-        if (source[i] === "\\") {
+    // Single-quoted char/rune '...' (BMP, UTF-16 surrogate pair, or escape; never Rust lifetime `'a` / `'static`)
+    if (ch === "'") {
+      const charMatch = CHAR_LITERAL_AFTER_QUOTE_RE.exec(source.slice(i + 1, i + 16));
+      if (charMatch) {
+        const endQuoteIdx = i + charMatch[0].length;
+        while (i <= endQuoteIdx) {
           maskedChars[i] = " ";
           i++;
         }
-        if (i < len && source[i] !== "\n") maskedChars[i] = " ";
-        i++;
+        continue;
       }
-      if (i < len && source[i] === "'") {
-        maskedChars[i] = " ";
-        i++;
-      }
-      continue;
     }
 
     i++;
