@@ -4,6 +4,7 @@ import ts from "typescript";
 import { CODEFOG_COMMAND } from "./cli-command.js";
 import { collectFilesUnderDir, isInstructionFile } from "./doc-markdown.js";
 import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
+import { toPosix } from "./path-utils.js";
 import {
   getPolyglotAdapter,
   isPolyglotSourceFile,
@@ -12,12 +13,8 @@ import {
 import { computeRiskScore, createDeterministicFindingId } from "./scoring.js";
 import type { DocClaim, DocReferent, EvidenceState, Finding } from "./types.js";
 
-function toPosix(p: string): string {
-  return p.replace(/\\/g, "/");
-}
-
 const KNOWN_PATH_EXTENSIONS =
-  /\.(?:md|mdc|ts|tsx|js|jsx|mjs|cjs|json|html|htm|css|svg|xml|yaml|yml|toml|go|mod|sum|rs|java|py|sh|txt|lcov|info|out|cov|profdata|lock)$/i;
+  /[^/.]\.(?:md|mdc|ts|tsx|js|jsx|mjs|cjs|json|html|htm|css|svg|xml|yaml|yml|toml|go|mod|sum|rs|java|py|sh|txt|lcov|info|out|cov|profdata|lock)$/i;
 
 const KNOWN_TOP_DIRS = new Set([
   "src",
@@ -49,11 +46,13 @@ const KNOWN_TOP_DIRS = new Set([
 export function looksLikePathToken(token: string): boolean {
   if (!token || /\s/.test(token)) return false;
   if (token.startsWith("-")) return false;
+  if (token === "~" || token.startsWith("~/")) return false;
+  // Scoped npm packages (@barryzhu/codefog), decorators (@Override), and editor @file mentions (@.cursor/...)
+  if (token.startsWith("@")) return false;
   if (/^(?:https?:|mailto:|tel:|git\+|data:)/i.test(token)) return false;
-  // Scoped npm package like @barryzhu/codefog or @types/node
-  if (/^@[a-z0-9-~][a-z0-9-._~]*\/[a-z0-9-._~]+(?:@[^\s]+)?$/i.test(token)) return false;
   if (/^(?:origin|HEAD|refs)\//.test(token)) return false;
-  if (/[<>|"'`;(){}=$]/.test(token)) return false;
+  // Shell/code metacharacters and glob wildcard patterns (*.md, skills/**/SKILL.md)
+  if (/[<>|"'`;(){}=$*?]/.test(token)) return false;
 
   const withoutAnchor = token.split("#")[0] ?? token;
   const withoutLine = withoutAnchor.replace(/:\d+(?:-\d+)?$/, "");
@@ -64,6 +63,7 @@ export function looksLikePathToken(token: string): boolean {
 
   if (
     withoutLine === ".gitignore" ||
+    withoutLine === ".npmrc" ||
     withoutLine === "Dockerfile" ||
     withoutLine === "Makefile" ||
     KNOWN_PATH_EXTENSIONS.test(withoutLine)
@@ -72,13 +72,15 @@ export function looksLikePathToken(token: string): boolean {
   }
 
   if (withoutLine.includes("/")) {
+    if (withoutLine.startsWith("/")) {
+      const rootSeg = withoutLine.slice(1).split("/")[0] ?? "";
+      return KNOWN_TOP_DIRS.has(rootSeg);
+    }
     if (
       withoutLine.startsWith("./") ||
       withoutLine.startsWith("../") ||
       withoutLine.startsWith(".") ||
-      withoutLine.startsWith("/") ||
-      withoutLine.endsWith("/") ||
-      withoutLine.includes("*")
+      withoutLine.endsWith("/")
     ) {
       return true;
     }

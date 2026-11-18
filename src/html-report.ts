@@ -177,6 +177,9 @@ function renderMetricLineServer(report: CodefogReport): string {
       na: noCoverage,
     },
     { key: "contested", label: "Contested", value: String(m.contestedOracles) },
+    ...(report.external
+      ? [{ key: "external-issues", label: "External Issues", value: String(report.external.issues.length) }]
+      : []),
     ...(report.libyear
       ? [{ key: "libyear", label: "Dependency Drift", value: `${report.libyear.totalLibyears} libyears` }]
       : []),

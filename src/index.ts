@@ -1,17 +1,150 @@
-export * from "./types.js";
-export * from "./lcov.js";
-export * from "./scoring.js";
-export * from "./ast-evidence.js";
-export * from "./git-freshness.js";
-export * from "./mutation.js";
-export * from "./polyglot.js";
-export * from "./verify.js";
-export * from "./html-report.js";
-export * from "./diff-pr.js";
-export * from "./oracle.js";
-export * from "./doc-claims.js";
-export * from "./doc-runners.js";
-export * from "./external.js";
-export * from "./skill-installer.js";
-export * from "./analyzer.js";
-export * from "./cli.js";
+// Public domain types & report schema
+export type {
+  AnalyzeOptions,
+  CodefogReport,
+  CountByState,
+  DeletedDocClaimEvent,
+  DiffComparison,
+  DocBlockKind,
+  DocClaim,
+  DocClaimKind,
+  DocFileSummary,
+  DocReferent,
+  EvidenceState,
+  ExternalIssue,
+  ExternalOverlaySummary,
+  FileSummary,
+  FileSymbolRegion,
+  Finding,
+  LibyearDependencyDrift,
+  LibyearSummary,
+  LocByState,
+  ModuleSummary,
+  SurvivingMutant,
+} from "./types.js";
+
+// Core repository analysis & verification entry points
+export { analyzeRepository, deriveModulePath } from "./analyzer.js";
+export {
+  isDocVerifyTarget,
+  verifyDocTarget,
+  verifyTargetWithMutants,
+  type VerifyOptions,
+  type VerifyResult,
+} from "./verify.js";
+export { analyzeDocClaims, type DocAnalysisResult } from "./doc-claims.js";
+
+// Coverage, mutation, oracle & external overlay loaders
+export {
+  loadCoverageRecords,
+  normalizeRepoRelativePath,
+  parseGoCoverProfile,
+  parseJacocoXml,
+  parseLcov,
+  type CoverageBranchEntry,
+  type CoverageFileRecord,
+  type CoverageFunctionEntry,
+  type LcovBranchEntry,
+  type LcovFileRecord,
+  type LcovFunctionEntry,
+  type LoadedCoverage,
+} from "./lcov.js";
+export {
+  getSpanMutationSummary,
+  loadMutationReport,
+  loadStrykerReport,
+  type MutationFileSummary,
+  type MutationRecord,
+  type ParsedMutationReport,
+  type ParsedStrykerReport,
+  type StrykerFileSummary,
+  type StrykerMutantRecord,
+} from "./mutation.js";
+export {
+  assessSymbolOracle,
+  judgeSymbolOracle,
+  loadOracleBundle,
+  type DefectRecord,
+  type ExpectationRecord,
+  type OracleBundle,
+  type SymbolOracleVerdict,
+} from "./oracle.js";
+export {
+  loadExternalOverlay,
+  matchRegionExternalIssues,
+  normalizeExternalRelPath,
+  parseKnipContent,
+  parseLibyearContent,
+  parseSarifContent,
+  type LoadExternalOverlayInput,
+} from "./external.js";
+
+// Scoring, palette & treemap layout
+export {
+  STATE_COLORS,
+  STATE_EVIDENCE_RANK,
+  STATE_URGENCY_ORDER,
+  computeRiskScore,
+  computeTrustScore,
+  createDeterministicFindingId,
+  emptyLocByState,
+  getDominantState,
+  roundPct,
+} from "./scoring.js";
+export { squarify, type TreemapRect } from "./treemap.js";
+
+// Polyglot LanguageAdapter seam (ADR-0003)
+export {
+  POLYGLOT_LANGUAGE_ADAPTERS,
+  getPolyglotAdapter,
+  goLanguageAdapter,
+  isPolyglotSourceFile,
+  isPolyglotTestFile,
+  javaLanguageAdapter,
+  rustLanguageAdapter,
+  type LanguageAdapter,
+  type PolyglotAstEvidenceEntry,
+  type PolyglotCandidateMutation,
+  type PolyglotExtractedSymbol,
+  type PolyglotFunctionSpan,
+  type PolyglotRepoAstEvidence,
+  type SupportedLanguageId,
+} from "./polyglot.js";
+
+// Renderers, PR diff & CLI
+export { renderHtmlFogMap, writeHtmlFogMap } from "./html-report.js";
+export {
+  computeDiffComparison,
+  renderPrCommentDocSection,
+  renderPrCommentMarkdown,
+  renderPrDiffSvg,
+  resolveBaseRef,
+  writePrCommentArtifacts,
+} from "./diff-pr.js";
+export {
+  installCodefogSkill,
+  normalizeSkillAgents,
+  renderCodefogSkillMarkdown,
+  SUPPORTED_SKILL_AGENTS,
+  type InstalledSkillTarget,
+  type InstallSkillOptions,
+  type InstallSkillResult,
+  type SupportedSkillAgent,
+} from "./skill-installer.js";
+export {
+  MIN_SUPPORTED_NPM_MAJOR,
+  detectOutdatedNpmVersion,
+  formatLevel1Summary,
+  formatOutdatedNpmWarning,
+  runCli,
+  type CliIo,
+} from "./cli.js";
+export {
+  STATE_BAR_GLYPHS,
+  STATE_BAR_WIDTH,
+  TERMINAL_MAX_COLUMNS,
+  formatLevel1SummaryColor,
+  shouldUseColor,
+  stateBarCells,
+  stripAnsi,
+} from "./terminal-summary.js";

@@ -9,7 +9,7 @@ import {
   type RepoSymbolIndex,
 } from "./doc-resolution.js";
 import type { GitTimelineSession, RepoCommitInfo } from "./git-freshness.js";
-import { isIgnoredRepoRelPath } from "./polyglot.js";
+import { isIgnoredRepoRelPath, toPosix } from "./path-utils.js";
 
 /**
  * Discriminated union representing either an uncommitted working-tree change
@@ -86,10 +86,6 @@ export interface DocTimelineOracle {
   findSymbolRemovalPoint(sym: RepoSymbol): Promise<DocTimelinePoint | null>;
   findBlockLastSubstantivePoint(docFile: string, block: DocBlock): Promise<DocTimelinePoint | null>;
   findSymbolLastRuntimeChangePoint(sym: RepoSymbol): Promise<DocTimelinePoint | null>;
-}
-
-function toPosix(p: string): string {
-  return p.replace(/\\/g, "/");
 }
 
 export function createDocTimelineOracle(

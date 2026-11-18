@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { walkRepoFiles } from "./polyglot.js";
+import { toPosix, walkRepoFiles } from "./path-utils.js";
 import type { DocBlockKind } from "./types.js";
 
 export interface DocBlock {
@@ -22,10 +22,6 @@ export interface ParsedDocFile {
   ignoredFile: boolean;
   headings: Array<{ text: string; slug: string; line: number }>;
   blocks: DocBlock[];
-}
-
-function toPosix(p: string): string {
-  return p.replace(/\\/g, "/");
 }
 
 export function isInstructionFile(relPath: string): boolean {

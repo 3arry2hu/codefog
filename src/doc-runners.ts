@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import ts from "typescript";
 import { countTsJsOutcomeAssertions } from "./ast-evidence.js";
 import type { DocBlock, PackageManifestInfo, RepoSymbolIndex } from "./doc-claims.js";
+import { toPosix } from "./path-utils.js";
 import { createDeterministicFindingId } from "./scoring.js";
 import type { DocClaim, DocReferent, EvidenceState } from "./types.js";
 
@@ -52,10 +53,6 @@ export interface DocCodeBlockRunner {
   readonly languages: readonly string[];
   detectOutcomeAssertions(code: string): number;
   runCodeBlock(ctx: DocCodeBlockRunContext): Promise<DocCodeBlockRunResult>;
-}
-
-function toPosix(p: string): string {
-  return p.replace(/\\/g, "/");
 }
 
 function stripTsJsExt(relPath: string): string {

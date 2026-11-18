@@ -1,11 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import ts from "typescript";
+import { toPosix, walkRepoFiles } from "./path-utils.js";
 import {
   POLYGLOT_LANGUAGE_ADAPTERS,
   isPolyglotSourceFile,
   isPolyglotTestFile,
-  walkRepoFiles,
 } from "./polyglot.js";
 
 export interface FunctionAstEvidence {
@@ -13,6 +13,9 @@ export interface FunctionAstEvidence {
   file: string;
   executedTestBlocks: number;
   assertionsOnOutcome: number;
+  /** Count of shallow liveness checks (`toBeDefined`, `assertNotNull`, etc.) without outcome verification. */
+  livenessChecksOnly: number;
+  /** @deprecated Read `livenessChecksOnly` instead (`GLOSSARY.md` avoids "Weak Assertion"). */
   weakAssertionsOnly: number;
   testFiles: string[];
 }
@@ -24,7 +27,7 @@ export interface RepoTestAstResult {
   bySymbol: Map<string, FunctionAstEvidence>;
 }
 
-const WEAK_MATCHERS = new Set([
+const LIVENESS_MATCHERS = new Set([
   "toBeDefined",
   "toBeTruthy",
   "toBeTypeOf",
@@ -32,7 +35,7 @@ const WEAK_MATCHERS = new Set([
   "anything",
 ]);
 
-const STRONG_MATCHERS = new Set([
+const OUTCOME_MATCHERS = new Set([
   "toBe",
   "toEqual",
   "toStrictEqual",
@@ -74,10 +77,6 @@ const STRONG_MATCHERS = new Set([
 ]);
 
 const TEST_BLOCK_CALLEES = new Set(["it", "test"]);
-
-function toPosix(p: string): string {
-  return p.replace(/\\/g, "/");
-}
 
 function stripCodeExtension(p: string): string {
   return p.replace(/\.(tsx?|jsx?|mjs|cjs|go|rs|java)$/, "");
@@ -290,10 +289,10 @@ interface InternalEvidenceSets {
   symbol: string;
   fileStem: string;
   executedBlocks: Set<string>;
-  strongAssertedBlocks: Set<string>;
-  weakAssertedBlocks: Set<string>;
-  directStrongAssertions: number;
-  directWeakAssertions: number;
+  outcomeAssertedBlocks: Set<string>;
+  livenessCheckedBlocks: Set<string>;
+  directOutcomeAssertions: number;
+  directLivenessChecks: number;
   testFiles: Set<string>;
 }
 
@@ -311,10 +310,10 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
         symbol,
         fileStem,
         executedBlocks: new Set(),
-        strongAssertedBlocks: new Set(),
-        weakAssertedBlocks: new Set(),
-        directStrongAssertions: 0,
-        directWeakAssertions: 0,
+        outcomeAssertedBlocks: new Set(),
+        livenessCheckedBlocks: new Set(),
+        directOutcomeAssertions: 0,
+        directLivenessChecks: 0,
         testFiles: new Set(),
       };
       internalMap.set(key, entry);
@@ -350,9 +349,9 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
       const blockId = `${testFileRel}#${++blockCounter}`;
       const taintedVars = new Map<string, CallTarget[]>();
       const calledInBlock = new Map<string, CallTarget>();
-      const strongAssertedInBlock = new Map<string, number>();
-      const weakAssertedInBlock = new Map<string, number>();
-      let blockHasAnyStrongAssertion = false;
+      const outcomeAssertedInBlock = new Map<string, number>();
+      const livenessCheckedInBlock = new Map<string, number>();
+      let blockHasAnyOutcomeAssertion = false;
 
       function recordCallTarget(target: CallTarget): void {
         const key = `${target.targetFileStem ?? "*"}::${target.symbol}`;
@@ -391,13 +390,13 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
         if (ts.isCallExpression(node)) {
           const expectInfo = parseExpectCall(node);
           if (expectInfo) {
-            const isWeak =
-              WEAK_MATCHERS.has(expectInfo.matcher) && !expectInfo.isNegated;
-            const isStrong =
-              STRONG_MATCHERS.has(expectInfo.matcher) ||
-              (WEAK_MATCHERS.has(expectInfo.matcher) && expectInfo.isNegated);
-            if (isStrong) {
-              blockHasAnyStrongAssertion = true;
+            const isLiveness =
+              LIVENESS_MATCHERS.has(expectInfo.matcher) && !expectInfo.isNegated;
+            const isOutcome =
+              OUTCOME_MATCHERS.has(expectInfo.matcher) ||
+              (LIVENESS_MATCHERS.has(expectInfo.matcher) && expectInfo.isNegated);
+            if (isOutcome) {
+              blockHasAnyOutcomeAssertion = true;
             }
 
             const subjectTargets = resolveExpressionSymbols(
@@ -408,10 +407,10 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
             for (const t of subjectTargets) {
               recordCallTarget(t);
               const key = `${t.targetFileStem ?? "*"}::${t.symbol}`;
-              if (isStrong) {
-                strongAssertedInBlock.set(key, (strongAssertedInBlock.get(key) ?? 0) + 1);
-              } else if (isWeak) {
-                weakAssertedInBlock.set(key, (weakAssertedInBlock.get(key) ?? 0) + 1);
+              if (isOutcome) {
+                outcomeAssertedInBlock.set(key, (outcomeAssertedInBlock.get(key) ?? 0) + 1);
+              } else if (isLiveness) {
+                livenessCheckedInBlock.set(key, (livenessCheckedInBlock.get(key) ?? 0) + 1);
               }
             }
           } else {
@@ -433,19 +432,19 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
         const evidence = getOrCreateInternal(target.targetFileStem, target.symbol);
         evidence.executedBlocks.add(blockId);
         evidence.testFiles.add(testFileRel);
-        const strongCount = strongAssertedInBlock.get(key) ?? 0;
-        const weakCount = weakAssertedInBlock.get(key) ?? 0;
+        const outcomeCount = outcomeAssertedInBlock.get(key) ?? 0;
+        const livenessCount = livenessCheckedInBlock.get(key) ?? 0;
         // Also support CLI-style tests where runCli(..., { stdout }) captures output into a buffer and asserts on the buffer
-        const effectiveStrong =
-          strongCount > 0 ? strongCount : blockHasAnyStrongAssertion && calledInBlock.size === 1 && weakCount === 0 ? 1 : 0;
+        const effectiveOutcome =
+          outcomeCount > 0 ? outcomeCount : blockHasAnyOutcomeAssertion && calledInBlock.size === 1 && livenessCount === 0 ? 1 : 0;
 
-        if (effectiveStrong > 0) {
-          evidence.strongAssertedBlocks.add(blockId);
-          evidence.directStrongAssertions += effectiveStrong;
+        if (effectiveOutcome > 0) {
+          evidence.outcomeAssertedBlocks.add(blockId);
+          evidence.directOutcomeAssertions += effectiveOutcome;
         }
-        if (weakCount > 0) {
-          evidence.weakAssertedBlocks.add(blockId);
-          evidence.directWeakAssertions += weakCount;
+        if (livenessCount > 0) {
+          evidence.livenessCheckedBlocks.add(blockId);
+          evidence.directLivenessChecks += livenessCount;
         }
       }
     }
@@ -488,10 +487,10 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
     for (const ev of polyRes.evidenceEntries) {
       const target = getOrCreateInternal(ev.fileStem, ev.symbol);
       for (const b of ev.executedBlocks) target.executedBlocks.add(b);
-      for (const ob of ev.outcomeAssertedBlocks) target.strongAssertedBlocks.add(ob);
-      for (const lb of ev.livenessCheckedBlocks) target.weakAssertedBlocks.add(lb);
-      target.directStrongAssertions += ev.directOutcomeAssertions;
-      target.directWeakAssertions += ev.directLivenessChecks;
+      for (const ob of ev.outcomeAssertedBlocks) target.outcomeAssertedBlocks.add(ob);
+      for (const lb of ev.livenessCheckedBlocks) target.livenessCheckedBlocks.add(lb);
+      target.directOutcomeAssertions += ev.directOutcomeAssertions;
+      target.directLivenessChecks += ev.directLivenessChecks;
       for (const tf of ev.testFiles) target.testFiles.add(tf);
     }
     for (const [callerKey, edges] of polyRes.callGraphEdges.entries()) {
@@ -608,15 +607,15 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
             changed = true;
           }
         }
-        for (const blk of callerEv.strongAssertedBlocks) {
-          if (!calleeEv.strongAssertedBlocks.has(blk)) {
-            calleeEv.strongAssertedBlocks.add(blk);
+        for (const blk of callerEv.outcomeAssertedBlocks) {
+          if (!calleeEv.outcomeAssertedBlocks.has(blk)) {
+            calleeEv.outcomeAssertedBlocks.add(blk);
             changed = true;
           }
         }
-        for (const blk of callerEv.weakAssertedBlocks) {
-          if (!calleeEv.weakAssertedBlocks.has(blk)) {
-            calleeEv.weakAssertedBlocks.add(blk);
+        for (const blk of callerEv.livenessCheckedBlocks) {
+          if (!calleeEv.livenessCheckedBlocks.has(blk)) {
+            calleeEv.livenessCheckedBlocks.add(blk);
             changed = true;
           }
         }
@@ -634,18 +633,20 @@ export async function analyzeTestAstEvidence(rootDir: string): Promise<RepoTestA
   const bySymbol = new Map<string, FunctionAstEvidence>();
 
   for (const [key, internal] of internalMap.entries()) {
+    const livenessCount = Math.max(
+      internal.directLivenessChecks,
+      internal.livenessCheckedBlocks.size,
+    );
     const pub: FunctionAstEvidence = {
       symbol: internal.symbol,
       file: internal.fileStem,
       executedTestBlocks: internal.executedBlocks.size,
       assertionsOnOutcome: Math.max(
-        internal.directStrongAssertions,
-        internal.strongAssertedBlocks.size,
+        internal.directOutcomeAssertions,
+        internal.outcomeAssertedBlocks.size,
       ),
-      weakAssertionsOnly: Math.max(
-        internal.directWeakAssertions,
-        internal.weakAssertedBlocks.size,
-      ),
+      livenessChecksOnly: livenessCount,
+      weakAssertionsOnly: livenessCount,
       testFiles: Array.from(internal.testFiles),
     };
     byFileAndSymbol.set(key, pub);
@@ -728,10 +729,10 @@ export function countTsJsOutcomeAssertions(sourceText: string): number {
     if (ts.isCallExpression(node)) {
       const expectInfo = parseExpectCall(node);
       if (expectInfo) {
-        const isStrong =
-          STRONG_MATCHERS.has(expectInfo.matcher) ||
-          (WEAK_MATCHERS.has(expectInfo.matcher) && expectInfo.isNegated);
-        if (isStrong) {
+        const isOutcome =
+          OUTCOME_MATCHERS.has(expectInfo.matcher) ||
+          (LIVENESS_MATCHERS.has(expectInfo.matcher) && expectInfo.isNegated);
+        if (isOutcome) {
           outcomeAssertions++;
         } else if (
           expectInfo.matcher === "ok" &&

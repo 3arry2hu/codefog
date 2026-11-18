@@ -1,9 +1,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { findFilesByExtensionInRepo } from "./polyglot.js";
+import { findFilesByExtensionInRepo, toPosix } from "./path-utils.js";
 import type { SurvivingMutant } from "./types.js";
 
-export interface StrykerMutantRecord {
+export interface MutationRecord {
   id: string;
   line: number;
   endLine: number;
@@ -14,20 +14,23 @@ export interface StrykerMutantRecord {
   status: string;
 }
 
-export interface StrykerFileSummary {
-  mutants: StrykerMutantRecord[];
+export interface MutationFileSummary {
+  mutants: MutationRecord[];
 }
 
-export interface ParsedStrykerReport {
+export interface ParsedMutationReport {
   totalMutants: number;
   killedMutants: number;
   mutationScorePct: number;
-  byFile: Map<string, StrykerFileSummary>;
+  byFile: Map<string, MutationFileSummary>;
 }
 
-function toPosix(p: string): string {
-  return p.replace(/\\/g, "/");
-}
+/** @deprecated Prefer language-neutral `MutationRecord` (supports Stryker, PITest, cargo-mutants). */
+export type StrykerMutantRecord = MutationRecord;
+/** @deprecated Prefer language-neutral `MutationFileSummary`. */
+export type StrykerFileSummary = MutationFileSummary;
+/** @deprecated Prefer language-neutral `ParsedMutationReport`. */
+export type ParsedStrykerReport = ParsedMutationReport;
 
 function normalizeRelPath(rawPath: string, rootDir: string): string {
   const posixRaw = toPosix(rawPath.trim());
@@ -192,11 +195,11 @@ export async function parsePitestXml(
   };
 }
 
-export async function loadStrykerReport(
+export async function loadMutationReport(
   rootDir: string,
-  strykerPath: string,
-): Promise<ParsedStrykerReport> {
-  const absPath = path.resolve(rootDir, strykerPath);
+  reportPath: string,
+): Promise<ParsedMutationReport> {
+  const absPath = path.resolve(rootDir, reportPath);
   const rawContent = await fs.readFile(absPath, "utf8");
   const trimmed = rawContent.trimStart();
   if (trimmed.startsWith("<?xml") || trimmed.startsWith("<mutations")) {
@@ -336,3 +339,6 @@ export function getSpanMutationSummary(
     survivingMutants,
   };
 }
+
+/** @deprecated Prefer language-neutral `loadMutationReport`. */
+export const loadStrykerReport = loadMutationReport;

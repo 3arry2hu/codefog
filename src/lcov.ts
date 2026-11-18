@@ -1,36 +1,42 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { findFilesByExtensionInRepo, loadGitignoreMatchers } from "./path-utils.js";
 import {
   extractPolyglotFunctionSpans,
-  findFilesByExtensionInRepo,
   getPolyglotAdapter,
   isPolyglotSourceFile,
-  loadGitignoreMatchers,
 } from "./polyglot.js";
 
-export interface LcovBranchEntry {
+export interface CoverageBranchEntry {
   line: number;
   block: number;
   branch: number;
   taken: number;
 }
 
-export interface LcovFunctionEntry {
+export interface CoverageFunctionEntry {
   name: string;
   line: number;
   hits: number;
 }
 
-export interface LcovFileRecord {
+export interface CoverageFileRecord {
   file: string;
   lines: Map<number, number>;
-  branches: LcovBranchEntry[];
-  functions: LcovFunctionEntry[];
+  branches: CoverageBranchEntry[];
+  functions: CoverageFunctionEntry[];
   linesFound: number;
   linesHit: number;
   branchesFound: number;
   branchesHit: number;
 }
+
+/** @deprecated Prefer language-neutral `CoverageBranchEntry`. */
+export type LcovBranchEntry = CoverageBranchEntry;
+/** @deprecated Prefer language-neutral `CoverageFunctionEntry`. */
+export type LcovFunctionEntry = CoverageFunctionEntry;
+/** @deprecated Prefer language-neutral `CoverageFileRecord`. */
+export type LcovFileRecord = CoverageFileRecord;
 
 export function normalizeRepoRelativePath(
   filePath: string,

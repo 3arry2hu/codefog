@@ -32,7 +32,7 @@ import {
   type DocTimelinePoint,
 } from "./doc-timeline.js";
 import { createGitTimelineSession } from "./git-freshness.js";
-import { loadGitignoreMatchers } from "./polyglot.js";
+import { loadGitignoreMatchers, toPosix } from "./path-utils.js";
 import {
   computeRiskScore,
   computeTrustScore,
@@ -76,10 +76,6 @@ export interface DocAnalysisResult {
   docClaims: DocClaim[];
   docFindings: Finding[];
   parsedDocs: ParsedDocFile[];
-}
-
-function toPosix(p: string): string {
-  return p.replace(/\\/g, "/");
 }
 
 export async function analyzeDocClaims(options: {
@@ -628,6 +624,8 @@ export async function analyzeDocClaims(options: {
                 }
 
                 const symState: EvidenceState = staleReferent ? "fog-returned" : "weak-evidence";
+                const distinctFiles = new Set(matchedSymbols.map((s) => s.file));
+                const isAmbiguousReferent = distinctFiles.size > 1;
                 docClaims.push({
                   id: createDeterministicFindingId(doc.file, `${lineNum}:${code}`),
                   file: doc.file,
@@ -643,6 +641,7 @@ export async function analyzeDocClaims(options: {
                   state: symState,
                   referents,
                   referent: staleReferent ?? referents[0],
+                  ...(isAmbiguousReferent ? { ambiguousReferents: true } : {}),
                 });
               } else if (gitSession.isGitRepo && blockPoint) {
                 const candidateShas =
@@ -758,6 +757,62 @@ export async function analyzeDocClaims(options: {
           command: `${CODEFOG_COMMAND} verify ${claim.file} --lines ${claim.blockStartLine}-${claim.blockEndLine}`,
           criteria: [
             `Doc claim '${claim.text}' in ${claim.file}:${claim.blockStartLine}-${claim.blockEndLine} resolves to a valid referent`,
+          ],
+        },
+      });
+    } else if (claim.ambiguousReferents) {
+      const sortedCandidates = [...claim.referents]
+        .filter((r): r is DocReferent & { file: string } => Boolean(r.file))
+        .sort(
+          (a, b) =>
+            a.file.localeCompare(b.file) || (a.startLine ?? 1) - (b.startLine ?? 1),
+        );
+      const candidateSummary = sortedCandidates
+        .map((r) => `${r.file}:${r.startLine ?? 1}`)
+        .join(", ");
+      docFindings.push({
+        id: createDeterministicFindingId(
+          claim.file,
+          `ambiguous-referent:${claim.startLine}:${claim.rawText}`,
+        ),
+        title: `ambiguous-referent: ${claim.text}`,
+        state: "weak-evidence",
+        subjectType: "doc",
+        tags: ["ambiguous-referent"],
+        riskScore: computeRiskScore({
+          unverifiedLoc: sortedCandidates.length,
+          churn90d: 1,
+          cyclomaticComplexity: 1,
+          state: "weak-evidence",
+        }),
+        agentReady: true,
+        location: {
+          file: claim.file,
+          symbol: claim.text,
+          startLine: claim.startLine,
+          endLine: claim.endLine,
+        },
+        locations: sortedCandidates.map((r) => ({
+          file: r.file,
+          symbol: r.symbol ?? claim.text,
+          startLine: r.startLine ?? 1,
+          endLine: r.endLine ?? r.startLine ?? 1,
+        })),
+        reason: `Unqualified symbol claim '${claim.rawText}' in ${claim.file}:${claim.startLine} matches ${sortedCandidates.length} definitions across files (${candidateSummary}).`,
+        evidence: {
+          executedByTests: 0,
+          assertionsOnOutcome: 0,
+          pseudoTested: false,
+          oracleContest: false,
+          oracleIds: [],
+          missedBoundary: false,
+          survivingMutants: [],
+        },
+        suggestedAction: `Qualify '${claim.rawText}' in ${claim.file}:${claim.startLine} (e.g. module/class prefix or file link) so readers and AI agents resolve a single target.`,
+        acceptanceCheck: {
+          command: `${CODEFOG_COMMAND} verify ${claim.file} --lines ${claim.blockStartLine}-${claim.blockEndLine}`,
+          criteria: [
+            `Doc claim '${claim.rawText}' in ${claim.file}:${claim.blockStartLine}-${claim.blockEndLine} uniquely identifies a single target file or symbol`,
           ],
         },
       });

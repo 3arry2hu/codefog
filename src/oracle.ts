@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { toPosix } from "./path-utils.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -299,8 +300,4 @@ function requireString(row: unknown, key: string, relPath: string): string {
     throw new Error(`Invalid oracle manifest ${relPath}: entry missing ${key}`);
   }
   return value;
-}
-
-function toPosix(value: string): string {
-  return value.split(path.sep).join("/");
 }

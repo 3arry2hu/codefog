@@ -4,10 +4,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ts from "typescript";
 import { CODEFOG_COMMAND } from "./cli-command.js";
-import { loadCoverageRecords, type LcovFileRecord } from "./lcov.js";
+import { countTsControlFlowDecisions } from "./ts-ast-utils.js";
+import { loadCoverageRecords, type CoverageFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
-import { getSpanMutationSummary, loadStrykerReport, type ParsedStrykerReport } from "./mutation.js";
+import { getSpanMutationSummary, loadMutationReport, type ParsedMutationReport } from "./mutation.js";
 import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
 import { analyzeDocClaims } from "./doc-claims.js";
 import { loadExternalOverlay, matchRegionExternalIssues } from "./external.js";
@@ -61,36 +62,7 @@ function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunct
   const spans: ParsedFunctionSpan[] = [];
 
   function countComplexity(node: ts.Node): number {
-    let complexity = 1;
-    function walk(n: ts.Node): void {
-      switch (n.kind) {
-        case ts.SyntaxKind.IfStatement:
-        case ts.SyntaxKind.ForStatement:
-        case ts.SyntaxKind.ForInStatement:
-        case ts.SyntaxKind.ForOfStatement:
-        case ts.SyntaxKind.WhileStatement:
-        case ts.SyntaxKind.DoStatement:
-        case ts.SyntaxKind.CaseClause:
-        case ts.SyntaxKind.CatchClause:
-        case ts.SyntaxKind.ConditionalExpression:
-          complexity++;
-          break;
-        case ts.SyntaxKind.BinaryExpression: {
-          const bin = n as ts.BinaryExpression;
-          if (
-            bin.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
-            bin.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
-            bin.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
-          ) {
-            complexity++;
-          }
-          break;
-        }
-      }
-      ts.forEachChild(n, walk);
-    }
-    walk(node);
-    return complexity;
+    return 1 + countTsControlFlowDecisions(node);
   }
 
   function visit(node: ts.Node): void {
@@ -137,6 +109,11 @@ function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunct
 
   visit(sourceFile);
   return spans.sort((a, b) => a.startLine - b.startLine);
+}
+
+function formatLinePreview(lines: number[], maxShown = 8): string {
+  if (lines.length <= maxShown) return lines.join(", ");
+  return `${lines.slice(0, maxShown).join(", ")} (+${lines.length - maxShown} more)`;
 }
 
 export function deriveModulePath(filePath: string): string {
@@ -189,8 +166,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
   );
   const astResult = await analyzeTestAstEvidence(rootDir);
   const mutationPath = options.mutationReportPath ?? options.strykerPath;
-  const strykerReport: ParsedStrykerReport | undefined = mutationPath
-    ? await loadStrykerReport(rootDir, mutationPath)
+  const mutationReport: ParsedMutationReport | undefined = mutationPath
+    ? await loadMutationReport(rootDir, mutationPath)
     : undefined;
   const gitMeta = await readGitMeta(rootDir);
   const oracleBundle = await loadOracleBundle(rootDir, {
@@ -311,6 +288,14 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       const hasIncompleteBranches =
         spanBranches.length > 0 && spanBranchHit < spanBranches.length;
 
+      const uncoveredLines = spanLines
+        .filter(([, h]) => h === 0)
+        .map(([ln]) => ln)
+        .sort((a, b) => a - b);
+      const unhitBranchLines = Array.from(
+        new Set(spanBranches.filter((b) => b.taken === 0).map((b) => b.line)),
+      ).sort((a, b) => a - b);
+
       const hitsCount = spanLines.filter(([, h]) => h > 0).length;
       const lcovFnHits = fnRecord ? fnRecord.hits : hitsCount > 0 ? 1 : 0;
 
@@ -335,7 +320,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       }
 
       const fnFreshness = gitFreshness.functions.get(span.name);
-      const fileMutationSummary = strykerReport?.byFile.get(relPath);
+      const fileMutationSummary = mutationReport?.byFile.get(relPath);
       const spanMutants = getSpanMutationSummary(
         fileMutationSummary,
         span.startLine,
@@ -414,6 +399,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         assertionsOnOutcome,
         pseudoTested,
         branchCoveragePct: spanBranchPct,
+        ...(uncoveredLines.length > 0 ? { uncoveredLines } : {}),
+        ...(unhitBranchLines.length > 0 ? { unhitBranchLines } : {}),
         lastCodeChangeAt: fnFreshness?.lastCodeChangeAt,
         lastTestChangeAt: fnFreshness?.lastTestChangeAt,
         survivingMutants: spanMutants.survivingMutants,
@@ -432,7 +419,9 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             suggestedAction = `Do not rewrite the outcome assertion for ${span.name} to the current return value. Reconcile it with ${oracle.contestIds.join(", ")} before updating tests.`;
           }
         } else if (regionState === "fog") {
-          reason = `No test evidence executing ${span.name} (${spanLines.length} lines in fog).`;
+          const fogLineHint =
+            uncoveredLines.length > 0 ? `; uncovered lines: ${formatLinePreview(uncoveredLines)}` : "";
+          reason = `No test evidence executing ${span.name} (${spanLines.length} lines in fog${fogLineHint}).`;
           suggestedAction = `Add unit tests covering ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) with outcome assertions.`;
         } else if (oracle.contested) {
           reason = `Outcome assertion for ${span.name} contradicts ${oracle.contestIds.join(", ")} (Oracle Contest). Killing mutants cannot confirm a coupled assertion.`;
@@ -452,7 +441,11 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           reason = `Historical defect ${oracle.missedIds.join(", ")} input is not asserted for ${span.name} (missed boundary).`;
           suggestedAction = `Add an outcome assertion for ${span.name} covering ${oracle.missedIds.join(", ")} and expecting ${expected}. Do not copy the current return value.`;
         } else {
-          reason = `${span.name} has incomplete branch coverage (${spanBranchPct}% branches taken).`;
+          const branchLineHint =
+            unhitBranchLines.length > 0
+              ? `; unhit branch lines: ${formatLinePreview(unhitBranchLines)}`
+              : "";
+          reason = `${span.name} has incomplete branch coverage (${spanBranchPct}% branches taken${branchLineHint}).`;
           suggestedAction = `Add branch tests for ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) to cover all conditional paths with outcome assertions.`;
         }
 
@@ -479,6 +472,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             ...(fnFreshness?.lastCodeChangeAt ? { lastCodeChangeAt: fnFreshness.lastCodeChangeAt } : {}),
             ...(fnFreshness?.lastTestChangeAt ? { lastTestChangeAt: fnFreshness.lastTestChangeAt } : {}),
             survivingMutants: spanMutants.survivingMutants,
+            ...(uncoveredLines.length > 0 ? { uncoveredLines } : {}),
+            ...(unhitBranchLines.length > 0 ? { unhitBranchLines } : {}),
             ...(externalOverlay ? { externalIssues: regionExternalIssues } : {}),
           },
           ...(externalOverlay ? { externalIssues: regionExternalIssues } : {}),
@@ -713,11 +708,11 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         lineCoveragePct: roundPct(totalLinesHit, totalLinesFound),
         branchCoveragePct: roundPct(totalBranchesHit, totalBranchesFound),
         checkedCoveragePct: roundPct(totalCheckedLines, totalLinesFound),
-        mutationScorePct: strykerReport?.mutationScorePct ?? 0,
+        mutationScorePct: mutationReport?.mutationScorePct ?? 0,
         pseudoTestedMethods: totalPseudoTestedMethods,
         contestedOracles: totalContestedOracles,
         coverageAvailable,
-        mutationAvailable: strykerReport !== undefined,
+        mutationAvailable: mutationReport !== undefined,
       },
       locByState: repoLocByState,
     },

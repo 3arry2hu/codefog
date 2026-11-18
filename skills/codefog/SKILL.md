@@ -39,7 +39,7 @@ Before editing any tests, present a concise evaluation conclusion to the user us
 
 - **Trust Score（信任分）**: <score>/100 （目标: <target>/100）
 - **Doc Trust Score（文档信任分）**: <docScore>/100
-- **核心指标**:的行覆盖 <line>% | 分支覆盖 <branch>% | 检验覆盖 (Checked) <checked>% | 伪测试方法 (Pseudo-tested): <count>
+- **核心指标**: 行覆盖 <line>% | 分支覆盖 <branch>% | 检验覆盖 (Checked) <checked>% | 伪测试方法 (Pseudo-tested): <count>
 - **五态分布 (LOC)**:
   - `fog-returned` (回雾/高危退化): <n>
   - `fog` (未覆盖盲区): <n>

@@ -1,5 +1,8 @@
 # Codefog v1 规格说明（Specification）
 
+> [!NOTE]
+> **历史归档说明（Historical v1 Baseline）**：本文档记录 `codefog` 最初 v1（仅限 TS/JS 曳光弹阶段）的设计基线。后续演进已通过架构决策记录扩展或替代部分 v1 约束：多语言支持（Go / Rust / Java）见 [`docs/adr/0003-polyglot-language-adapter-architecture.md`](./adr/0003-polyglot-language-adapter-architecture.md)，自证雾与预期冲突见 [`docs/adr/0004-mutation-kill-does-not-clear-self-proof.md`](./adr/0004-mutation-kill-does-not-clear-self-proof.md)，文档声明与文档回雾见 [`docs/adr/0005-doc-claims-reuse-five-state-model.md`](./adr/0005-doc-claims-reuse-five-state-model.md)，深色主题与视觉改版（含逐文件五态条 `.codefog/pr-diff.svg`）见 [`docs/adr/0006-dark-theme-inverts-fog-first-lightness-ramp.md`](./adr/0006-dark-theme-inverts-fog-first-lightness-ramp.md)。现行领域术语与 CLI 契约请以仓库根目录 [`GLOSSARY.md`](../GLOSSARY.md) 与 [`README.md`](../README.md) 为准。
+
 > **一句话定位**：把仓库渲染成地图——有证据的地方退为背景，没验证过的是雾，证据失效后触发回雾告警。
 > **对外标语**：*See which parts of your codebase you can actually trust.*
 

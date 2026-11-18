@@ -1,6 +1,9 @@
 import * as path from "node:path";
+import { truncateMiddle } from "./path-utils.js";
 import { STATE_URGENCY_ORDER } from "./scoring.js";
 import type { CodefogReport, EvidenceState, LocByState } from "./types.js";
+
+export { truncateMiddle };
 
 export const TERMINAL_MAX_COLUMNS = 100;
 export const STATE_BAR_WIDTH = 40;
@@ -55,15 +58,6 @@ function padEnd(text: string, width: number): string {
 
 function padStart(text: string, width: number): string {
   return " ".repeat(Math.max(0, width - visibleLength(text))) + text;
-}
-
-export function truncateMiddle(text: string, max: number): string {
-  const chars = [...text];
-  if (chars.length <= max) return text;
-  if (max <= 1) return "…";
-  const head = Math.ceil((max - 1) / 2);
-  const tail = max - 1 - head;
-  return chars.slice(0, head).join("") + "…" + (tail > 0 ? chars.slice(-tail).join("") : "");
 }
 
 function truncateEnd(text: string, max: number): string {
@@ -153,7 +147,7 @@ export function formatLevel1SummaryColor(
     `${label("Scope")}${summary.totalFiles} files · ${summary.totalLoc} LOC · ${fogPct}% unverified`,
     `${label("States")}${stateCounts(summary.locByState, STATE_URGENCY_ORDER)}`,
     `${label("Metrics")}Line ${coverage ? `${m.lineCoveragePct}%` : na}  Branch ${coverage ? `${m.branchCoveragePct}%` : na}  Checked ${coverage ? `${m.checkedCoveragePct}%` : na}  Mutation ${mutation ? `${m.mutationScorePct}%` : na}`,
-    `${label("")}Pseudo-tested ${coverage ? m.pseudoTestedMethods : na}  Contested ${m.contestedOracles}`,
+    `${label("")}Pseudo-tested ${coverage ? m.pseudoTestedMethods : na}  Contested ${m.contestedOracles}${report.external ? `  External ${report.external.issues.length}` : ""}`,
     ...(summary.docClaimsByState
       ? [
           `${label("Doc Claims")}${summary.totalDocClaims ?? 0} total  ${stateCounts(summary.docClaimsByState, ["fog-returned", "fog", "weak-evidence", "verified"])}`,

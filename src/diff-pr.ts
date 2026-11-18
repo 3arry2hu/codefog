@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
 import { CODEFOG_COMMAND } from "./cli-command.js";
 import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
+import { truncateMiddle } from "./path-utils.js";
 import { STATE_COLORS, STATE_EVIDENCE_RANK, STATE_URGENCY_ORDER } from "./scoring.js";
 import { detectDeletedDocClaimsAgainstRef } from "./verify.js";
 import type {
@@ -261,12 +262,6 @@ const SVG_LEGEND: Array<[EvidenceState, string]> = [
 
 function svgEsc(raw: string): string {
   return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function truncateMiddle(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const head = Math.ceil((max - 1) * 0.35);
-  return `${text.slice(0, head)}…${text.slice(text.length - (max - 1 - head))}`;
 }
 
 function svgStateFill(state: EvidenceState): string {

@@ -5,7 +5,11 @@ export type EvidenceState =
   | "weak-evidence"
   | "verified";
 
-export type LocByState = Record<EvidenceState, number>;
+/** Five-state count map (used for both executable lines and Doc Claims). */
+export type CountByState = Record<EvidenceState, number>;
+
+/** Five-state executable line count map. */
+export type LocByState = CountByState;
 
 export interface SurvivingMutant {
   id: string;
@@ -83,8 +87,13 @@ export interface Finding {
     lastCodeChangeAt?: string;
     lastTestChangeAt?: string;
     survivingMutants: SurvivingMutant[];
+    /** 1-indexed executable lines in this span with zero test hits. */
+    uncoveredLines?: number[];
+    /** 1-indexed lines in this span that contain at least one untaken branch. */
+    unhitBranchLines?: number[];
     externalIssues?: ExternalIssue[];
   };
+  /** @deprecated Read `finding.evidence.externalIssues` instead. Kept in sync for compatibility. */
   externalIssues?: ExternalIssue[];
   suggestedAction: string;
   acceptanceCheck: {
@@ -114,6 +123,10 @@ export interface FileSymbolRegion {
   assertionsOnOutcome: number;
   pseudoTested: boolean;
   branchCoveragePct: number;
+  /** 1-indexed executable lines in this span with zero test hits. */
+  uncoveredLines?: number[];
+  /** 1-indexed lines in this span that contain at least one untaken branch. */
+  unhitBranchLines?: number[];
   lastCodeChangeAt?: string;
   lastTestChangeAt?: string;
   survivingMutants: SurvivingMutant[];
@@ -159,7 +172,8 @@ export interface DiffComparison {
     trustScore: number;
     docTrustScore?: number;
     totalDocClaims?: number;
-    docClaimsByState?: LocByState;
+    docClaimsByState?: CountByState;
+    /** @deprecated Prefer `beforeSummary.metrics.coverageAvailable`; both hold the same boolean. */
     coverageAvailable?: boolean;
     metrics: {
       lineCoveragePct: number;
@@ -236,8 +250,12 @@ export interface DocClaim {
   blockStartLine: number;
   blockEndLine: number;
   state: EvidenceState;
+  /** Canonical list of all resolved candidate referents (may contain multiple entries for overloaded/duplicate names). */
   referents: DocReferent[];
+  /** @deprecated Read `referents` instead; when multiple candidates exist this holds only the first/stale candidate. */
   referent?: DocReferent;
+  /** True when an unqualified symbol claim resolved to definitions in two or more distinct source files. */
+  ambiguousReferents?: boolean;
   existedAtClaimCommit?: boolean;
   commandIntent?: "install" | "build" | "test" | "lint";
   executionOutput?: string;
@@ -251,7 +269,7 @@ export interface DocFileSummary {
   dominantState: EvidenceState;
   trustScore: number;
   riskScore: number;
-  claimsByState: LocByState;
+  claimsByState: CountByState;
   lines: string[];
   lineStates: Record<number, EvidenceState>;
   claims: DocClaim[];
@@ -271,7 +289,7 @@ export interface CodefogReport {
     trustScore: number;
     docTrustScore?: number;
     totalDocClaims?: number;
-    docClaimsByState?: LocByState;
+    docClaimsByState?: CountByState;
     totalFiles: number;
     totalLoc: number;
     metrics: {
@@ -286,6 +304,7 @@ export interface CodefogReport {
     };
     locByState: LocByState;
   };
+  /** @deprecated Read `summary.docTrustScore` instead. Kept in sync for compatibility. */
   docTrustScore?: number;
   docClaims?: DocClaim[];
   docFiles?: DocFileSummary[];
@@ -300,8 +319,10 @@ export interface CodefogReport {
 
 export interface AnalyzeOptions {
   rootDir: string;
+  /** @deprecated Prefer `coveragePath`, which accepts LCOV, Go coverprofile, or JaCoCo XML. */
   lcovPath?: string;
   coveragePath?: string | string[];
+  /** @deprecated Prefer `mutationReportPath`, which accepts Stryker, PITest, or cargo-mutants reports. */
   strykerPath?: string;
   mutationReportPath?: string;
   expectationsPath?: string;

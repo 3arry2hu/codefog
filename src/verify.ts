@@ -22,6 +22,7 @@ import {
   isPolyglotSourceFile,
 } from "./polyglot.js";
 import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
+import { countTsControlFlowDecisions } from "./ts-ast-utils.js";
 import type { DeletedDocClaimEvent, DocClaim, DocReferent, SurvivingMutant } from "./types.js";
 
 const execAsync = promisify(exec);
@@ -71,37 +72,7 @@ function countControlFlowBranches(sourceText: string, fileName: string): number 
     true,
     fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
-  let count = 0;
-  function walk(node: ts.Node): void {
-    switch (node.kind) {
-      case ts.SyntaxKind.IfStatement:
-      case ts.SyntaxKind.ConditionalExpression:
-      case ts.SyntaxKind.SwitchStatement:
-      case ts.SyntaxKind.CaseClause:
-      case ts.SyntaxKind.ForStatement:
-      case ts.SyntaxKind.ForInStatement:
-      case ts.SyntaxKind.ForOfStatement:
-      case ts.SyntaxKind.WhileStatement:
-      case ts.SyntaxKind.DoStatement:
-      case ts.SyntaxKind.CatchClause:
-        count++;
-        break;
-      case ts.SyntaxKind.BinaryExpression: {
-        const bin = node as ts.BinaryExpression;
-        if (
-          bin.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
-          bin.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
-          bin.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
-        ) {
-          count++;
-        }
-        break;
-      }
-    }
-    ts.forEachChild(node, walk);
-  }
-  walk(sf);
-  return count;
+  return countTsControlFlowDecisions(sf);
 }
 
 function extractFunctionNamesInRange(

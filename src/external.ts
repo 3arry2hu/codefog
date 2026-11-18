@@ -1,15 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { toPosix } from "./path-utils.js";
 import type {
   ExternalIssue,
   ExternalOverlaySummary,
   LibyearDependencyDrift,
   LibyearSummary,
 } from "./types.js";
-
-function toPosix(p: string): string {
-  return p.replace(/\\/g, "/");
-}
 
 export function normalizeExternalRelPath(rawPath: string, rootDir: string): string {
   let cleaned = rawPath.trim().replace(/^file:\/\//i, "");
