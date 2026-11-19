@@ -109,3 +109,21 @@ _Avoid_: Untested Method（未测方法）, Partially Tested Method（部分测�
 **Surviving Mutant（存活变异体）**:
 对源码注入微小逻辑变异后，未能使任何测试失败的变异实例，直接证明当前测试对该逻辑分支缺乏有效断言。
 _Avoid_: Escaped Bug（逃逸缺陷）, Uncovered Branch（未覆盖分支）
+
+## 结构与架构腐化（Structure & Architecture Rot）
+
+**Architecture Contract（架构契约）**:
+仓库声明的模块边界、允许或禁止的依赖方向与公开入口约束，用于自动校验架构一致性。
+_Avoid_: Lint Config（代码风格配置）, Style Rule（风格规则）
+
+**Boundary Violation（边界违例）**:
+源码静态导入违反 `Architecture Contract` 或形成跨模块循环依赖的确定性结构退化。
+_Avoid_: Arch Error（架构错误）, Import Warning（导入警告）
+
+**Implicit Coupling（隐式耦合）**:
+分属不同模块、无静态依赖关系却在 Git 历史中高频同步变更的文件组（排除生产代码与测试代码的健康共变）。
+_Avoid_: Change Coupling（变更耦合）, Co-change Noise（共变噪音）
+
+**Unstable Hub（不稳定枢纽）**:
+被大量下游文件静态依赖（高扇入）、近期高频变更且缺乏有效测试证据的核心文件。
+_Avoid_: God File（上帝文件）, Unstable Interface（不稳定接口）
