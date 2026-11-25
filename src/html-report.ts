@@ -4,6 +4,7 @@ import { CODEFOG_COMMAND } from "./cli-command.js";
 import { STATE_COLORS, STATE_URGENCY_ORDER } from "./scoring.js";
 import { squarify, type TreemapRect } from "./treemap.js";
 import type {
+  ArchitectureSummary,
   CodefogReport,
   DocClaim,
   DocFileSummary,
@@ -183,6 +184,20 @@ function renderMetricLineServer(report: CodefogReport): string {
     ...(report.libyear
       ? [{ key: "libyear", label: "Dependency Drift", value: `${report.libyear.totalLibyears} libyears` }]
       : []),
+    ...(report.architecture
+      ? [
+          {
+            key: "boundary-violations",
+            label: "Boundary Violations",
+            value: String(report.architecture.boundaryViolations.filter((violation) => !violation.baselined).length),
+          },
+          {
+            key: "propagation-cost",
+            label: "Propagation Cost",
+            value: `${report.architecture.propagationCostPct}%`,
+          },
+        ]
+      : []),
   ];
   return (
     `<div class="metric-line">` +
@@ -195,6 +210,57 @@ function renderMetricLineServer(report: CodefogReport): string {
       .join("") +
     `</div>`
   );
+}
+
+function renderArchitecturePanel(architecture: ArchitectureSummary, findings: Finding[]): string {
+  const findingsByFile = new Map<string, Finding[]>();
+  for (const finding of findings) {
+    const { file } = finding.location;
+    const matches = findingsByFile.get(file);
+    if (matches) matches.push(finding);
+    else findingsByFile.set(file, [finding]);
+  }
+
+  function sourceButton(file: string, tag?: string, reason?: string): string {
+    const finding = tag === undefined ? undefined : findingsByFile.get(file)?.find(
+      (item) => item.tags?.includes(tag) && (reason === undefined || item.reason === reason),
+    );
+    return `<button type="button" class="architecture-source" data-file="${escapeAttrServer(file)}" data-finding="${escapeAttrServer(finding?.id ?? "")}" onclick="openArchitectureSource(this)">${escapeHtmlServer(file)}</button>`;
+  }
+
+  function group(title: string, items: string[]): string {
+    return `<div class="architecture-group"><h3>${title}</h3>` +
+      (items.length ? `<ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul>` : '<p class="architecture-empty">None detected.</p>') +
+      '</div>';
+  }
+
+  const violations = architecture.boundaryViolations
+    .filter((violation) => !violation.baselined)
+    .map((violation) =>
+      `<strong>${escapeHtmlServer(violation.from)} → ${escapeHtmlServer(violation.to)}</strong>` +
+      `<div>${escapeHtmlServer(violation.explanation ?? violation.reason)}</div>` +
+      sourceButton(violation.file, "boundary-violation", violation.reason),
+    );
+  const cycles = architecture.cycles.map((cycle) =>
+    `<strong>${cycle.modules.map(escapeHtmlServer).join(", ")}</strong>` +
+    `<div>${cycle.edges.map((edge) => `${escapeHtmlServer(edge.from)} → ${escapeHtmlServer(edge.to)}`).join(" · ")}</div>` +
+    sourceButton(cycle.file, "arch-cycle"),
+  );
+  const hubs = architecture.unstableHubs.map((hub) =>
+    sourceButton(hub.file, "unstable-hub") +
+    `<div>Fan-in ${hub.fanIn} · Changes (90d) ${hub.churn90d} · Trust ${hub.trustScore}/100${hub.hasFogReturned ? " · Fog returned" : ""}</div>`,
+  );
+  const couplings = architecture.implicitCouplings.map((coupling) =>
+    sourceButton(coupling.from) + " ↔ " + sourceButton(coupling.to) +
+    `<div>${coupling.coChange} shared commits · ${fmtNum(coupling.coupling * 100, 1)}% coupling</div>`,
+  );
+
+  return '<div class="panel"><h2>Architecture Health</h2><div class="architecture-grid">' +
+    group("Boundary Violations", violations) +
+    group("Module Cycles", cycles) +
+    group("Unstable Hubs", hubs) +
+    group("Implicit Coupling", couplings) +
+    '</div></div>';
 }
 
 const TOP_FINDINGS_VISIBLE = 10;
@@ -372,6 +438,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
   );
   const hasDocs = report.summary.docTrustScore !== undefined;
   const hasExternal = report.external !== undefined || report.libyear !== undefined;
+  const architectureFindings = report.findings.filter((finding) => finding.subjectType === "architecture");
   const serverModulesHtml = report.modules.map((m) => renderModuleRowServer(m)).join("");
   const { summary } = report;
   const serverDocSourceRowsHtml = hasDocs
@@ -657,6 +724,34 @@ export function renderHtmlFogMap(report: CodefogReport): string {
     .module-path { font-family: var(--font-mono); font-size: 13px; }
     .module-meta { font-size: 12px; font-weight: 400; color: var(--text-secondary); font-family: inherit; }
     .module-states { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+    .architecture-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .architecture-group {
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 12px;
+      overflow-wrap: anywhere;
+    }
+    .architecture-group h3 { margin: 0; font-size: 13px; }
+    .architecture-group ul { list-style: none; margin: 4px 0 0; padding: 0; }
+    .architecture-group li { padding: 8px 0 0; font-size: 12px; color: var(--text-secondary); }
+    .architecture-group li + li { border-top: 1px solid var(--border-subtle); margin-top: 8px; }
+    .architecture-empty { margin: 6px 0 0; color: var(--text-muted); font-size: 12px; }
+    .architecture-source {
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--text-primary);
+      font: inherit;
+      font-family: var(--font-mono);
+      text-decoration: underline;
+      text-align: left;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+    }
     .state-chip {
       display: inline-block;
       flex: none;
@@ -880,6 +975,8 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       border-color: var(--state-fog);
       box-shadow: 0 0 0 1px var(--state-fog);
     }
+    .structure-evidence { margin-top: 6px; font-size: 12px; overflow-wrap: anywhere; }
+    .structure-region { display: block; width: 100%; text-align: left; color: var(--text-primary); font: inherit; font-size: 12px; overflow-wrap: anywhere; }
     .copy-agent-btn {
       margin-top: 8px;
       background: transparent;
@@ -908,6 +1005,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       .metric-line { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
       .metric { flex-direction: column; gap: 0; }
       .grid-2col, .grid-3col { grid-template-columns: minmax(0, 1fr); }
+      .architecture-grid { grid-template-columns: minmax(0, 1fr); }
       .tf-row .copy-agent-btn { display: none; }
       .tf-risk { width: 64px; }
       .module-head { flex-direction: column; gap: 2px; }
@@ -989,7 +1087,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         </div>
         <div class="panel">
           <h2>Top Findings</h2>
-          <div id="l1-findings">${renderTopFindingsServer(report.findings)}</div>
+          <div id="l1-findings">${renderTopFindingsServer(report.findings.filter((finding) => finding.subjectType !== "architecture"))}</div>
         </div>
       </div>
     </section>
@@ -1000,6 +1098,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         <h2>Module Breakdown <span class="panel-sub">${verifiedCollapsedTotal} verified files collapsed</span></h2>
         <div id="l2-submodules">${serverModulesHtml}</div>
       </div>
+      ${report.architecture ? renderArchitecturePanel(report.architecture, architectureFindings) : ""}
     </section>
 
     <!-- Level 3: File Map Treemap -->
@@ -1011,7 +1110,7 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       <div class="grid-3col">
         <!-- Left Column: Findings List -->
         <div class="panel l4-side">
-          <h2>Findings List</h2>
+          <h2 id="l4-list-title">Findings List</h2>
           <div id="l4-findings"></div>
           ${
             report.findings.length === 0
@@ -1051,12 +1150,20 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         renderLevel4(filePath || (REPORT.files[0] && REPORT.files[0].path), findingId);
       }
     }
+    ${report.architecture ? `
+    function openArchitectureSource(button) {
+      const { file, finding } = button.dataset;
+      switchLevel(4, file, finding);
+      if (!finding) jumpToLine(1);
+    }
+    ` : ""}
 
     function buildFindingMarkdown(f) {
+      const isArchitecture = f.subjectType === "architecture";
       return [
-        "### Codefog Finding [" + f.id + "]: " + f.title + " (" + f.state + ")",
+        "### Codefog Finding [" + f.id + "]: " + f.title + (isArchitecture ? "" : " (" + f.state + ")"),
         "- **Location**: " + f.location.file + ":" + f.location.startLine + "-" + f.location.endLine + " (" + f.location.symbol + ")",
-        "- **Risk Score**: " + f.riskScore + "/10",
+        ...(isArchitecture ? [] : ["- **Risk Score**: " + f.riskScore + "/10"]),
         "- **Reason**: " + f.reason,
         "- **Suggested Action**: " + f.suggestedAction,
         "- **Acceptance Check**: " + f.acceptanceCheck.command
@@ -1115,10 +1222,39 @@ export function renderHtmlFogMap(report: CodefogReport): string {
         : ""
     }
 
-    function renderFindingDetail(f) {
+    function renderStructureEvidence(evidence) {
+      const metrics = [];
+      if (evidence.cognitiveComplexity !== undefined) {
+        metrics.push('<div><strong>Cognitive Complexity:</strong> ' + evidence.cognitiveComplexity + '</div>');
+      }
+      if (evidence.maxNestingDepth !== undefined) {
+        metrics.push('<div><strong>Max Nesting Depth:</strong> ' + evidence.maxNestingDepth + '</div>');
+      }
+      if (evidence.errorMaskingLines && evidence.errorMaskingLines.length) {
+        metrics.push('<div><strong>Error masking lines:</strong> ' + evidence.errorMaskingLines.map(line =>
+          '<button type="button" class="architecture-source" onclick="jumpToLine(' + Number(line) + ')">' + escAttr(line) + '</button>'
+        ).join(', ') + '</div>');
+      }
+      return metrics.length ? '<div class="structure-evidence">' + metrics.join('') + '</div>' : '';
+    }
+
+    function renderFindingDetail(f, region) {
       const detailEl = document.getElementById("l4-finding-detail");
+      if (region) {
+        detailEl.innerHTML = '<div class="finding-card active">' +
+          '<strong>' + escAttr(region.symbol) + '</strong>' +
+          renderStructureEvidence(region) + '</div>';
+        return;
+      }
       if (!f) {
         detailEl.innerHTML = '<div style="font-size:13px;color:var(--text-muted)">Select a finding to inspect evidence & agent remediation instructions.</div>';
+        return;
+      }
+      if (f.subjectType === "architecture") {
+        detailEl.innerHTML = '<div class="finding-card active">' +
+          '<div class="fc-head">' + findingTitle(f) + '</div>' +
+          '<div class="structure-evidence">' + escAttr(f.reason) + '</div>' +
+          '<div class="structure-evidence"><strong>Suggested Action:</strong> ' + escAttr(f.suggestedAction) + '</div></div>';
         return;
       }
       const mutantsHtml = (f.evidence.survivingMutants || []).map(m =>
@@ -1146,37 +1282,45 @@ export function renderHtmlFogMap(report: CodefogReport): string {
             (f.evidence && f.evidence.oracleContest ? ' <span class="state-chip chip-contested">CONTESTED</span>' : '') +
             findingTitle(f) +
           '</div>' +
-          '<div style="font-size:12px;margin-top:6px"><strong>Location:</strong> ' + f.location.file + ':' + f.location.startLine + '-' + f.location.endLine + '</div>' +${
+          '<div style="font-size:12px;margin-top:6px"><strong>Location:</strong> ' + escAttr(f.location.file) + ':' + f.location.startLine + '-' + f.location.endLine + '</div>' +${
             hasDocs
               ? `
           claimRefHtml +`
               : ""
           }
           '<div style="font-size:12px;margin-top:4px"><strong>Risk Score:</strong> ' + f.riskScore + '/10</div>' +
-          '<div style="font-size:12px;margin-top:4px"><strong>Why it is in fog:</strong> ' + f.reason + '</div>' +
+          '<div style="font-size:12px;margin-top:4px"><strong>Why it is in fog:</strong> ' + escAttr(f.reason) + '</div>' +
           '<div style="font-size:12px;margin-top:4px"><strong>Evidence:</strong> Executed by ' + f.evidence.executedByTests + ' test(s), ' + f.evidence.assertionsOnOutcome + ' outcome assertion(s)' + (f.evidence.pseudoTested ? ' [PSEUDO-TESTED]' : '') + '</div>' +
+          renderStructureEvidence(f.evidence) +
+          ((f.tags || []).includes("dead-code-fog") ? '<div class="structure-evidence"><code>dead-code-fog</code></div>' : '') +
           (mutantsHtml ? '<ul style="font-size:12px;margin:6px 0;padding-left:18px">' + mutantsHtml + '</ul>' : '') +${
             hasExternal || hasDocs
               ? `
           (externalHtml ? '<div style="font-size:12px;margin-top:4px"><strong>External Overlay:</strong><ul style="font-size:12px;margin:4px 0;padding-left:18px">' + externalHtml + '</ul></div>' : '') +`
               : ""
           }
-          '<div style="font-size:12px;margin-top:6px"><strong>Suggested Action:</strong> ' + f.suggestedAction + '</div>' +
-          '<div style="font-size:11px;margin-top:6px;font-family:var(--font-mono);background:var(--bg-subtle);padding:6px;border-radius:4px">' + f.acceptanceCheck.command + '</div>' +
+          '<div style="font-size:12px;margin-top:6px"><strong>Suggested Action:</strong> ' + escAttr(f.suggestedAction) + '</div>' +
+          '<div style="font-size:11px;margin-top:6px;font-family:var(--font-mono);background:var(--bg-subtle);padding:6px;border-radius:4px">' + escAttr(f.acceptanceCheck.command) + '</div>' +
           '<button class="copy-agent-btn" onclick="copyAgentTask(\\'' + f.id + '\\', this, event)">Copy as task for agent</button>' +
         '</div>';
     }
 
-    function renderLevel4(filePath, selectedFindingId) {${
-      hasDocs
-        ? `
-      const docFile = (REPORT.docFiles || []).find(df => df.path === filePath);
-      const file = docFile || REPORT.files.find(f => f.path === filePath) || (REPORT.docFiles && REPORT.docFiles[0]) || REPORT.files[0];`
-        : `
-      const file = REPORT.files.find(f => f.path === filePath) || REPORT.files[0];`
+    function renderLevel4(filePath, selectedFindingId, selectedRegionIndex) {
+      const architectureSources = REPORT.architecture?.sourceFiles;
+      const architecturePath = filePath || Object.keys(architectureSources || {})[0];
+      const architectureLines = architectureSources && Object.hasOwn(architectureSources, architecturePath)
+        ? architectureSources[architecturePath]
+        : undefined;${
+      hasDocs ? `
+      const docFile = (REPORT.docFiles || []).find(df => df.path === filePath);` : ""
     }
+      const file = ${hasDocs ? "docFile || " : ""}REPORT.files.find(f => f.path === filePath) ||
+        (architectureLines && { path: architecturePath, lines: architectureLines }) ||
+        ${hasDocs ? "(REPORT.docFiles && REPORT.docFiles[0]) || " : ""}REPORT.files[0];
       if (!file) return;
-      document.getElementById("l4-file-title").textContent = file.path + " (Trust " + file.trustScore + "/100)";
+      document.getElementById("l4-file-title").textContent = file.trustScore === undefined
+        ? file.path
+        : file.path + " (Trust " + file.trustScore + "/100)";
 
       // Build map of surviving mutants by line number for inline source annotation
       const mutantsByLine = {};${
@@ -1248,18 +1392,31 @@ export function renderHtmlFogMap(report: CodefogReport): string {
       document.getElementById("l4-minimap").innerHTML = renderMinimap(file);
 
       const fileFindings = REPORT.findings.filter(f => f.location.file === file.path);
-      const list = fileFindings.length ? fileFindings : REPORT.findings;
-      const activeFinding = list.find(f => f.id === selectedFindingId) || list[0];
+      const regionEntries = (file.regions || []).map((region, index) => ({ region, index }))
+        .filter(({ region }) => region.cognitiveComplexity !== undefined && !region.findingId);
+      const list = fileFindings.length || regionEntries.length ? fileFindings : REPORT.findings;
+      const activeRegion = regionEntries.find(entry => entry.index === selectedRegionIndex) ||
+        (list.length === 0 ? regionEntries[0] : undefined);
+      const activeFinding = activeRegion ? undefined : list.find(f => f.id === selectedFindingId) || list[0];
+      document.getElementById("l4-list-title").textContent = regionEntries.length ? "Findings and Functions" : "Findings List";
 
-      document.getElementById("l4-findings").innerHTML = list.map(f =>
-        '<div class="finding-card' + (activeFinding && activeFinding.id === f.id ? ' active' : '') + '" onclick="renderLevel4(\\'' + f.location.file + '\\', \\'' + f.id + '\\')">' +
-          '<div class="fc-head">' + stateChip(f.state) + findingTitle(f) + '</div>' +
-          '<div style="font-size:12px;margin-top:4px">' + f.reason + '</div>' +
-          '<button class="copy-agent-btn" onclick="copyAgentTask(\\'' + f.id + '\\', this, event)">Copy as task for agent</button>' +
+      const findingCards = list.map(f =>
+        '<div class="finding-card' + (activeFinding && activeFinding.id === f.id ? ' active' : '') + '" data-file="' + escAttr(f.location.file) + '" data-finding="' + escAttr(f.id) + '" onclick="renderLevel4(this.dataset.file, this.dataset.finding)">' +
+          '<div class="fc-head">' + (f.subjectType === "architecture" ? '' : stateChip(f.state)) + findingTitle(f) + '</div>' +
+          '<div style="font-size:12px;margin-top:4px">' + escAttr(f.reason) + '</div>' +
+          '<button class="copy-agent-btn" onclick="copyAgentTask(this.parentElement.dataset.finding, this, event)">Copy as task for agent</button>' +
         '</div>'
       ).join("");
+      const regionCards = regionEntries.map(({ region, index }) =>
+        '<button type="button" class="finding-card structure-region' + (activeRegion && activeRegion.index === index ? ' active' : '') +
+        '" data-file="' + escAttr(file.path) + '" data-region="' + index +
+        '" onclick="renderLevel4(this.dataset.file, undefined, Number(this.dataset.region))">' +
+          '<strong>' + escAttr(region.symbol) + '</strong> · Lines ' + region.startLine + '–' + region.endLine + '</button>'
+      ).join("");
+      document.getElementById("l4-findings").innerHTML = findingCards + regionCards;
 
-      renderFindingDetail(activeFinding);
+      renderFindingDetail(activeFinding, activeRegion && activeRegion.region);
+      if (selectedRegionIndex !== undefined && activeRegion) jumpToLine(activeRegion.region.startLine);
       if (selectedFindingId && activeFinding && activeFinding.id === selectedFindingId && activeFinding.location.file === file.path) {
         jumpToLine(activeFinding.location.startLine);
       }

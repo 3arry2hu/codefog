@@ -1,11 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import ts from "typescript";
-import {
-  extractPolyglotRuntimeFingerprints,
-  getPolyglotAdapter,
-  isPolyglotSourceFile,
-} from "./polyglot.js";
+import { getLanguageAdapter, tsLanguageAdapter } from "./adapters/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -20,147 +15,19 @@ export interface FunctionFreshnessInfo {
 export interface FileGitFreshness {
   isGitRepo: boolean;
   churn90d: number;
+  shortTermChurn14d?: number;
   lastCodeChangeAt?: string;
   lastTestChangeAt?: string;
   functions: Map<string, FunctionFreshnessInfo>;
 }
 
-/**
- * Extracts a canonical runtime AST fingerprint for each function/method in a TypeScript file.
- * Strips all comments, whitespace, type annotations, interfaces, and type aliases so that
- * pure formatting, comment, or type-only edits produce the exact same fingerprint.
- */
+/** Extracts a canonical fingerprint of every named function's runtime behavior. */
 export function extractRuntimeFunctionFingerprints(
   sourceText: string,
   fileName = "file.ts",
 ): Map<string, string> {
-  if (isPolyglotSourceFile(fileName)) {
-    return extractPolyglotRuntimeFingerprints(sourceText, fileName);
-  }
-  const sf = ts.createSourceFile(
-    fileName,
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-
-  const fingerprints = new Map<string, string>();
-
-  function serializeRuntimeNode(node: ts.Node): string {
-    // Ignore purely type-level constructs
-    if (
-      ts.isTypeNode(node) ||
-      ts.isTypeParameterDeclaration(node) ||
-      ts.isInterfaceDeclaration(node) ||
-      ts.isTypeAliasDeclaration(node)
-    ) {
-      return "";
-    }
-
-    // For TypeAssertion / AsExpression / SatisfiesExpression, only serialize the inner runtime expression
-    if (ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isTypeAssertionExpression(node)) {
-      return serializeRuntimeNode(node.expression);
-    }
-
-    // For ParameterDeclaration, keep parameter name and initializer (runtime default), skip type annotation
-    if (ts.isParameter(node)) {
-      const nameStr = serializeRuntimeNode(node.name);
-      const initStr = node.initializer ? `=${serializeRuntimeNode(node.initializer)}` : "";
-      const dotDotDot = node.dotDotDotToken ? "..." : "";
-      return `${dotDotDot}${nameStr}${initStr}`;
-    }
-
-    // For VariableDeclaration, keep name and initializer, skip type annotation
-    if (ts.isVariableDeclaration(node)) {
-      const nameStr = serializeRuntimeNode(node.name);
-      const initStr = node.initializer ? `=${serializeRuntimeNode(node.initializer)}` : "";
-      return `Var(${nameStr}${initStr})`;
-    }
-
-    if (ts.isIdentifier(node)) {
-      return `id:${node.text}`;
-    }
-    if (
-      ts.isNumericLiteral(node) ||
-      ts.isStringLiteral(node) ||
-      ts.isNoSubstitutionTemplateLiteral(node) ||
-      ts.isRegularExpressionLiteral(node)
-    ) {
-      return `lit:${node.text}`;
-    }
-    if (node.kind === ts.SyntaxKind.TrueKeyword) return "lit:true";
-    if (node.kind === ts.SyntaxKind.FalseKeyword) return "lit:false";
-    if (node.kind === ts.SyntaxKind.NullKeyword) return "lit:null";
-
-    if (ts.isBinaryExpression(node)) {
-      const op = ts.tokenToString(node.operatorToken.kind) ?? String(node.operatorToken.kind);
-      return `Bin(${serializeRuntimeNode(node.left)},${op},${serializeRuntimeNode(node.right)})`;
-    }
-    if (ts.isPrefixUnaryExpression(node)) {
-      const op = ts.tokenToString(node.operator) ?? String(node.operator);
-      return `Pre(${op},${serializeRuntimeNode(node.operand)})`;
-    }
-    if (ts.isPostfixUnaryExpression(node)) {
-      const op = ts.tokenToString(node.operator) ?? String(node.operator);
-      return `Post(${serializeRuntimeNode(node.operand)},${op})`;
-    }
-
-    const childParts: string[] = [];
-    ts.forEachChild(node, (child) => {
-      // Skip modifier tokens (export, async, public, etc.) except async which affects runtime
-      if (ts.canHaveModifiers(node)) {
-        const modifiers = ts.getModifiers(node);
-        if (modifiers && modifiers.includes(child as ts.Modifier)) {
-          if (child.kind === ts.SyntaxKind.AsyncKeyword) {
-            childParts.push("async");
-          }
-          return;
-        }
-      }
-      const serialized = serializeRuntimeNode(child);
-      if (serialized) {
-        childParts.push(serialized);
-      }
-    });
-
-    return `${ts.SyntaxKind[node.kind]}(${childParts.join(",")})`;
-  }
-
-  function recordFunction(
-    name: string,
-    params: ts.NodeArray<ts.ParameterDeclaration>,
-    body: ts.Node | undefined,
-  ): void {
-    if (!body) return;
-    const paramSig = params.map((p) => serializeRuntimeNode(p)).join(",");
-    const bodySig = serializeRuntimeNode(body);
-    fingerprints.set(name, `fn(${paramSig}){${bodySig}}`);
-  }
-
-  function visit(node: ts.Node): void {
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      recordFunction(node.name.text, node.parameters, node.body);
-      return;
-    }
-    if (ts.isMethodDeclaration(node) && node.name) {
-      recordFunction(node.name.getText(sf), node.parameters, node.body);
-      return;
-    }
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer &&
-      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
-    ) {
-      recordFunction(node.name.text, node.initializer.parameters, node.initializer.body);
-      return;
-    }
-    ts.forEachChild(node, visit);
-  }
-
-  visit(sf);
-  return fingerprints;
+  const adapter = getLanguageAdapter(fileName) ?? tsLanguageAdapter;
+  return adapter.extractRuntimeFingerprints(sourceText, fileName);
 }
 
 export interface CommitEntry {
@@ -367,6 +234,7 @@ export async function analyzeFileGitFreshness(params: {
     return {
       isGitRepo: true,
       churn90d: 1,
+      shortTermChurn14d: 0,
       functions: new Map(),
     };
   }
@@ -382,6 +250,8 @@ export async function analyzeFileGitFreshness(params: {
     1,
     churnOut ? churnOut.split(/\r?\n/).filter(Boolean).length : 1,
   );
+  const cutoff14d = Date.now() - 14 * 24 * 60 * 60 * 1000;
+  const shortTermChurn14d = srcHistory.filter((commit) => Date.parse(commit.isoDate) >= cutoff14d).length;
 
   const latestSrc = srcHistory[0]!;
   const oldestSrc = srcHistory[srcHistory.length - 1]!;
@@ -413,12 +283,12 @@ export async function analyzeFileGitFreshness(params: {
   }
 
   // If the file's LanguageAdapter supports same-file inline test blocks (e.g. Rust `#[cfg(test)]`), find the commits where the inline test blocks changed
-  const polyAdapter = getPolyglotAdapter(relPath);
+  const adapter = getLanguageAdapter(relPath);
   let inlineTestCommits: CommitEntry[] | null = null;
-  if (polyAdapter?.extractInlineTestBlockFingerprints && srcHistory.length > 0) {
+  if (adapter?.extractInlineTestBlockFingerprints && srcHistory.length > 0) {
     const serializeInlineTestMap = (text: string | null): string => {
-      if (!text || !polyAdapter.extractInlineTestBlockFingerprints) return "";
-      const fpMap = polyAdapter.extractInlineTestBlockFingerprints(text);
+      if (!text || !adapter.extractInlineTestBlockFingerprints) return "";
+      const fpMap = adapter.extractInlineTestBlockFingerprints(text);
       if (fpMap.size === 0) return "";
       return Array.from(fpMap.entries())
         .map(([k, v]) => `${k}=${v}`)
@@ -453,7 +323,7 @@ export async function analyzeFileGitFreshness(params: {
     const fnName = span.name;
     const testFiles = associatedTestFiles.get(fnName) ?? [];
     const usesSameFileInlineTests =
-      Boolean(polyAdapter?.extractInlineTestBlockFingerprints) &&
+      Boolean(adapter?.extractInlineTestBlockFingerprints) &&
       testFiles.length === 1 &&
       testFiles[0] === relPath &&
       inlineTestCommits !== null;
@@ -533,7 +403,29 @@ export async function analyzeFileGitFreshness(params: {
   return {
     isGitRepo: true,
     churn90d,
+    shortTermChurn14d,
     lastCodeChangeAt: latestSrc.isoDate,
     functions,
   };
+}
+
+export async function listTrackedRepoFiles(rootDir: string): Promise<Set<string>> {
+  const files = await runGit(rootDir, ["ls-files", "--cached", "-z", "--"]);
+  return new Set(files?.split("\0").filter(Boolean) ?? []);
+}
+
+export async function readRecentCommitFiles(
+  rootDir: string,
+): Promise<{ shallow: boolean; commits: string[][] }> {
+  const shallow = await runGit(rootDir, ["rev-parse", "--is-shallow-repository"]);
+  if (shallow !== "false") return { shallow: shallow === "true", commits: [] };
+  const log = await runGit(rootDir, [
+    "log", "--since-as-filter=180 days ago", "-n", "500", "--format=%x00%x00%H",
+    "--name-only", "--no-renames", "-z",
+  ]);
+  const commits = log
+    ?.split(/\0\0[0-9a-f]{40,64}\0/)
+    .slice(1)
+    .map((entry) => [...new Set(entry.replace(/^\n/, "").split("\0").filter(Boolean))]) ?? [];
+  return { shallow: false, commits };
 }

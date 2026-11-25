@@ -280,12 +280,14 @@ npx @barryzhu/codefog@latest install-skill --global
 | `--sarif <path>` | 导入 SARIF 2.1.0 结果作为叠加层，可重复 | — |
 | `--knip <path>` | 导入 Knip JSON 报告作为叠加层，可重复 | — |
 | `--libyear <path>` | 导入 libyear JSON 报告，可重复 | — |
+| `--arch` | 分析模块依赖、循环、不稳定枢纽与 Git 共变 | 存在架构契约时自动开启 |
+| `--arch-config <path>` | 指定架构契约 | 存在时读取 `.codefog/architecture.json` |
 | `--diff <baseRef>` | 与基准分支或提交（如 `origin/main`）对比 | — |
 | `--pr-comment [dir]` | 生成 `pr-comment.md` 与 `pr-diff.svg` | `.codefog` |
 | `--html <path>` | 雾图输出路径 | `.codefog/report.html` |
 | `--open` | 在浏览器中打开雾图 | 关闭 |
 | `--json` | 将完整 JSON 报告输出到 stdout | 关闭 |
-| `--fail-on <policy>` | CI 退出码门禁，见下表 | `returned` |
+| `--fail-on <policies>` | 逗号分隔的 CI 门禁，任一策略命中即退出 `1` | `returned` |
 | `-v`、`--version` / `-h`、`--help` | 版本与帮助 | — |
 
 <details>
@@ -295,11 +297,16 @@ npx @barryzhu/codefog@latest install-skill --global
 | :--- | :--- |
 | `returned`（默认） | 存在任何 `fog-returned` 代码 |
 | `doc-returned` | 存在任何 `fog-returned` 文档声明。指令冲突不触发 |
-| `regression` | 代码存在 `fog-returned`、`--diff` 下有文件证据降级，或覆盖率上升但有效证据下降 |
+| `regression` | 代码存在 `fog-returned`、`--diff` 下有文件证据降级、新增未豁免边界违例，或覆盖率上升但有效证据下降 |
+| `arch-violation` | 架构分析检出未豁免的边界违例 |
 | `any-fog` | 存在任何非 `verified` 的代码行 |
 | `contested` | 结果断言与独立预期或历史缺陷矛盾 |
 | `none` | 从不，只生成报告 |
 </details>
+
+### 架构契约
+
+将 `.codefog/architecture.json` 纳入版本控制后，扫描与 `verify` 会自动检查架构边界。存量违例可将 JSON 报告中的 `baselineKey` 复制到 `baseline` 豁免。CI 可用 `--fail-on returned,arch-violation` 同时拦截回雾和未豁免的边界违例。结构指标、不稳定枢纽及隐式耦合独立于五态和信任分。[架构契约示例](./README.md#architecture-contract)
 
 ### `codefog verify <file> [options]`
 
@@ -318,6 +325,7 @@ npx @barryzhu/codefog verify README.md
 | `--oracle` | 拒绝与独立预期或已知缺陷矛盾的断言 |
 | `--test-cmd <cmd>` | 自定义测试命令。默认按后缀选择 `vitest`、`go test`、`cargo test` 或 `mvn test` |
 | `--run-docs` | 对 `.md` 目标，要求被修改的代码块必须跑通 |
+| `--arch` / `--arch-config <path>` | 检查目标文件的边界违例及所在模块的循环依赖 |
 | `--allow-source-change` | 允许生产文件（文档验收时为被引用的代码文件）存在未提交改动 |
 
 <details>

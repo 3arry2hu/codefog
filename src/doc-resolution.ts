@@ -1,15 +1,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import ts from "typescript";
 import { CODEFOG_COMMAND } from "./cli-command.js";
 import { collectFilesUnderDir, isInstructionFile } from "./doc-markdown.js";
-import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
 import { toPosix } from "./path-utils.js";
-import {
-  getPolyglotAdapter,
-  isPolyglotSourceFile,
-  isPolyglotTestFile,
-} from "./polyglot.js";
+import { getLanguageAdapter, tsLanguageAdapter } from "./adapters/index.js";
 import { computeRiskScore, createDeterministicFindingId } from "./scoring.js";
 import type { DocClaim, DocReferent, EvidenceState, Finding } from "./types.js";
 
@@ -136,119 +130,15 @@ const NON_SYMBOL_LITERALS = new Set([
   "symbol",
 ]);
 
-function isRepoTestFile(relPath: string): boolean {
-  const norm = toPosix(relPath);
-  return (
-    /\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(norm) ||
-    /(?:^|\/)tests?\//.test(norm) ||
-    isPolyglotTestFile(norm)
-  );
-}
-
 export function isRepoSourceFile(relPath: string): boolean {
   const norm = toPosix(relPath);
-  if (isRepoTestFile(norm)) return false;
-  if (norm.endsWith(".d.ts")) return false;
-  return /\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(norm) || isPolyglotSourceFile(norm);
+  return !/(?:^|\/)tests?\//.test(norm) && getLanguageAdapter(norm)?.isSourceFile(norm) === true;
 }
 
 export function extractSymbolsFromSource(sourceText: string, filePath: string): RepoSymbol[] {
   const relPath = toPosix(filePath);
-  const polyAdapter = getPolyglotAdapter(relPath);
-  if (polyAdapter) {
-    return polyAdapter.extractSymbols(sourceText, relPath);
-  }
-
-  const symbols: RepoSymbol[] = [];
-  const sf = ts.createSourceFile(
-    relPath,
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    relPath.endsWith(".tsx") || relPath.endsWith(".jsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-  const fnFingerprints = extractRuntimeFunctionFingerprints(sourceText, relPath);
-
-  function visit(node: ts.Node, enclosingClass?: string): void {
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      const name = node.name.text;
-      const startLine = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-      const endLine = sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
-      symbols.push({
-        name,
-        kind: "function",
-        file: relPath,
-        startLine,
-        endLine,
-        runtimeFingerprint: fnFingerprints.get(name) ?? `fn:${name}`,
-      });
-    } else if (ts.isClassDeclaration(node) && node.name) {
-      const className = node.name.text;
-      const startLine = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-      const endLine = sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
-      const memberFps: string[] = [];
-      for (const member of node.members) {
-        if (ts.isMethodDeclaration(member) && member.name) {
-          const mName = member.name.getText(sf);
-          memberFps.push(`${mName}:${fnFingerprints.get(mName) ?? ""}`);
-        } else if (ts.isPropertyDeclaration(member) && member.name) {
-          const pName = member.name.getText(sf);
-          const initText = member.initializer
-            ? member.initializer.getText(sf).replace(/\s+/g, "")
-            : "";
-          memberFps.push(`prop:${pName}=${initText}`);
-        } else if (ts.isConstructorDeclaration(member) && member.body) {
-          memberFps.push(`ctor:${member.body.getText(sf).replace(/\s+/g, "")}`);
-        }
-      }
-      symbols.push({
-        name: className,
-        kind: "class",
-        file: relPath,
-        startLine,
-        endLine,
-        runtimeFingerprint: `class:${className}{${memberFps.join(";")}}`,
-      });
-      ts.forEachChild(node, (child) => visit(child, className));
-      return;
-    } else if (ts.isMethodDeclaration(node) && node.name) {
-      const name = node.name.getText(sf);
-      const startLine = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-      const endLine = sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
-      symbols.push({
-        name,
-        ...(enclosingClass ? { qualifiedName: `${enclosingClass}.${name}` } : {}),
-        kind: "method",
-        file: relPath,
-        startLine,
-        endLine,
-        runtimeFingerprint: fnFingerprints.get(name) ?? `method:${name}`,
-      });
-      return;
-    } else if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer &&
-      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
-    ) {
-      const name = node.name.text;
-      const startLine = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-      const endLine = sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
-      symbols.push({
-        name,
-        kind: "function",
-        file: relPath,
-        startLine,
-        endLine,
-        runtimeFingerprint: fnFingerprints.get(name) ?? `fn:${name}`,
-      });
-      return;
-    }
-    ts.forEachChild(node, (child) => visit(child, enclosingClass));
-  }
-
-  visit(sf);
-  return symbols.sort((a, b) => a.startLine - b.startLine);
+  const adapter = getLanguageAdapter(relPath) ?? tsLanguageAdapter;
+  return adapter.extractSymbols(sourceText, relPath);
 }
 
 export function addSymbolToIndex(

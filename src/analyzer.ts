@@ -2,9 +2,10 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import ts from "typescript";
+import { analyzeArchitecture, analyzeArchitectureGraph } from "./architecture.js";
+import { loadArchitectureContract } from "./architecture-contract.js";
+import { deriveModulePath } from "./path-utils.js";
 import { CODEFOG_COMMAND } from "./cli-command.js";
-import { countTsControlFlowDecisions } from "./ts-ast-utils.js";
 import { loadCoverageRecords, type CoverageFileRecord } from "./lcov.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import { analyzeFileGitFreshness } from "./git-freshness.js";
@@ -12,17 +13,14 @@ import { getSpanMutationSummary, loadMutationReport, type ParsedMutationReport }
 import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
 import { analyzeDocClaims } from "./doc-claims.js";
 import { loadExternalOverlay, matchRegionExternalIssues } from "./external.js";
-import {
-  extractPolyglotFunctionSpans,
-  getPolyglotAdapter,
-  isPolyglotSourceFile,
-} from "./polyglot.js";
+import { getLanguageAdapter, tsLanguageAdapter } from "./adapters/index.js";
 import {
   computeRiskScore,
   computeTrustScore,
   createDeterministicFindingId,
   emptyLocByState,
   getDominantState,
+  hasStructuralRisk,
   roundPct,
   STATE_EVIDENCE_RANK,
 } from "./scoring.js";
@@ -38,7 +36,16 @@ import type {
   ModuleSummary,
 } from "./types.js";
 
+export { deriveModulePath } from "./path-utils.js";
+
 const execFileAsync = promisify(execFile);
+
+type TerminalEvidence = Pick<CodefogReport, "modules" | "findings">;
+const plainTerminalEvidence = new WeakMap<CodefogReport, TerminalEvidence>();
+
+export function getPlainTerminalEvidence(report: CodefogReport): TerminalEvidence {
+  return plainTerminalEvidence.get(report) ?? report;
+}
 
 interface ParsedFunctionSpan {
   name: string;
@@ -47,96 +54,11 @@ interface ParsedFunctionSpan {
   cyclomaticComplexity: number;
 }
 
-function extractFunctionSpans(sourceText: string, fileName: string): ParsedFunctionSpan[] {
-  if (isPolyglotSourceFile(fileName)) {
-    return extractPolyglotFunctionSpans(sourceText, fileName);
-  }
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-
-  const spans: ParsedFunctionSpan[] = [];
-
-  function countComplexity(node: ts.Node): number {
-    return 1 + countTsControlFlowDecisions(node);
-  }
-
-  function visit(node: ts.Node): void {
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-      const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
-      spans.push({
-        name: node.name.text,
-        startLine: start,
-        endLine: end,
-        cyclomaticComplexity: countComplexity(node),
-      });
-      return;
-    }
-    if (ts.isMethodDeclaration(node) && node.name) {
-      const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-      const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
-      spans.push({
-        name: node.name.getText(sourceFile),
-        startLine: start,
-        endLine: end,
-        cyclomaticComplexity: countComplexity(node),
-      });
-      return;
-    }
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer &&
-      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
-    ) {
-      const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-      const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
-      spans.push({
-        name: node.name.text,
-        startLine: start,
-        endLine: end,
-        cyclomaticComplexity: countComplexity(node.initializer),
-      });
-      return;
-    }
-    ts.forEachChild(node, visit);
-  }
-
-  visit(sourceFile);
-  return spans.sort((a, b) => a.startLine - b.startLine);
-}
-
 function formatLinePreview(lines: number[], maxShown = 8): string {
   if (lines.length <= maxShown) return lines.join(", ");
   return `${lines.slice(0, maxShown).join(", ")} (+${lines.length - maxShown} more)`;
 }
 
-export function deriveModulePath(filePath: string): string {
-  const parts = filePath.split("/").filter(Boolean);
-  if (parts.length >= 4 && parts[0] === "src" && parts[1] === "main" && parts[2] === "java") {
-    return "src/main/java";
-  }
-  if (
-    parts.length >= 3 &&
-    (parts[0] === "src" ||
-      parts[0] === "internal" ||
-      parts[0] === "pkg" ||
-      parts[0] === "cmd" ||
-      parts[0] === "crates" ||
-      parts[0] === "services")
-  ) {
-    return `${parts[0]}/${parts[1]}`;
-  }
-  if (parts.length >= 2) {
-    return parts[0]!;
-  }
-  return ".";
-}
 
 async function readGitMeta(rootDir: string): Promise<{ branch: string; commit: string }> {
   try {
@@ -153,8 +75,15 @@ async function readGitMeta(rootDir: string): Promise<{ branch: string; commit: s
   }
 }
 
-export async function analyzeRepository(options: AnalyzeOptions): Promise<CodefogReport> {
+export async function analyzeRepository(
+  options: AnalyzeOptions,
+  snapshotFiles?: ReadonlySet<string>,
+): Promise<CodefogReport> {
   const rootDir = path.resolve(options.rootDir);
+  const contract = await loadArchitectureContract(rootDir, options.archConfigPath);
+  const architectureGraph = options.arch || contract
+    ? await analyzeArchitectureGraph(rootDir, contract, snapshotFiles)
+    : undefined;
   const {
     records: lcovRecords,
     mtimeMs: lcovMtimeMs,
@@ -163,6 +92,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
   } = await loadCoverageRecords(
     rootDir,
     options.coveragePath ?? options.lcovPath,
+    { allowEmpty: Boolean(architectureGraph?.moduleByFile.size) },
   );
   const astResult = await analyzeTestAstEvidence(rootDir);
   const mutationPath = options.mutationReportPath ?? options.strykerPath;
@@ -190,6 +120,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
 
   const files: FileSummary[] = [];
   const findings: Finding[] = [];
+  const unboostedFileRisk = new Map<FileSummary, number>();
+  const unboostedFindingRisk = new Map<Finding, number>();
 
   for (const [relPath, record] of lcovRecords.entries()) {
     const absPath = path.join(rootDir, relPath);
@@ -200,8 +132,9 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       sourceText = "";
     }
     const sourceLines = sourceText ? sourceText.split(/\r?\n/) : [];
+    const adapter = getLanguageAdapter(relPath);
     const spans = sourceText
-      ? extractFunctionSpans(sourceText, relPath)
+      ? (adapter ?? tsLanguageAdapter).extractFunctionSpans(sourceText, relPath)
       : record.functions.map((f, idx, arr) => ({
           name: f.name,
           startLine: f.line,
@@ -209,9 +142,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           cyclomaticComplexity: 1,
         }));
 
-    const adapter = getPolyglotAdapter(relPath);
     if (adapter?.filterProductionLines && spans.length > 0) {
-      adapter.filterProductionLines(record.lines, spans as any);
+      adapter.filterProductionLines(record.lines, spans);
       record.linesFound = record.lines.size;
       record.linesHit = Array.from(record.lines.values()).filter((v) => v > 0).length;
     }
@@ -264,6 +196,8 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           (iss) => iss.file === relPath || iss.file.endsWith(`/${relPath}`),
         )
       : [];
+    const unusedFile = Boolean(options.knipPath?.length) &&
+      fileExternalIssues.some((issue) => issue.source === "knip" && issue.ruleId === "unused-file");
 
     for (const span of effectiveSpans) {
       const fnRecord = record.functions.find((f) => f.name === span.name);
@@ -374,13 +308,15 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             span.endLine,
           )
         : [];
-      const regionRisk = computeRiskScore({
+      const structure = sourceText ? adapter?.analyzeFunctionStructure(sourceText, span, relPath) : undefined;
+      const regionRiskInputs = {
         unverifiedLoc: regionState === "verified" ? 0 : Math.max(1, unverifiedInSpan),
         churn90d: fileChurn90d,
         cyclomaticComplexity: span.cyclomaticComplexity,
         state: regionState,
         externalIssuesCount: regionExternalIssues.length,
-      });
+      };
+      const regionRisk = computeRiskScore({ ...regionRiskInputs, ...structure });
 
       const findingId =
         regionState !== "verified"
@@ -395,6 +331,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
         state: regionState,
         riskScore: regionRisk,
         cyclomaticComplexity: span.cyclomaticComplexity,
+        ...structure,
         executedByTests,
         assertionsOnOutcome,
         pseudoTested,
@@ -449,10 +386,21 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
           suggestedAction = `Add branch tests for ${span.name} in ${relPath} (lines ${span.startLine}-${span.endLine}) to cover all conditional paths with outcome assertions.`;
         }
 
-        findings.push({
+        const deadCodeFog =
+          Boolean(options.knipPath?.length) &&
+          (regionState === "fog" || regionState === "weak-evidence") &&
+          (unusedFile || regionExternalIssues.some((issue) =>
+            issue.source === "knip" && issue.ruleId === "unused-export"));
+        const deadCodeSubject = unusedFile ? relPath : `${span.name} in ${relPath}`;
+        if (deadCodeFog) {
+          suggestedAction = `Check references to ${deadCodeSubject} and remove the dead code if unused before adding tests.`;
+        }
+
+        const finding: Finding = {
           id: findingId,
           title: span.name,
           state: regionState,
+          ...(deadCodeFog ? { tags: ["dead-code-fog"] } : {}),
           riskScore: regionRisk,
           agentReady: !oracle.contested && regionState !== "self-proof-fog",
           location: {
@@ -472,13 +420,17 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
             ...(fnFreshness?.lastCodeChangeAt ? { lastCodeChangeAt: fnFreshness.lastCodeChangeAt } : {}),
             ...(fnFreshness?.lastTestChangeAt ? { lastTestChangeAt: fnFreshness.lastTestChangeAt } : {}),
             survivingMutants: spanMutants.survivingMutants,
+            ...structure,
             ...(uncoveredLines.length > 0 ? { uncoveredLines } : {}),
             ...(unhitBranchLines.length > 0 ? { unhitBranchLines } : {}),
             ...(externalOverlay ? { externalIssues: regionExternalIssues } : {}),
           },
           ...(externalOverlay ? { externalIssues: regionExternalIssues } : {}),
           suggestedAction,
-          acceptanceCheck: {
+          acceptanceCheck: deadCodeFog ? {
+            command: `${CODEFOG_COMMAND} --json`,
+            criteria: [`Confirm ${deadCodeSubject} is unused, remove it, and regenerate the Knip report.`],
+          } : {
             command: `${CODEFOG_COMMAND} verify ${relPath} --mutants --oracle --lines ${span.startLine}-${span.endLine}`,
             criteria: [
               `Lines ${span.startLine}-${span.endLine} in ${relPath} reach verified state`,
@@ -490,7 +442,12 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
                 : []),
             ],
           },
-        });
+        };
+        findings.push(finding);
+        if (structure && hasStructuralRisk(structure)) {
+          const risk = computeRiskScore(regionRiskInputs);
+          if (risk !== regionRisk) unboostedFindingRisk.set(finding, risk);
+        }
       }
     }
 
@@ -516,15 +473,21 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     const unverifiedLoc = totalFileLoc - fileLocByState.verified;
     const dominantState = getDominantState(fileLocByState);
     const totalComplexity = regions.reduce((acc, r) => acc + r.cyclomaticComplexity, 0) || 1;
-    const fileRisk = computeRiskScore({
+    const unverifiedRegions = regions.filter((r) => r.state !== "verified");
+    const fileRiskInputs = {
       unverifiedLoc,
       churn90d: fileChurn90d,
       cyclomaticComplexity: totalComplexity,
       state: dominantState,
       externalIssuesCount: fileExternalIssues.length,
-    });
+    };
+    const fileStructure = {
+      cognitiveComplexity: unverifiedRegions.reduce((max, region) => Math.max(max, region.cognitiveComplexity ?? 0), 0),
+      errorMaskingLines: unverifiedRegions.flatMap((region) => region.errorMaskingLines ?? []),
+    };
+    const fileRisk = computeRiskScore({ ...fileRiskInputs, ...fileStructure });
 
-    files.push({
+    const file: FileSummary = {
       path: relPath,
       modulePath: deriveModulePath(relPath),
       totalLoc: totalFileLoc,
@@ -533,13 +496,19 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       trustScore: computeTrustScore(fileLocByState),
       riskScore: fileRisk,
       churn90d: fileChurn90d,
+      ...(gitFreshness.shortTermChurn14d !== undefined ? { shortTermChurn14d: gitFreshness.shortTermChurn14d } : {}),
       cyclomaticComplexity: totalComplexity,
       locByState: fileLocByState,
       lines: sourceLines,
       lineStates,
       regions,
       ...(externalOverlay ? { externalIssues: fileExternalIssues } : {}),
-    });
+    };
+    files.push(file);
+    if (hasStructuralRisk(fileStructure)) {
+      const risk = computeRiskScore(fileRiskInputs);
+      if (risk !== fileRisk) unboostedFileRisk.set(file, risk);
+    }
   }
 
   // Group into modules
@@ -551,6 +520,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
   }
 
   const modules: ModuleSummary[] = [];
+  const unboostedModuleRisk = new Map<ModuleSummary, number>();
   for (const [modPath, modFiles] of moduleMap.entries()) {
     const modLoc = emptyLocByState();
     let verifiedFilesCollapsed = 0;
@@ -568,14 +538,19 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
       }
     }
 
-    modules.push({
+    const module: ModuleSummary = {
       path: modPath,
       totalFiles: modFiles.length,
       verifiedFilesCollapsed,
       trustScore: computeTrustScore(modLoc),
       maxRiskScore,
       locByState: modLoc,
-    });
+    };
+    modules.push(module);
+    if (unboostedFileRisk.size > 0) {
+      const risk = modFiles.reduce((max, file) => Math.max(max, unboostedFileRisk.get(file) ?? file.riskScore), 0);
+      if (risk !== maxRiskScore) unboostedModuleRisk.set(module, risk);
+    }
   }
 
   const repoLocByState = emptyLocByState();
@@ -604,7 +579,7 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
   if (docResult) {
     for (const f of findings) {
       f.subjectType = "code";
-      f.tags = [];
+      f.tags ??= [];
     }
     findings.push(...docResult.docFindings);
 
@@ -679,8 +654,26 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     });
   }
 
-  modules.sort((a, b) => b.maxRiskScore - a.maxRiskScore || a.trustScore - b.trustScore);
-  findings.sort((a, b) => b.riskScore - a.riskScore || a.id.localeCompare(b.id));
+  const architecture = architectureGraph
+    ? await analyzeArchitecture(rootDir, files, architectureGraph)
+    : undefined;
+  if (architecture) findings.push(...architecture.findings);
+
+  const byModuleRisk = (a: ModuleSummary, b: ModuleSummary) => b.maxRiskScore - a.maxRiskScore || a.trustScore - b.trustScore;
+  const byFindingRisk = (a: Finding, b: Finding) => b.riskScore - a.riskScore || a.id.localeCompare(b.id);
+  // Preserve the legacy risk ordering and values in the non-TTY summary.
+  const terminalEvidence = unboostedModuleRisk.size > 0 || unboostedFindingRisk.size > 0
+    ? {
+        modules: modules.map((module) => ({
+          ...module, maxRiskScore: unboostedModuleRisk.get(module) ?? module.maxRiskScore,
+        })).sort(byModuleRisk),
+        findings: findings.map((finding) => ({
+          ...finding, riskScore: unboostedFindingRisk.get(finding) ?? finding.riskScore,
+        })).sort(byFindingRisk),
+      }
+    : undefined;
+  modules.sort(byModuleRisk);
+  findings.sort(byFindingRisk);
   files.sort((a, b) => b.riskScore - a.riskScore || a.path.localeCompare(b.path));
 
   const report: CodefogReport = {
@@ -726,10 +719,12 @@ export async function analyzeRepository(options: AnalyzeOptions): Promise<Codefo
     modules,
     findings,
     files,
-    warnings: coverageWarnings,
+    warnings: architecture?.warning ? [...coverageWarnings, architecture.warning] : coverageWarnings,
+    ...(architecture ? { architecture: architecture.summary } : {}),
     ...(externalOverlay ? { external: externalOverlay } : {}),
     ...(externalOverlay?.libyear ? { libyear: externalOverlay.libyear } : {}),
   };
 
+  if (terminalEvidence) plainTerminalEvidence.set(report, terminalEvidence);
   return report;
 }

@@ -280,12 +280,14 @@ The full guide with prompt templates is in [`docs/ai-skill-guide.md`](./docs/ai-
 | `--sarif <path>` | Import SARIF 2.1.0 results as an overlay. Repeatable | — |
 | `--knip <path>` | Import a Knip JSON report as an overlay. Repeatable | — |
 | `--libyear <path>` | Import a libyear JSON report. Repeatable | — |
+| `--arch` | Analyze module dependencies, cycles, hubs and Git co-change | on when a contract exists |
+| `--arch-config <path>` | Load a specific Architecture Contract | `.codefog/architecture.json` if present |
 | `--diff <baseRef>` | Compare against a base ref such as `origin/main` | — |
 | `--pr-comment [dir]` | Write `pr-comment.md` and `pr-diff.svg` | `.codefog` |
 | `--html <path>` | Fog Map output path | `.codefog/report.html` |
 | `--open` | Open the Fog Map in your browser | off |
 | `--json` | Print the full JSON report to stdout | off |
-| `--fail-on <policy>` | CI exit gate, see below | `returned` |
+| `--fail-on <policies>` | Comma-separated CI gates. Any matching policy exits with `1` | `returned` |
 | `-v`, `--version` / `-h`, `--help` | Version and help | — |
 
 <details>
@@ -295,11 +297,41 @@ The full guide with prompt templates is in [`docs/ai-skill-guide.md`](./docs/ai-
 | :--- | :--- |
 | `returned` (default) | Any code is `fog-returned` |
 | `doc-returned` | Any doc claim is `fog-returned`. Instruction conflicts do not trip it |
-| `regression` | Code is `fog-returned`, a file lost evidence under `--diff`, or coverage went up while real evidence went down |
+| `regression` | Code is `fog-returned`, a file lost evidence under `--diff`, coverage went up while evidence went down, or `--diff` detects a new active Boundary Violation |
+| `arch-violation` | Architecture analysis finds an unbaselined Boundary Violation |
 | `any-fog` | Any line is not `verified` |
 | `contested` | An outcome assertion contradicts an independent expectation or a historical defect |
 | `none` | Never; only report |
 </details>
+
+### Architecture Contract
+
+Commit `.codefog/architecture.json` to enable the checks in scans and `verify`. Use `--arch` for a scan without a contract, or `--arch-config <path>` to select a different contract.
+
+```json
+{
+  "modules": {
+    "routes": ["src/routes/**"],
+    "db": ["src/db/**"]
+  },
+  "defaultPolicy": "allow",
+  "noCycles": true,
+  "rules": [
+    { "from": "routes", "to": "db", "effect": "forbid", "because": "Use the service layer." }
+  ],
+  "publicEntry": { "db": ["src/db/index.ts"] },
+  "baseline": []
+}
+```
+
+Paths and globs are relative to the repository root. The first matching module group wins. Unmatched files use the directory layout. Rules apply to edges between modules, with the last rule for a module pair taking precedence. To exempt existing debt, copy a violation's `baselineKey` from the JSON report into `baseline`.
+
+```bash
+npx @barryzhu/codefog --fail-on returned,arch-violation
+npx @barryzhu/codefog --diff origin/main --pr-comment .codefog --fail-on regression
+```
+
+Unstable Hubs and Implicit Coupling are advisory. The five evidence states and Trust Score are calculated independently.
 
 ### `codefog verify <file> [options]`
 
@@ -318,6 +350,7 @@ npx @barryzhu/codefog verify README.md
 | `--oracle` | Reject assertions that contradict expectations or known defects |
 | `--test-cmd <cmd>` | Custom test command. Defaults to `vitest`, `go test`, `cargo test` or `mvn test` by extension |
 | `--run-docs` | For `.md` targets, require changed code blocks to pass |
+| `--arch` / `--arch-config <path>` | Check Boundary Violations involving the target source file or its cycle |
 | `--allow-source-change` | Allow uncommitted edits to the production file (or, for docs, to referenced code) |
 
 <details>

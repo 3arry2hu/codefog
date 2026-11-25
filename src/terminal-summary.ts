@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { truncateMiddle } from "./path-utils.js";
 import { STATE_URGENCY_ORDER } from "./scoring.js";
-import type { CodefogReport, EvidenceState, LocByState } from "./types.js";
+import type { ArchitectureSummary, CodefogReport, EvidenceState, LocByState } from "./types.js";
 
 export { truncateMiddle };
 
@@ -118,12 +118,19 @@ function label(text: string): string {
   return paint(DIM, padEnd(text, 11));
 }
 
+export function renderArchitectureSummary(architecture: ArchitectureSummary): string {
+  const { boundaryViolations, cycles, unstableHubs, implicitCouplings, propagationCostPct } = architecture;
+  const active = boundaryViolations.filter((violation) => !violation.baselined).length;
+  return `Architecture: Violations=${active} Cycles=${cycles.length} UnstableHubs=${unstableHubs.length} ImplicitCoupling=${implicitCouplings.length} Propagation=${propagationCostPct}%`;
+}
+
 export function formatLevel1SummaryColor(
   report: CodefogReport,
   reportPath?: string,
   cwd: string = process.cwd(),
 ): string {
-  const { summary, repository, modules, findings } = report;
+  const { summary, repository, modules } = report;
+  const findings = report.findings.filter((finding) => finding.subjectType !== "architecture");
   const m = summary.metrics;
   const coverage = m.coverageAvailable !== false;
   const mutation = m.mutationAvailable !== false;
@@ -184,6 +191,10 @@ export function formatLevel1SummaryColor(
     const rel = path.relative(cwd, reportPath);
     const shown = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : reportPath;
     lines.push("", `${label("Fog Map")}${truncateMiddle(shown, TERMINAL_MAX_COLUMNS - 11)}`);
+  }
+
+  if (report.architecture) {
+    lines.push(paint(DIM, renderArchitectureSummary(report.architecture)));
   }
 
   return lines.map((line) => fitLine(line)).join("\n") + "\n";

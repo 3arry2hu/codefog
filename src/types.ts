@@ -59,7 +59,8 @@ export interface Finding {
   id: string;
   title: string;
   state: EvidenceState;
-  subjectType?: "code" | "doc";
+  subjectType?: "code" | "doc" | "architecture";
+  baselined?: boolean;
   tags?: string[];
   riskScore: number;
   agentReady: boolean;
@@ -91,6 +92,9 @@ export interface Finding {
     uncoveredLines?: number[];
     /** 1-indexed lines in this span that contain at least one untaken branch. */
     unhitBranchLines?: number[];
+    cognitiveComplexity?: number;
+    maxNestingDepth?: number;
+    errorMaskingLines?: number[];
     externalIssues?: ExternalIssue[];
   };
   /** @deprecated Read `finding.evidence.externalIssues` instead. Kept in sync for compatibility. */
@@ -119,6 +123,9 @@ export interface FileSymbolRegion {
   state: EvidenceState;
   riskScore: number;
   cyclomaticComplexity: number;
+  cognitiveComplexity?: number;
+  maxNestingDepth?: number;
+  errorMaskingLines?: number[];
   executedByTests: number;
   assertionsOnOutcome: number;
   pseudoTested: boolean;
@@ -143,6 +150,7 @@ export interface FileSummary {
   trustScore: number;
   riskScore: number;
   churn90d: number;
+  shortTermChurn14d?: number;
   cyclomaticComplexity: number;
   locByState: LocByState;
   lines: string[];
@@ -161,6 +169,30 @@ export interface DeletedDocClaimEvent {
   referent: DocReferent;
 }
 
+export interface StructuralRotDelta {
+  complexitySpikes: Array<{
+    file: string;
+    symbol: string;
+    line: number;
+    before: number;
+    after: number;
+    delta: number;
+  }>;
+  addedErrorMasking: Array<{
+    file: string;
+    line: number;
+    pattern: "empty-catch" | "discarded-error" | "empty-error-check" | "unwrap" | "expect";
+  }>;
+  addedDuplicatedBlocks: Array<{
+    file: string;
+    startLine: number;
+    endLine: number;
+    duplicateFile: string;
+    duplicateStartLine: number;
+    duplicateEndLine: number;
+  }>;
+}
+
 export interface DiffComparison {
   baseRef: string;
   coverageUpEvidenceDown: boolean;
@@ -168,6 +200,7 @@ export interface DiffComparison {
   fogReturnedFiles: string[];
   weakenedFiles: string[];
   changedFiles?: string[];
+  newBoundaryViolations?: BoundaryViolation[];
   beforeSummary: {
     trustScore: number;
     docTrustScore?: number;
@@ -196,6 +229,7 @@ export interface DiffComparison {
   };
   newDocFogReturnedClaims?: DocClaim[];
   deletedDocClaims?: DeletedDocClaimEvent[];
+  structuralRot?: StructuralRotDelta;
 }
 
 export type DocBlockKind =
@@ -275,6 +309,60 @@ export interface DocFileSummary {
   claims: DocClaim[];
 }
 
+export interface ArchitectureEdge {
+  from: string;
+  to: string;
+}
+
+export interface ArchitectureImport extends ArchitectureEdge {
+  line: number;
+}
+
+export interface ArchitectureCycle {
+  modules: string[];
+  edges: ArchitectureEdge[];
+  file: string;
+}
+
+export interface UnstableHub {
+  file: string;
+  fanIn: number;
+  dependents: string[];
+  churn90d: number;
+  trustScore: number;
+  hasFogReturned: boolean;
+}
+
+export interface ImplicitCoupling extends ArchitectureEdge {
+  coChange: number;
+  coupling: number;
+}
+
+export interface BoundaryViolationKey extends ArchitectureEdge {
+  kind: "rule" | "cycle" | "public-entry";
+}
+
+export interface BoundaryViolation extends BoundaryViolationKey {
+  file: string;
+  reason: string;
+  explanation?: string;
+  baselined: boolean;
+  baselineKey: BoundaryViolationKey;
+  edges: ArchitectureImport[];
+}
+
+export interface ArchitectureSummary {
+  modules: string[];
+  edges: ArchitectureEdge[];
+  propagationCostPct: number;
+  cycles: ArchitectureCycle[];
+  unstableHubs: UnstableHub[];
+  implicitCouplings: ImplicitCoupling[];
+  boundaryViolations: BoundaryViolation[];
+  /** Source for architecture links that have no executable coverage region. */
+  sourceFiles?: Record<string, string[]>;
+}
+
 export interface CodefogReport {
   $schema: "https://codefog.dev/schemas/v1/report.json";
   version: "1.0.0";
@@ -315,10 +403,13 @@ export interface CodefogReport {
   diff?: DiffComparison;
   external?: ExternalOverlaySummary;
   libyear?: LibyearSummary;
+  architecture?: ArchitectureSummary;
 }
 
 export interface AnalyzeOptions {
   rootDir: string;
+  arch?: boolean;
+  archConfigPath?: string;
   /** @deprecated Prefer `coveragePath`, which accepts LCOV, Go coverprofile, or JaCoCo XML. */
   lcovPath?: string;
   coveragePath?: string | string[];
