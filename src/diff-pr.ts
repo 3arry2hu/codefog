@@ -4,12 +4,15 @@ import * as os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { analyzeRepository } from "./analyzer.js";
+import { boundaryViolationKey } from "./architecture-contract.js";
 import { CODEFOG_COMMAND } from "./cli-command.js";
 import { extractRuntimeFunctionFingerprints } from "./git-freshness.js";
 import { truncateMiddle } from "./path-utils.js";
 import { STATE_COLORS, STATE_EVIDENCE_RANK, STATE_URGENCY_ORDER } from "./scoring.js";
+import { compareStructuralRot } from "./structural-rot.js";
 import { detectDeletedDocClaimsAgainstRef } from "./verify.js";
 import type {
+  BoundaryViolation,
   CodefogReport,
   DiffComparison,
   EvidenceState,
@@ -21,7 +24,7 @@ const execFileAsync = promisify(execFile);
 
 async function runGit(rootDir: string, args: string[]): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("git", args, { cwd: rootDir });
+    const { stdout } = await execFileAsync("git", args, { cwd: rootDir, maxBuffer: 10 * 1024 * 1024 });
     return stdout;
   } catch {
     return null;
@@ -29,17 +32,14 @@ async function runGit(rootDir: string, args: string[]): Promise<string | null> {
 }
 
 export async function resolveBaseRef(rootDir: string, ref: string): Promise<string | null> {
-  const sha = await runGit(rootDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  const sha = await runGit(rootDir, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
   return sha?.trim() || null;
 }
 
 async function listTrackedFilesAtRef(rootDir: string, ref: string): Promise<string[]> {
-  const out = await runGit(rootDir, ["ls-tree", "-r", "--name-only", ref]);
+  const out = await runGit(rootDir, ["ls-tree", "-r", "-z", "--name-only", ref]);
   if (!out) return [];
-  return out
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return out.split("\0").filter(Boolean);
 }
 
 export async function analyzeBaselineAtRef(
@@ -49,6 +49,8 @@ export async function analyzeBaselineAtRef(
     docs?: boolean;
     checkExternalLinks?: boolean;
     runDocs?: boolean;
+    arch?: boolean;
+    archConfigPath?: string;
   },
 ): Promise<CodefogReport | null> {
   const tracked = await listTrackedFilesAtRef(rootDir, baseRef);
@@ -72,19 +74,29 @@ export async function analyzeBaselineAtRef(
 
     for (const relPath of tracked) {
       if (relPath.startsWith("node_modules/") || relPath.startsWith(".git/")) continue;
-      const content = await runGit(rootDir, ["show", `${baseRef}:${relPath}`]);
+      const content = await runGit(rootDir, ["show", `${baseRef}:./${relPath}`]);
       if (content === null) continue;
       const fullPath = path.join(tmpBase, relPath);
       await fs.mkdir(path.dirname(fullPath), { recursive: true });
       await fs.writeFile(fullPath, content, "utf8");
     }
 
+    let archConfigPath: string | undefined;
+    if (options?.archConfigPath !== undefined) {
+      const selected = path.resolve(rootDir, options.archConfigPath);
+      const relative = path.relative(rootDir, selected);
+      const external = relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+      if (external) archConfigPath = selected;
+      else if (tracked.includes(relative.split(path.sep).join("/"))) archConfigPath = relative;
+    }
     return await analyzeRepository({
       rootDir: tmpBase,
+      arch: options?.arch,
+      archConfigPath,
       ...(options?.docs ? { docs: true } : {}),
       ...(options?.checkExternalLinks ? { checkExternalLinks: true } : {}),
       ...(options?.runDocs ? { runDocs: true } : {}),
-    });
+    }, new Set(tracked));
   } catch {
     return null;
   } finally {
@@ -96,10 +108,15 @@ export async function computeDiffComparison(
   rootDir: string,
   baseRef: string,
   currentReport: CodefogReport,
+  options?: { archConfigPath?: string },
 ): Promise<DiffComparison | undefined> {
+  const baseCommit = await resolveBaseRef(rootDir, baseRef);
+  if (!baseCommit) return undefined;
   const docsEnabled = currentReport.summary.docTrustScore !== undefined;
-  const baseReport = await analyzeBaselineAtRef(rootDir, baseRef, {
+  const baseReport = await analyzeBaselineAtRef(rootDir, baseCommit, {
     docs: docsEnabled,
+    arch: currentReport.architecture !== undefined,
+    archConfigPath: options?.archConfigPath,
   });
   if (!baseReport) return undefined;
 
@@ -124,7 +141,7 @@ export async function computeDiffComparison(
       continue;
     }
 
-    const baseSource = await runGit(rootDir, ["show", `${baseRef}:${curFile.path}`]);
+    const baseSource = await runGit(rootDir, ["show", `${baseCommit}:./${curFile.path}`]);
     const curSource = curFile.lines.join("\n");
     if (baseSource === null || baseSource.replace(/\r\n/g, "\n") !== curSource) {
       changedFiles.push(curFile.path);
@@ -205,8 +222,17 @@ export async function computeDiffComparison(
         !baseReturnedKeys.has(`${c.file}:${c.referentText}`) &&
         !baseReturnedKeys.has(`${c.file}:${c.rawText}`),
     );
-    deletedDocClaims = await detectDeletedDocClaimsAgainstRef(rootDir, baseRef);
+    deletedDocClaims = await detectDeletedDocClaimsAgainstRef(rootDir, baseCommit);
   }
+
+  const activeBaseViolations = new Set(
+    (baseReport.architecture?.boundaryViolations ?? [])
+      .filter((violation) => !violation.baselined)
+      .map((violation) => boundaryViolationKey(violation.baselineKey)),
+  );
+  const newBoundaryViolations = currentReport.architecture?.boundaryViolations.filter(
+    (violation) => !violation.baselined && !activeBaseViolations.has(boundaryViolationKey(violation.baselineKey)),
+  );
 
   return {
     baseRef,
@@ -215,6 +241,8 @@ export async function computeDiffComparison(
     fogReturnedFiles,
     weakenedFiles,
     changedFiles,
+    ...(newBoundaryViolations ? { newBoundaryViolations } : {}),
+    structuralRot: await compareStructuralRot(rootDir, baseCommit, baseReport.files, currentReport.files),
     beforeSummary: {
       trustScore: baseReport.summary.trustScore,
       ...(docsEnabled
@@ -452,6 +480,58 @@ export function renderPrCommentDocSection(
   return section;
 }
 
+function markdownCode(text: string): string {
+  const singleLine = text.replace(/[\r\n]/g, " ");
+  const backticks = singleLine.match(/`+/g) ?? [];
+  const delimiter = "`".repeat(1 + Math.max(0, ...backticks.map((run) => run.length)));
+  const padding = /^(?:`| )|(?:`| )$/.test(singleLine) ? " " : "";
+  return `${delimiter}${padding}${singleLine}${padding}${delimiter}`;
+}
+
+function markdownText(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/[\\`*_[\]~]/g, "\\$&");
+}
+
+function renderStructuralArchitectureDelta(diff: DiffComparison | undefined, violations: BoundaryViolation[]): string[] {
+  const structural = diff?.structuralRot;
+  const spikeRows = (structural?.complexitySpikes ?? []).map((spike) =>
+    `${markdownCode(`${spike.file}:${spike.line}`)} ${markdownCode(spike.symbol)} · ${spike.before} → ${spike.after} (+${spike.delta})`,
+  );
+  const maskingRows = (structural?.addedErrorMasking ?? []).map((masking) =>
+    `${markdownCode(`${masking.file}:${masking.line}`)} · ${markdownText(masking.pattern)}`,
+  );
+  const duplicationRows = (structural?.addedDuplicatedBlocks ?? []).map((block) =>
+    `${markdownCode(`${block.file}:${block.startLine}-${block.endLine}`)} ↔ ${markdownCode(`${block.duplicateFile}:${block.duplicateStartLine}-${block.duplicateEndLine}`)}`,
+  );
+  const violationRows = violations.map((violation) =>
+    `${markdownCode(violation.from)} → ${markdownCode(violation.to)} at ${markdownCode(violation.file)} · ${markdownText(violation.explanation ?? violation.reason)}`,
+  );
+  const sections = [
+    { title: "New boundary violations", rows: violationRows },
+    { title: "Complexity spikes", rows: spikeRows },
+    { title: "Added error masking", rows: maskingRows },
+    { title: "Added duplicated blocks", rows: duplicationRows },
+  ].filter(({ rows }) => rows.length > 0);
+  if (sections.length === 0) return [];
+
+  const visiblePerCategory = 5;
+  return [
+    "### Structural & Architecture Delta",
+    "",
+    ...sections.flatMap(({ title, rows }) => [
+      `- **${title} (${rows.length})**`,
+      ...rows.slice(0, visiblePerCategory).map((row) => `  - ${row}`),
+      ...(rows.length > visiblePerCategory ? [`  - ${rows.length - visiblePerCategory} more in the JSON report`] : []),
+    ]),
+    "",
+  ];
+}
+
 export function renderPrCommentMarkdown(report: CodefogReport): string {
   const diff = report.diff;
   const before = diff?.beforeSummary;
@@ -475,15 +555,21 @@ export function renderPrCommentMarkdown(report: CodefogReport): string {
     return `| **${label}** | ${prevVal}${cellSuffix} | **${nowVal}${cellSuffix}** | ${delta} |`;
   };
 
-  const alerted =
+  const evidenceAlert =
     diff !== undefined &&
     (diff.coverageUpEvidenceDown || diff.fogReturnedFiles.length > 0 || diff.weakenedFiles.length > 0);
+  const newViolations = diff?.newBoundaryViolations?.filter((violation) => !violation.baselined) ?? [];
+  const boundaryAlert = newViolations.length > 0;
+  const headline = boundaryAlert
+    ? `PR introduces ${newViolations.length} unbaselined architecture boundary violation${newViolations.length === 1 ? "" : "s"}.`
+    : diff?.alertHeadline ?? "Repository fog scan completed.";
 
   const lines: string[] = [
     `## 🌫️ codefog PR Evidence Report`,
     "",
-    alerted ? "> [!WARNING]" : "> [!NOTE]",
-    `> **${diff?.alertHeadline ?? "Repository fog scan completed."}**`,
+    evidenceAlert || boundaryAlert ? "> [!WARNING]" : "> [!NOTE]",
+    `> **${headline}**`,
+    ...(boundaryAlert && evidenceAlert ? [`> ${diff?.alertHeadline}`] : []),
     "",
     `![codefog PR evidence by changed file](./pr-diff.svg)`,
     "",
@@ -502,11 +588,12 @@ export function renderPrCommentMarkdown(report: CodefogReport): string {
       ? ["", "> [!NOTE]", "> Base coverage unavailable: coverage-derived before-metrics are not compared."]
       : []),
     "",
+    ...renderStructuralArchitectureDelta(diff, newViolations),
   ];
 
-  const codeFindings = hasDocs
-    ? report.findings.filter((f) => f.subjectType !== "doc")
-    : report.findings;
+  const codeFindings = report.findings.filter(
+    (finding) => finding.subjectType !== "architecture" && (!hasDocs || finding.subjectType !== "doc"),
+  );
 
   if (codeFindings.length > 0) {
     lines.push(`### Top Findings`, "");

@@ -1,6 +1,12 @@
 // Public domain types & report schema
 export type {
   AnalyzeOptions,
+  ArchitectureCycle,
+  ArchitectureEdge,
+  ArchitectureImport,
+  ArchitectureSummary,
+  BoundaryViolation,
+  BoundaryViolationKey,
   CodefogReport,
   CountByState,
   DeletedDocClaimEvent,
@@ -16,11 +22,14 @@ export type {
   FileSummary,
   FileSymbolRegion,
   Finding,
+  ImplicitCoupling,
   LibyearDependencyDrift,
   LibyearSummary,
   LocByState,
   ModuleSummary,
+  StructuralRotDelta,
   SurvivingMutant,
+  UnstableHub,
 } from "./types.js";
 
 // Core repository analysis & verification entry points
@@ -110,6 +119,16 @@ export {
   type PolyglotRepoAstEvidence,
   type SupportedLanguageId,
 } from "./polyglot.js";
+
+export {
+  getLanguageAdapter,
+  LANGUAGE_ADAPTERS,
+  tsLanguageAdapter,
+  type FileDependencyContext,
+  type FileDependencyEdge,
+  type FunctionLineSpan,
+  type FunctionStructureMetrics,
+} from "./adapters/index.js";
 
 // Renderers, PR diff & CLI
 export { renderHtmlFogMap, writeHtmlFogMap } from "./html-report.js";

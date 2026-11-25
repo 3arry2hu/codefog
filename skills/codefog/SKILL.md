@@ -25,6 +25,7 @@ Drive the repository from unverified or degraded test coverage to verified behav
    npx --yes @barryzhu/codefog@latest --docs --json --fail-on none
    ```
    *(Note: `.codefog/report.html` is automatically generated on default runs.)*
+3. Add `--arch` to inspect module dependencies and their downstream impact. A repository with `.codefog/architecture.json` enables this automatically. If a Knip report is available, add `--knip <path>` to identify unused files and exports in fog.
 
 **Completion criterion**: You have the current `Trust Score`, `Doc Trust Score`, metrics breakdown, five-state LOC and Doc Claim counts, and the ranked list of `findings`.
 
@@ -66,6 +67,12 @@ Unless the user specifies a custom threshold, set the optimization target to:
 
 Iterate through the highest-risk findings in priority order (`fog-returned` → `fog` → `weak-evidence`). Skip every finding whose `agentReady` is `false`. Those are Coupled Assertions still in Self-proof Fog, or an Oracle Contest against an Independent Expectation or Historical Defect. Do not edit the outcome assertion literal to match the current return value. Stop and ask a human to confirm the expectation or defect record.
 
+Check structural signals before changing tests or production code.
+
+- **`dead-code-fog`**. Confirm whether the file or export is used, including indirect entry points. Delete confirmed dead code before adding evidence. Never add tests for confirmed dead code to raise Trust Score.
+- **Unstable Hub**. Review its downstream dependencies and the scope of any Fog Returned before changing the hub.
+- **Cognitive Complexity above 15 or error masking**. Refactor in small behavior-preserving steps. Run `codefog verify <file> --mutants` after each step.
+
 ### 3.1 Strengthen Test Evidence with Outcome Assertions
 - Read the production function at `location.file` (`startLine`–`endLine`) and its associated test file.
 - Write or update tests with explicit **Outcome Assertions** on concrete return values, state transitions, boundary conditions, and expected error payloads:
@@ -83,6 +90,7 @@ npx --yes @barryzhu/codefog@latest verify <file> --mutants --lines <startLine>-<
 - **If `verify` exits with `1`**:
   - Inspect the reported **surviving mutants** (e.g. `line 42: '<=' -> '<'`) or **body-clearance survival** (pseudo-tested method).
   - Add boundary and behavioral assertions that specifically fail when those mutations are injected.
+  - For a Boundary Violation, follow its reported reason and route the dependency through an allowed module or public entry point.
   - Re-run `codefog verify` until it exits with `0` (`PASS`).
 
 ### 3.3 Refresh Coverage & Re-evaluate Repository State
@@ -118,7 +126,7 @@ Once the code verification loop converges, enter the **文档同步 (Documentati
 
 ## Step 5: Final Convergence Report
 
-Once the target goal is achieved (and `npx --yes @barryzhu/codefog@latest --docs --fail-on returned` and `--fail-on doc-returned` exit `0`), report the before/after comparison:
+Run the convergence gate before reporting. Use `--fail-on returned` for code and `--docs --fail-on returned,doc-returned` when documentation is in scope. If the repository has an Architecture Contract, use `--fail-on returned,arch-violation` and append `,doc-returned` when documentation is in scope. After the gate exits `0` and the target goal is met, report the following.
 
 - **Trust Score Delta**: `<before> → <after> (+<delta>)`
 - **Doc Trust Score Delta**: `<before> → <after> (+<delta>)`

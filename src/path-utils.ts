@@ -116,3 +116,25 @@ export async function findFilesByExtensionInRepo(
   });
   return out;
 }
+
+export function deriveModulePath(filePath: string): string {
+  const parts = filePath.split("/").filter(Boolean);
+  if (parts.length >= 4 && parts[0] === "src" && parts[1] === "main" && parts[2] === "java") {
+    return "src/main/java";
+  }
+  if (
+    parts.length >= 3 &&
+    (parts[0] === "src" ||
+      parts[0] === "internal" ||
+      parts[0] === "pkg" ||
+      parts[0] === "cmd" ||
+      parts[0] === "crates" ||
+      parts[0] === "services")
+  ) {
+    return `${parts[0]}/${parts[1]}`;
+  }
+  if (parts.length >= 2) {
+    return parts[0]!;
+  }
+  return ".";
+}

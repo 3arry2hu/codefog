@@ -2,7 +2,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import ts from "typescript";
+import { loadArchitectureContract } from "./architecture-contract.js";
+import { analyzeArchitectureGraph } from "./architecture.js";
 import { analyzeTestAstEvidence, lookupFunctionAstEvidence } from "./ast-evidence.js";
 import {
   analyzeDocClaims,
@@ -15,14 +16,9 @@ import {
   type RepoSymbolIndex,
 } from "./doc-claims.js";
 import { createGitTimelineSession, type GitTimelineSession } from "./git-freshness.js";
-import {
-  extractPolyglotFunctionSpans,
-  getPolyglotAdapter,
-  isCompilerErrorOutput,
-  isPolyglotSourceFile,
-} from "./polyglot.js";
+import { getLanguageAdapter, tsLanguageAdapter } from "./adapters/index.js";
+import { isCompilerErrorOutput, type PolyglotCandidateMutation } from "./adapters/shared.js";
 import { assessSymbolOracle, lastCommitHash, loadOracleBundle } from "./oracle.js";
-import { countTsControlFlowDecisions } from "./ts-ast-utils.js";
 import type { DeletedDocClaimEvent, DocClaim, DocReferent, SurvivingMutant } from "./types.js";
 
 const execAsync = promisify(exec);
@@ -39,6 +35,8 @@ export interface VerifyOptions {
   expectationsPath?: string;
   defectsPath?: string;
   runDocs?: boolean;
+  arch?: boolean;
+  archConfigPath?: string;
 }
 
 export interface VerifyResult {
@@ -51,28 +49,9 @@ export interface VerifyResult {
   violations: string[];
 }
 
-interface CandidateMutation {
-  id: string;
-  line: number;
-  original: string;
-  mutated: string;
-  mutatedSource: string;
-  isBodyClearance?: boolean;
-}
-
 function countControlFlowBranches(sourceText: string, fileName: string): number {
-  if (isPolyglotSourceFile(fileName)) {
-    const spans = extractPolyglotFunctionSpans(sourceText, fileName);
-    return spans.reduce((acc, s) => acc + Math.max(0, s.cyclomaticComplexity - 1), 0);
-  }
-  const sf = ts.createSourceFile(
-    fileName,
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-  return countTsControlFlowDecisions(sf);
+  const adapter = getLanguageAdapter(fileName) ?? tsLanguageAdapter;
+  return adapter.countControlFlowBranches(sourceText, fileName);
 }
 
 function extractFunctionNamesInRange(
@@ -81,57 +60,14 @@ function extractFunctionNamesInRange(
   startLine?: number,
   endLine?: number,
 ): string[] {
-  if (isPolyglotSourceFile(fileName)) {
-    const spans = extractPolyglotFunctionSpans(sourceText, fileName);
-    return spans
-      .filter((s) => {
-        if (startLine !== undefined && endLine !== undefined) {
-          return !(s.endLine < startLine || s.startLine > endLine);
-        }
-        return true;
-      })
-      .map((s) => s.name);
-  }
-  const sf = ts.createSourceFile(
-    fileName,
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-  const names: string[] = [];
-
-  function checkAndAdd(name: string, node: ts.Node): void {
-    const fnStart = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-    const fnEnd = sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
-    if (startLine !== undefined && endLine !== undefined) {
-      if (fnEnd < startLine || fnStart > endLine) return;
-    }
-    names.push(name);
-  }
-
-  function visit(node: ts.Node): void {
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      checkAndAdd(node.name.text, node);
-      return;
-    }
-    if (ts.isMethodDeclaration(node) && node.name) {
-      checkAndAdd(node.name.getText(sf), node);
-      return;
-    }
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer &&
-      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
-    ) {
-      checkAndAdd(node.name.text, node);
-      return;
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(sf);
-  return names;
+  const adapter = getLanguageAdapter(fileName) ?? tsLanguageAdapter;
+  return adapter.extractFunctionSpans(sourceText, fileName)
+    .filter((span) =>
+      startLine === undefined ||
+      endLine === undefined ||
+      (span.endLine >= startLine && span.startLine <= endLine),
+    )
+    .map((span) => span.name);
 }
 
 export function generateCandidateMutations(
@@ -139,98 +75,9 @@ export function generateCandidateMutations(
   fileName: string,
   startLine?: number,
   endLine?: number,
-): CandidateMutation[] {
-  const polyAdapter = getPolyglotAdapter(fileName);
-  if (polyAdapter) {
-    return polyAdapter.generateCandidateMutations(sourceText, startLine, endLine);
-  }
-  const sf = ts.createSourceFile(
-    fileName,
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-
-  const candidates: CandidateMutation[] = [];
-  let seq = 1;
-
-  function inLineRange(node: ts.Node): { ok: boolean; line: number } {
-    const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-    if (startLine !== undefined && line < startLine) return { ok: false, line };
-    if (endLine !== undefined && line > endLine) return { ok: false, line };
-    return { ok: true, line };
-  }
-
-  function addReplacement(node: ts.Node, replacement: string, line: number): void {
-    const start = node.getStart(sf);
-    const end = node.getEnd();
-    const original = sourceText.slice(start, end);
-    if (original === replacement) return;
-    const mutatedSource = sourceText.slice(0, start) + replacement + sourceText.slice(end);
-    candidates.push({
-      id: `mut_${seq++}`,
-      line,
-      original,
-      mutated: replacement,
-      mutatedSource,
-    });
-  }
-
-  const binaryMutatorMap: Partial<Record<ts.SyntaxKind, string[]>> = {
-    [ts.SyntaxKind.GreaterThanEqualsToken]: [">", "<"],
-    [ts.SyntaxKind.LessThanEqualsToken]: ["<", ">"],
-    [ts.SyntaxKind.GreaterThanToken]: [">=", "<="],
-    [ts.SyntaxKind.LessThanToken]: ["<=", ">="],
-    [ts.SyntaxKind.EqualsEqualsEqualsToken]: ["!=="],
-    [ts.SyntaxKind.ExclamationEqualsEqualsToken]: ["==="],
-    [ts.SyntaxKind.EqualsEqualsToken]: ["!="],
-    [ts.SyntaxKind.ExclamationEqualsToken]: ["=="],
-    [ts.SyntaxKind.PlusToken]: ["-"],
-    [ts.SyntaxKind.MinusToken]: ["+"],
-    [ts.SyntaxKind.AsteriskToken]: ["/"],
-    [ts.SyntaxKind.SlashToken]: ["*"],
-    [ts.SyntaxKind.AmpersandAmpersandToken]: ["||"],
-    [ts.SyntaxKind.BarBarToken]: ["&&"],
-  };
-
-  function visit(node: ts.Node): void {
-    const { ok, line } = inLineRange(node);
-    if (ok) {
-      if (ts.isBinaryExpression(node)) {
-        const replacements = binaryMutatorMap[node.operatorToken.kind];
-        if (replacements) {
-          const leftText = node.left.getText(sf);
-          const rightText = node.right.getText(sf);
-          for (const op of replacements) {
-            addReplacement(node, `${leftText} ${op} ${rightText}`, line);
-          }
-        }
-      } else if (node.kind === ts.SyntaxKind.TrueKeyword) {
-        addReplacement(node, "false", line);
-      } else if (node.kind === ts.SyntaxKind.FalseKeyword) {
-        addReplacement(node, "true", line);
-      } else if (
-        (ts.isFunctionDeclaration(node) ||
-          ts.isMethodDeclaration(node) ||
-          ts.isArrowFunction(node) ||
-          ts.isFunctionExpression(node)) &&
-        node.body
-      ) {
-        // Method/function body clearance check (Pseudo-tested method detector)
-        const bodyLine = sf.getLineAndCharacterOfPosition(node.body.getStart(sf)).line + 1;
-        if (ts.isBlock(node.body) && node.body.statements.length > 0) {
-          addReplacement(node.body, "{ return undefined as any; }", bodyLine);
-        } else if (!ts.isBlock(node.body)) {
-          addReplacement(node.body, "(undefined as any)", bodyLine);
-        }
-      }
-    }
-    ts.forEachChild(node, visit);
-  }
-
-  visit(sf);
-  return candidates;
+): PolyglotCandidateMutation[] {
+  const adapter = getLanguageAdapter(fileName) ?? tsLanguageAdapter;
+  return adapter.generateCandidateMutations(sourceText, startLine, endLine, fileName);
 }
 
 async function runCommandOutcome(
@@ -276,31 +123,10 @@ async function checkAntiGamingSourceIntegrity(
 async function detectDefaultTestCommand(
   rootDir: string,
   associatedTestFiles: string[],
-  targetFile = "",
+  targetFile: string,
 ): Promise<string> {
-  const polyAdapter = getPolyglotAdapter(targetFile);
-  if (polyAdapter) {
-    return polyAdapter.defaultTestCommand(rootDir, associatedTestFiles);
-  }
-  const testTargets = associatedTestFiles.length > 0 ? ` ${associatedTestFiles.join(" ")}` : "";
-  try {
-    const pkgRaw = await fs.readFile(path.join(rootDir, "package.json"), "utf8");
-    const pkg = JSON.parse(pkgRaw) as {
-      scripts?: Record<string, string>;
-      devDependencies?: Record<string, string>;
-      dependencies?: Record<string, string>;
-    };
-    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-    if (deps.vitest || pkg.scripts?.test?.includes("vitest")) {
-      return `npx vitest run${testTargets}`;
-    }
-    if (deps.jest || pkg.scripts?.test?.includes("jest")) {
-      return `npx jest${testTargets}`;
-    }
-  } catch {
-    // Fallback below
-  }
-  return `node --test${testTargets}`;
+  const adapter = getLanguageAdapter(targetFile) ?? tsLanguageAdapter;
+  return adapter.defaultTestCommand(rootDir, associatedTestFiles);
 }
 
 export function isDocVerifyTarget(filePath: string): boolean {
@@ -897,15 +723,29 @@ export async function detectDeletedDocClaimsAgainstRef(
 }
 
 export async function verifyTargetWithMutants(options: VerifyOptions): Promise<VerifyResult> {
+  const rootDir = path.resolve(options.rootDir);
+  const contract = await loadArchitectureContract(rootDir, options.archConfigPath);
   if (isDocVerifyTarget(options.targetFile)) {
     return verifyDocTarget(options);
   }
-  const rootDir = path.resolve(options.rootDir);
   const absTarget = path.resolve(rootDir, options.targetFile);
   const relTarget = path.relative(rootDir, absTarget).replace(/\\/g, "/");
 
   const originalSource = await fs.readFile(absTarget, "utf8");
   const violations: string[] = [];
+  const architectureViolations: string[] = [];
+  if (options.arch || contract) {
+    const graph = await analyzeArchitectureGraph(rootDir, contract);
+    const module = graph.moduleByFile.get(relTarget);
+    const cyclicModules = graph.cycles.find((cycle) => module !== undefined && cycle.modules.includes(module));
+    for (const violation of graph.boundaryViolations) {
+      if (violation.baselined) continue;
+      const involvesTarget = violation.kind === "cycle"
+        ? cyclicModules?.modules[0] === violation.from
+        : violation.edges.some(({ from, to }) => from === relTarget || to === relTarget);
+      if (involvesTarget) architectureViolations.push(`Boundary Violation: ${violation.reason}`);
+    }
+  }
 
   // Gate 1: Anti-gaming check against deleting business source branches
   if (!options.allowSourceChange) {
@@ -965,6 +805,7 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
   }
 
   if (violations.length > 0) {
+    violations.push(...architectureViolations);
     return {
       passed: false,
       exitCode: 1,
@@ -987,11 +828,11 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
     return {
       passed: false,
       exitCode: 1,
-      summary: msg,
+      summary: [msg, ...architectureViolations].join("\n"),
       totalMutants: 0,
       killedMutants: 0,
       survivingMutants: [],
-      violations: [msg],
+      violations: [msg, ...architectureViolations],
     };
   }
 
@@ -1039,7 +880,8 @@ export async function verifyTargetWithMutants(options: VerifyOptions): Promise<V
     await fs.writeFile(absTarget, originalSource, "utf8");
   }
 
-  if (survivingMutants.length > 0) {
+  if (survivingMutants.length > 0 || architectureViolations.length > 0) {
+    violations.push(...architectureViolations);
     for (const sm of survivingMutants) {
       violations.push(
         `Surviving mutant [${sm.id}] at ${relTarget}:${sm.line}: '${sm.original}' -> '${sm.mutated}' survived test suite.`,

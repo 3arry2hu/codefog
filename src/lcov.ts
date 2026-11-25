@@ -471,6 +471,7 @@ export interface LoadedCoverage {
 export async function loadCoverageRecords(
   rootDir: string,
   explicitPaths?: string | string[],
+  options?: { allowEmpty?: boolean },
 ): Promise<LoadedCoverage> {
   const goModulePrefix = await readGoModulePrefix(rootDir);
   let repoGoFiles: string[] | undefined;
@@ -554,7 +555,7 @@ export async function loadCoverageRecords(
   const reportedFileCount = merged.size;
   await synthesizeZeroHitRecordsFromRepo(rootDir, merged);
 
-  if (merged.size === 0) {
+  if (merged.size === 0 && !options?.allowEmpty) {
     throw new Error(
       `No TypeScript/JavaScript, Go, Rust or Java source files found under ${rootDir}`,
     );

@@ -2,12 +2,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { analyzeRepository } from "./analyzer.js";
+import { analyzeRepository, getPlainTerminalEvidence } from "./analyzer.js";
 import { analyzeDocClaims } from "./doc-claims.js";
 import { computeDiffComparison, resolveBaseRef, writePrCommentArtifacts } from "./diff-pr.js";
 import { writeHtmlFogMap } from "./html-report.js";
 import { installCodefogSkill } from "./skill-installer.js";
-import { formatLevel1SummaryColor } from "./terminal-summary.js";
+import { formatLevel1SummaryColor, renderArchitectureSummary } from "./terminal-summary.js";
 import { verifyTargetWithMutants } from "./verify.js";
 import type { CodefogReport } from "./types.js";
 
@@ -85,7 +85,9 @@ function openInDefaultBrowser(filePath: string): void {
 }
 
 export function formatLevel1Summary(report: CodefogReport): string {
-  const { summary, repository, modules, findings } = report;
+  const { summary, repository } = report;
+  const { modules, findings } = getPlainTerminalEvidence(report);
+  const evidenceFindings = findings.filter((finding) => finding.subjectType !== "architecture");
   const unverifiedLoc = summary.totalLoc - summary.locByState.verified;
   const fogPct =
     summary.totalLoc > 0 ? Math.round((unverifiedLoc / summary.totalLoc) * 100) : 0;
@@ -115,16 +117,22 @@ export function formatLevel1Summary(report: CodefogReport): string {
     );
   }
 
-  if (findings.length > 0) {
+  if (evidenceFindings.length > 0) {
     lines.push("", "Top Findings:");
-    for (const f of findings.slice(0, 5)) {
+    for (const f of evidenceFindings.slice(0, 5)) {
       lines.push(
         `  - [${f.id}] ${f.location.file}:${f.location.startLine}-${f.location.endLine} (${f.title}) | ${f.state} | risk ${f.riskScore}`,
       );
     }
   }
 
+  if (report.architecture) lines.push(renderArchitectureSummary(report.architecture));
   return lines.join("\n") + "\n";
+}
+
+function readArchConfigArgument(value: string | undefined): string {
+  if (!value || value.startsWith("--")) throw new Error("--arch-config requires a path");
+  return value;
 }
 
 export async function runCli(
@@ -161,7 +169,7 @@ export async function runCli(
           "",
           "Usage:",
           "  codefog [rootDir] [options]",
-          "  codefog verify <targetFile> [--lines start-end] [--mutants] [--oracle] [--test-cmd <cmd>]",
+          "  codefog verify <targetFile> [--lines start-end] [--mutants] [--oracle] [--test-cmd <cmd>] [--arch] [--arch-config <path>]",
           "  codefog install-skill [--agent <codex|claude-code|codebuddy|cursor|all>] [--global|-g]",
           "",
           "Options:",
@@ -177,12 +185,14 @@ export async function runCli(
           "  --sarif <path>        Import SARIF 2.1.0 report(s) as external overlay (repeatable)",
           "  --knip <path>         Import Knip JSON report(s) as external overlay (repeatable)",
           "  --libyear <path>      Import libyear JSON report(s) as repository dependency overlay (repeatable)",
+          "  --arch                Analyze static dependencies, architecture boundaries and Git co-change",
+          "  --arch-config <path>  Use an Architecture Contract (auto-detects .codefog/architecture.json)",
           "  --diff <baseRef>      Compare against base git ref (e.g. origin/main)",
           "  --html <path>         Output path for interactive HTML Fog Map (default: .codefog/report.html)",
           "  --pr-comment [dir]    Write PR comment Markdown and SVG artifacts",
           "  --json                Output full JSON report to stdout",
           "  --open                Open HTML Fog Map in default browser",
-          "  --fail-on <policy>    Exit gate policy: returned | doc-returned | regression | any-fog | contested | none (default: returned)",
+          "  --fail-on <policies>  Comma-separated gates: returned, doc-returned, regression, any-fog, contested, arch-violation, none (default: returned)",
           "  --install-skill [ag]  Install AI agent skill for codex, claude-code, codebuddy, cursor (default: all)",
           "  -g, --global          Install AI skill into user home directory (~/.cursor/skills, ~/.claude/skills, etc.)",
           "  -v, --version         Print version",
@@ -259,12 +269,19 @@ export async function runCli(
       let expectationsPath: string | undefined;
       let defectsPath: string | undefined;
       let runDocs = false;
+      let arch = false;
+      let archConfigPath: string | undefined;
 
       if (process.env.npm_command === "exec") {
         if (process.env.npm_config_mutants === "true") mutants = true;
         if (process.env.npm_config_oracle === "true") oracle = true;
         if (process.env.npm_config_allow_source_change === "true") allowSourceChange = true;
         if (process.env.npm_config_run_docs === "true") runDocs = true;
+        if (process.env.npm_config_arch === "true") arch = true;
+        const envArchConfig = process.env.npm_config_arch_config;
+        if (envArchConfig && envArchConfig !== "true" && envArchConfig !== "false") {
+          archConfigPath = envArchConfig;
+        }
         const envExpectations = process.env.npm_config_expectations;
         if (envExpectations && envExpectations !== "true" && envExpectations !== "false") {
           expectationsPath = envExpectations;
@@ -300,6 +317,10 @@ export async function runCli(
           allowSourceChange = true;
         } else if (arg === "--run-docs") {
           runDocs = true;
+        } else if (arg === "--arch") {
+          arch = true;
+        } else if (arg === "--arch-config") {
+          archConfigPath = readArchConfigArgument(argv[++i]);
         } else if (arg === "--root") {
           rootDir = path.resolve(argv[++i] ?? ".");
         } else if (arg === "--lines") {
@@ -341,6 +362,8 @@ export async function runCli(
         expectationsPath,
         defectsPath,
         runDocs,
+        arch,
+        archConfigPath,
       });
 
       if (verifyRes.passed) {
@@ -367,6 +390,8 @@ export async function runCli(
     let docsMode = false;
     let checkExternalLinks = false;
     let runDocs = false;
+    let arch = false;
+    let archConfigPath: string | undefined;
     const sarifPaths: string[] = [];
     const knipPaths: string[] = [];
     const libyearPaths: string[] = [];
@@ -382,6 +407,10 @@ export async function runCli(
         checkExternalLinks = true;
       } else if (arg === "--run-docs") {
         runDocs = true;
+      } else if (arg === "--arch") {
+        arch = true;
+      } else if (arg === "--arch-config") {
+        archConfigPath = readArchConfigArgument(argv[++i]);
       } else if (arg === "--root") {
         rootDir = path.resolve(argv[++i] ?? ".");
       } else if (arg === "--coverage") {
@@ -433,6 +462,7 @@ export async function runCli(
       "regression",
       "any-fog",
       "contested",
+      "arch-violation",
     ]);
 
     // Recover options if `npm exec` / `npx` consumed `--<flag>=<val>` into `npm_config_*` env vars
@@ -459,6 +489,7 @@ export async function runCli(
       if (envKnip) knipPaths.push(envKnip);
       const envLibyear = envVal("npm_config_libyear");
       if (envLibyear) libyearPaths.push(envLibyear);
+      archConfigPath ??= envVal("npm_config_arch_config");
       const envDiff = envVal("npm_config_diff");
       if (envDiff && !diffBase) diffBase = envDiff;
       const envHtml = envVal("npm_config_html");
@@ -474,12 +505,13 @@ export async function runCli(
       if (process.env.npm_config_docs === "true") docsMode = true;
       if (process.env.npm_config_check_external_links === "true") checkExternalLinks = true;
       if (process.env.npm_config_run_docs === "true") runDocs = true;
+      if (process.env.npm_config_arch === "true") arch = true;
     }
 
     // Classify positional arguments so that `npm exec` / `npx` stripping `--coverage`,
     // `--mutation-report`, `--fail-on`, `--html`, or `--diff` never mistakes a file path for `rootDir`
     for (const pos of positional) {
-      if (validFailOnPolicies.has(pos)) {
+      if (pos.split(",").every((policy) => validFailOnPolicies.has(policy.trim()))) {
         let isDir = false;
         try {
           isDir = (await fs.stat(path.resolve(rootDir, pos))).isDirectory();
@@ -555,9 +587,11 @@ export async function runCli(
       }
     }
 
-    if (!validFailOnPolicies.has(failOn)) {
+    const failPolicies = new Set(failOn.split(",").map((policy) => policy.trim()));
+    const invalidPolicy = [...failPolicies].find((policy) => !validFailOnPolicies.has(policy));
+    if (invalidPolicy !== undefined) {
       io.stderr(
-        `Error: Invalid --fail-on policy '${failOn}'. Expected one of: returned, doc-returned, regression, any-fog, contested, none.\n`,
+        `Error: Invalid --fail-on policy '${invalidPolicy}'. Expected one of: ${[...validFailOnPolicies].join(", ")}.\n`,
       );
       return 1;
     }
@@ -571,6 +605,8 @@ export async function runCli(
 
     const report = await analyzeRepository({
       rootDir,
+      arch,
+      archConfigPath,
       coveragePath: coveragePaths.length > 0 ? coveragePaths : undefined,
       lcovPath,
       mutationReportPath,
@@ -591,7 +627,7 @@ export async function runCli(
     }
 
     if (diffBase) {
-      const diff = await computeDiffComparison(rootDir, diffBase, report);
+      const diff = await computeDiffComparison(rootDir, diffBase, report, { archConfigPath });
       if (!diff) {
         io.stderr(
           `Error: --diff could not analyze base ref '${diffBase}': the commit has no tracked source files, or analyzing it failed.\n`,
@@ -617,14 +653,17 @@ export async function runCli(
       io.stdout(io.color ? formatLevel1SummaryColor(report, writtenHtml) : formatLevel1Summary(report));
     }
 
-    if (failOn === "none") return 0;
-    if (failOn === "contested" && report.summary.metrics.contestedOracles > 0) {
+    if (failPolicies.has("arch-violation") &&
+        report.architecture?.boundaryViolations.some((violation) => !violation.baselined)) {
       return 1;
     }
-    if (failOn === "returned" && report.summary.locByState["fog-returned"] > 0) {
+    if (failPolicies.has("contested") && report.summary.metrics.contestedOracles > 0) {
       return 1;
     }
-    if (failOn === "doc-returned") {
+    if (failPolicies.has("returned") && report.summary.locByState["fog-returned"] > 0) {
+      return 1;
+    }
+    if (failPolicies.has("doc-returned")) {
       const docReturnedCount =
         report.summary.docClaimsByState !== undefined
           ? report.summary.docClaimsByState["fog-returned"]
@@ -640,15 +679,16 @@ export async function runCli(
       }
     }
     if (
-      failOn === "regression" &&
+      failPolicies.has("regression") &&
       (report.summary.locByState["fog-returned"] > 0 ||
         Boolean(report.diff?.coverageUpEvidenceDown) ||
-        (report.diff?.weakenedFiles.length ?? 0) > 0)
+        (report.diff?.weakenedFiles.length ?? 0) > 0 ||
+        (report.diff?.newBoundaryViolations?.length ?? 0) > 0)
     ) {
       return 1;
     }
     if (
-      failOn === "any-fog" &&
+      failPolicies.has("any-fog") &&
       report.summary.locByState.fog +
         report.summary.locByState["fog-returned"] +
         report.summary.locByState["weak-evidence"] +

@@ -70,7 +70,18 @@ const STATE_WEIGHTS: Record<EvidenceState, number> = {
   verified: 0.0,
 };
 
-export function computeRiskScore(params: {
+type StructureRiskInputs = {
+  cognitiveComplexity?: number;
+  errorMaskingLines?: readonly number[];
+};
+
+export const HIGH_COGNITIVE_COMPLEXITY = 15;
+
+export function hasStructuralRisk(params: StructureRiskInputs): boolean {
+  return (params.cognitiveComplexity ?? 0) > HIGH_COGNITIVE_COMPLEXITY || Boolean(params.errorMaskingLines?.length);
+}
+
+export function computeRiskScore(params: StructureRiskInputs & {
   unverifiedLoc: number;
   churn90d: number;
   cyclomaticComplexity: number;
@@ -85,8 +96,10 @@ export function computeRiskScore(params: {
   const complexityFactor = Math.log(1 + Math.max(1, params.cyclomaticComplexity));
   const externalCount = Math.max(0, params.externalIssuesCount ?? 0);
   const externalMultiplier = 1 + Math.log(1 + externalCount);
+  const structureMultiplier = hasStructuralRisk(params) ? 1.25 : 1;
 
-  const raw = locFactor * churnFactor * complexityFactor * weight * externalMultiplier;
+  const raw =
+    locFactor * churnFactor * complexityFactor * weight * externalMultiplier * structureMultiplier;
   // Normalize smoothly into [0.0, 10.0]
   const normalized = Math.min(10.0, Math.max(0.1, (raw / (raw + 3.5)) * 10));
   return Math.round(normalized * 10) / 10;
